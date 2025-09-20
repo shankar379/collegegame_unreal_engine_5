@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "738477555337",
+    "firebase_url": "https://shanavverse-default-rtdb.firebaseio.com",
+    "project_id": "shanavverse",
+    "storage_bucket": "shanavverse.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:738477555337:android:1323dd095344064adc5058",
+        "android_client_info": {
+          "package_name": "com.shanavverse.collegegame"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAAhI3XACsnOjisR_kRLuZ_TpnXJpo4WVQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
