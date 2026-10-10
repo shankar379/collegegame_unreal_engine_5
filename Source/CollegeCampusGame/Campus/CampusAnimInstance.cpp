@@ -8,17 +8,23 @@
 
 namespace CampusClips
 {
-	// Locomotion sets are laid out as Idle, Walk F/B/L/R, Run F/B/L/R, Sprint.
+	// Eight directions, clockwise from forward (angle = 45 deg * index): F, FR, R, BR, B, BL, L, FL.
+	constexpr int32 NumDirs = 8;
+
+	// Locomotion sets: Idle, then 8 directions per gait tier.
 	enum : int32
 	{
-		Unarmed = 0,
-		Crouch = 10,       // Idle, F/B/L/R (single tier)
-		Rifle = 15,        // Idle, Walk F/B/L/R, Jog F/B/L/R
-		JumpStart = 24, Fall, Land,
-		RifleJumpStart, RifleFall, RifleLand,
+		Unarmed = 0,       // Idle, Walk x8, Run x8, Sprint F/FR/FL
+		Crouch = 20,       // Idle, Move x8
+		Rifle = 29,        // Idle, Walk x8, Jog x8
+		JumpStart = 46, Fall, Land,
 		Fire, Reload, Equip,
+		MantleStand, MantleWalk, MantleRun,
+		JumpStartWalk, JumpStartRun, JumpStartSprint,
+		LandWalk, LandRun, LandSprint,
 		Num
 	};
+	constexpr int32 SprintF = Unarmed + 17, SprintFR = Unarmed + 18, SprintFL = Unarmed + 19;
 
 	struct FClipDef
 	{
@@ -36,57 +42,102 @@ namespace CampusClips
 		float FirstStep = 0.f;
 	};
 
-	// Speeds and drifts measured from the clips themselves (root or pelvis travel / clip length).
+	// Generated from the clips (Tools: animset2.py): speed = root or pelvis travel / length, pelvis drift,
+	// step cycles and the time the left foot first leads along the travel direction.
 	static const FClipDef Defs[Num] =
 	{
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Idle.A_Idle"), 0.f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_F.A_Walk_F"), 200.f, FVector3f::ZeroVector, 4, 0.000f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_B.A_Walk_B"), 150.f, FVector3f::ZeroVector, 4, 0.602f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_FR.A_Walk_FR"), 200.f, FVector3f::ZeroVector, 4, 0.000f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_R.A_Walk_R"), 180.f, FVector3f::ZeroVector, 4, 0.033f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_BR.A_Walk_BR"), 150.f, FVector3f::ZeroVector, 4, 0.067f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_B.A_Walk_B"), 150.f, FVector3f::ZeroVector, 4, 0.067f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_BL.A_Walk_BL"), 150.f, FVector3f::ZeroVector, 4, 0.033f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_L.A_Walk_L"), 180.f, FVector3f::ZeroVector, 4, 0.517f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_R.A_Walk_R"), 180.f, FVector3f::ZeroVector, 4, 0.533f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_FL.A_Walk_FL"), 200.f, FVector3f::ZeroVector, 4, 0.017f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_F.A_Run_F"), 500.f, FVector3f::ZeroVector, 4, 0.600f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_B.A_Run_B"), 300.f, FVector3f::ZeroVector, 4, 0.285f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_FR.A_Run_FR"), 500.f, FVector3f::ZeroVector, 4, 0.567f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_R.A_Run_R"), 350.f, FVector3f::ZeroVector, 4, 0.537f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_BR.A_Run_BR"), 300.f, FVector3f::ZeroVector, 4, 0.570f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_B.A_Run_B"), 300.f, FVector3f::ZeroVector, 4, 0.604f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_BL.A_Run_BL"), 300.f, FVector3f::ZeroVector, 4, 0.537f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_L.A_Run_L"), 350.f, FVector3f::ZeroVector, 4, 0.571f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_R.A_Run_R"), 350.f, FVector3f::ZeroVector, 4, 0.235f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_FL.A_Run_FL"), 500.f, FVector3f::ZeroVector, 4, 0.567f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Sprint_F.A_Sprint_F"), 700.f, FVector3f::ZeroVector, 4, 0.467f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Sprint_FR.A_Sprint_FR"), 700.f, FVector3f::ZeroVector, 4, 0.467f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Sprint_FL.A_Sprint_FL"), 700.f, FVector3f::ZeroVector, 4, 0.467f },
 
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_Idle.A_Crouch_Idle"), 0.f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_F.A_Crouch_F"), 225.f, FVector3f::ZeroVector, 4, 0.000f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_B.A_Crouch_B"), 180.f, FVector3f::ZeroVector, 4, 0.536f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_FR.A_Crouch_FR"), 225.f, FVector3f::ZeroVector, 4, 0.033f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_R.A_Crouch_R"), 200.f, FVector3f::ZeroVector, 4, 0.033f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_BR.A_Crouch_BR"), 180.f, FVector3f::ZeroVector, 4, 0.033f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_B.A_Crouch_B"), 180.f, FVector3f::ZeroVector, 4, 0.067f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_BL.A_Crouch_BL"), 181.f, FVector3f::ZeroVector, 4, 0.033f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_L.A_Crouch_L"), 200.f, FVector3f::ZeroVector, 4, 0.067f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_R.A_Crouch_R"), 200.f, FVector3f::ZeroVector, 4, 0.567f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_FL.A_Crouch_FL"), 225.f, FVector3f::ZeroVector, 4, 0.033f },
 
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Idle.A_Rifle_Idle"), 0.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_F.A_Rifle_Walk_F"), 295.f, FVector3f(0.f, 453.f, 0.f), 2, 0.607f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_B.A_Rifle_Walk_B"), 291.f, FVector3f(0.f, -349.f, 0.f), 2, 0.100f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_L.A_Rifle_Walk_L"), 291.f, FVector3f(359.f, 0.f, 0.f), 2, 0.533f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_R.A_Rifle_Walk_R"), 291.f, FVector3f(-437.f, 0.f, 0.f), 2, 0.600f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_F.A_Rifle_Walk_F"), 295.f, FVector3f(-0.f, 453.f, 0.f), 2, 0.607f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_FR.A_Rifle_Walk_FR"), 295.f, FVector3f(-320.f, 320.f, 0.f), 2, 0.607f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_R.A_Rifle_Walk_R"), 291.f, FVector3f(-437.f, 0.f, 0.f), 2, 0.233f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_BR.A_Rifle_Walk_BR"), 302.f, FVector3f(-242.f, -242.f, 0.f), 2, 0.389f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_B.A_Rifle_Walk_B"), 291.f, FVector3f(-0.f, -349.f, 0.f), 2, 0.400f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_BL.A_Rifle_Walk_BL"), 302.f, FVector3f(242.f, -242.f, 0.f), 2, 0.389f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_L.A_Rifle_Walk_L"), 291.f, FVector3f(359.f, -0.f, 0.f), 2, 0.533f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_FL.A_Rifle_Walk_FL"), 295.f, FVector3f(320.f, 320.f, 0.f), 2, 0.607f },
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_F.A_Rifle_Run_F"), 604.f, FVector3f(0.f, 927.f, 0.f), 3, 0.135f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_B.A_Rifle_Run_B"), 574.f, FVector3f(0.f, -1033.f, 0.f), 4, 0.336f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_FR.A_Rifle_Run_FR"), 604.f, FVector3f(-1310.f, 1310.f, 0.f), 3, 0.135f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_R.A_Rifle_Run_R"), 582.f, FVector3f(-621.f, 0.f, 0.f), 2, 0.367f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_BR.A_Rifle_Run_BR"), 573.f, FVector3f(-730.f, -730.f, 0.f), 4, 0.118f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_B.A_Rifle_Run_B"), 574.f, FVector3f(0.f, -1033.f, 0.f), 4, 0.118f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_BL.A_Rifle_Run_BL"), 573.f, FVector3f(730.f, -730.f, 0.f), 4, 0.118f },
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_L.A_Rifle_Run_L"), 573.f, FVector3f(267.f, 0.f, 0.f), 1, 0.133f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_R.A_Rifle_Run_R"), 582.f, FVector3f(-621.f, 0.f, 0.f), 2, 0.100f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_FL.A_Rifle_Run_FL"), 604.f, FVector3f(655.f, 655.f, 0.f), 3, 0.135f },
 
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Start.A_Jump_Start"), 0.f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Fall.A_Jump_Fall"), 0.f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Land.A_Jump_Land"), 0.f },
-		// The rifle jump clips drop ~15 m on the pelvis (non-linear), so the air uses the unarmed clips
-		// with the rifle held by the upper body. Kept in the table so the indices stay stable.
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Jump_Start.A_Rifle_Jump_Start"), 0.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Jump_Fall.A_Rifle_Jump_Fall"), 0.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Jump_Land.A_Rifle_Jump_Land"), 0.f },
 
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Fire.A_Rifle_Fire"), 0.f },
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Reload.A_Rifle_Reload"), 0.f },
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Equip.A_Rifle_Equip"), 0.f },
+
+		// Mantle (hands on the ledge, pull up): root rises 100 cm; the character warps it to the real ledge.
+		{ TEXT("/Game/CampusAnims/Traversal/A_Mantle_Stand.A_Mantle_Stand"), 0.f },
+		{ TEXT("/Game/CampusAnims/Traversal/A_Mantle_Walk.A_Mantle_Walk"), 0.f },
+		{ TEXT("/Game/CampusAnims/Traversal/A_Mantle_Run.A_Mantle_Run"), 0.f },
+
+		// Speed-matched jumps (sample's walk / run / sprint takeoffs and landings).
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Start_Walk.A_Jump_Start_Walk"), 0.f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Start_Run.A_Jump_Start_Run"), 0.f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Start_Sprint.A_Jump_Start_Sprint"), 0.f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Land_Walk.A_Jump_Land_Walk"), 0.f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Land_Run.A_Jump_Land_Run"), 0.f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Land_Sprint.A_Jump_Land_Sprint"), 0.f },
 	};
+
+	/** Jump clip timing measured from each clip's root track: takeoff (root starts rising),
+	 *  apex (highest root) and touchdown (root back on the ground). Index: stand, walk, run, sprint. */
+	struct FJumpTiming { int32 Start; int32 Land; float Takeoff; float Apex; float Impact; };
+	static const FJumpTiming Jumps[4] =
+	{
+		{ JumpStart, Land, 0.36f, 0.81f, 0.52f },
+		{ JumpStartWalk, LandWalk, 0.57f, 1.05f, 0.49f },
+		{ JumpStartRun, LandRun, 0.23f, 0.70f, 0.50f },
+		{ JumpStartSprint, LandSprint, 0.33f, 0.79f, 0.50f },
+	};
+	inline int32 JumpKindForSpeed(float Speed)
+	{
+		return Speed < 60.f ? 0 : (Speed < 330.f ? 1 : (Speed < 560.f ? 2 : 3));
+	}
 
 	// Gait thresholds (cm/s) between the walk, run and sprint clips of each set, from the speeds above.
 	constexpr float UnarmedWalk = 200.f, UnarmedRun = 500.f, UnarmedSprint = 700.f;
 	constexpr float RifleWalk = 293.f, RifleRun = 600.f;
 
-	// Seconds of the jump start clip used before crossfading into the fall loop.
-	constexpr float JumpStartWindow = 0.4f;
-	constexpr float LandDuration = 0.45f;
+	// Landing plays from touchdown for this long, then hands back to locomotion.
+	constexpr float LandDuration = 0.4f;
 	constexpr float UpperBodyBlendIn = 0.15f;
 	constexpr float UpperBodyBlendOut = 0.2f;
 }
@@ -300,6 +351,11 @@ void UCampusAnimInstance::PlayEquip()
 	UpperBodyTime = 0.f;
 }
 
+const UAnimSequence* UCampusAnimInstance::GetMantleClip(int32 Kind) const
+{
+	return Clip(CampusClips::MantleStand + FMath::Clamp(Kind, 0, 2));
+}
+
 float UCampusAnimInstance::GetReloadDuration() const
 {
 	const UAnimSequence* Reload = Clip(CampusClips::Reload);
@@ -324,10 +380,15 @@ void UCampusAnimInstance::AddLocomotion(TArray<FCampusAnimSample>& Out, FGaitAcc
 		return;
 	}
 
-	// Four-way direction split: forward, back, left, right.
-	const float Radians = FMath::DegreesToRadians(DirectionDeg);
-	float DirWeights[4] = { FMath::Max(0.f, FMath::Cos(Radians)), FMath::Max(0.f, -FMath::Cos(Radians)), FMath::Max(0.f, -FMath::Sin(Radians)), FMath::Max(0.f, FMath::Sin(Radians)) };
-	const float DirTotal = DirWeights[0] + DirWeights[1] + DirWeights[2] + DirWeights[3];
+	// Eight-way: blend the two clips either side of the travel direction (real diagonal clips, so the
+	// legs never cross the way a forward + side mix does).
+	const float Clockwise = DirectionDeg < 0.f ? DirectionDeg + 360.f : DirectionDeg;
+	const float Sector = Clockwise / 45.f;
+	const int32 DirA = FMath::FloorToInt(Sector) % CampusClips::NumDirs;
+	const int32 DirB = (DirA + 1) % CampusClips::NumDirs;
+	const float BlendB = Sector - FMath::FloorToFloat(Sector);
+	const int32 Dirs[2] = { DirA, DirB };
+	const float DirWeights[2] = { 1.f - BlendB, BlendB };
 
 	const bool bRifleSet = FirstClip == CampusClips::Rifle;
 	const float WalkRef = bRifleSet ? CampusClips::RifleWalk : CampusClips::UnarmedWalk;
@@ -349,22 +410,37 @@ void UCampusAnimInstance::AddLocomotion(TArray<FCampusAnimSample>& Out, FGaitAcc
 		Out.Add({ Sequence, Time, Weight, true, Def.PelvisDrift });
 		Gait.Weight += Weight;
 		Gait.CycleLength += Weight * StepCycle;
-		Gait.RefSpeed += Weight * CampusClips::Defs[ClipIndex].RefSpeed;
+		Gait.RefSpeed += Weight * Def.RefSpeed;
+	};
+	// Sprint only has forward clips; side and back sectors fall back to the nearest forward one.
+	auto SprintClipFor = [](int32 Dir)
+	{
+		switch (Dir)
+		{
+		case 1: case 2: return CampusClips::SprintFR;
+		case 6: case 7: return CampusClips::SprintFL;
+		default: return CampusClips::SprintF;
+		}
 	};
 
-	for (int32 Dir = 0; Dir < 4; ++Dir)
+	const int32 TierSize = CampusClips::NumDirs;
+	for (int32 Index = 0; Index < 2; ++Index)
 	{
-		const float Weight = SetWeight * MoveAlpha * DirWeights[Dir] / DirTotal;
+		const float Weight = SetWeight * MoveAlpha * DirWeights[Index];
 		if (Weight <= UE_KINDA_SMALL_NUMBER)
 		{
 			continue;
 		}
+		const int32 Dir = Dirs[Index];
 		AddMoving(FirstClip + 1 + Dir, Weight * (1.f - RunAlpha));
 		if (bHasRunTier)
 		{
-			const float SprintWeight = Dir == 0 ? Weight * RunAlpha * SprintAlpha : 0.f;
-			AddMoving(FirstClip + 5 + Dir, Weight * RunAlpha - SprintWeight);
-			AddMoving(FirstClip + 9, SprintWeight);
+			const float SprintWeight = Weight * RunAlpha * SprintAlpha;
+			AddMoving(FirstClip + 1 + TierSize + Dir, Weight * RunAlpha - SprintWeight);
+			if (bHasSprint)
+			{
+				AddMoving(SprintClipFor(Dir), SprintWeight);
+			}
 		}
 	}
 }
@@ -434,6 +510,7 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		{
 			AirTime = 0.f;
 			bJumped = VerticalSpeed > 50.f;
+			JumpKind = CampusClips::JumpKindForSpeed(Speed);
 		}
 		AirTime += DeltaSeconds;
 	}
@@ -441,6 +518,7 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	{
 		LandWeight = 1.f;
 		LandTime = 0.f;
+		LandKind = CampusClips::JumpKindForSpeed(Speed);
 	}
 	bWasInAir = bInAir;
 	if (LandWeight > 0.f)
@@ -461,9 +539,8 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		MovePhase = FMath::Fmod(MovePhase + DeltaSeconds * PlayRate / FMath::Max(CycleLength, 0.1f), 1.f);
 	}
 
-	// Landing matters most when standing still; while moving, mostly keep the stride.
-	const float MoveAlpha = FMath::GetMappedRangeValueClamped(FVector2f(10.f, 80.f), FVector2f(0.f, 1.f), Speed);
-	const float Land = (1.f - AirWeight) * LandWeight * (1.f - 0.7f * MoveAlpha);
+	// The landing clip matches the landing speed (it keeps the stride), so it plays at full weight.
+	const float Land = (1.f - AirWeight) * LandWeight;
 	const float GroundScale = (1.f - AirWeight) * (1.f - Land);
 	for (FCampusAnimSample& Sample : Samples)
 	{
@@ -472,13 +549,39 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	if (AirWeight > UE_KINDA_SMALL_NUMBER)
 	{
-		const float StartWeight = bJumped ? 1.f - FMath::Clamp((AirTime - JumpStartWindow) / 0.2f, 0.f, 1.f) : 0.f;
-		AddOneShotPair(Samples, JumpStart, JumpStart, AirTime, AirWeight * StartWeight, false);
+		// From takeoff (the wind-up already happened on the ground) to the apex, then into the fall loop.
+		const CampusClips::FJumpTiming& Jump = CampusClips::Jumps[JumpKind];
+		const float Rise = Jump.Apex - Jump.Takeoff;
+		const float StartWeight = bJumped ? 1.f - FMath::Clamp((AirTime - Rise) / 0.2f, 0.f, 1.f) : 0.f;
+		AddOneShotPair(Samples, Jump.Start, Jump.Start, Jump.Takeoff + FMath::Min(AirTime, Rise + 0.2f), AirWeight * StartWeight, false);
 		AddOneShotPair(Samples, Fall, Fall, AirTime, AirWeight * (1.f - StartWeight), true);
 	}
 	if (Land > UE_KINDA_SMALL_NUMBER)
 	{
-		AddOneShotPair(Samples, CampusClips::Land, CampusClips::Land, LandTime, Land, false);
+		const CampusClips::FJumpTiming& Landing = CampusClips::Jumps[LandKind];
+		AddOneShotPair(Samples, Landing.Land, Landing.Land, Landing.Impact - 0.04f + LandTime, Land, false);
+	}
+
+	// Mantle / climb: one full-body clip driven by the character's traversal clock.
+	int32 TraversalKind = INDEX_NONE;
+	float TraversalTime = 0.f;
+	const bool bTraversing = Campus && Campus->GetTraversal(TraversalKind, TraversalTime);
+	Approach(TraversalWeight, bTraversing ? 1.f : 0.f, bTraversing ? 0.1f : 0.25f);
+	if (bTraversing)
+	{
+		LastTraversalKind = TraversalKind;
+		LastTraversalTime = TraversalTime;
+	}
+	if (TraversalWeight > UE_KINDA_SMALL_NUMBER && LastTraversalKind != INDEX_NONE)
+	{
+		for (FCampusAnimSample& Sample : Samples)
+		{
+			Sample.Weight *= 1.f - TraversalWeight;
+		}
+		if (const UAnimSequence* Mantle = Clip(MantleStand + LastTraversalKind))
+		{
+			Samples.Add({ Mantle, FMath::Min(LastTraversalTime, Mantle->GetPlayLength()), TraversalWeight, false });
+		}
 	}
 
 	// Upper-body one-shot (reload / equip), else hold the rifle while crouched.

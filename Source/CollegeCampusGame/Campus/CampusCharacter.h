@@ -14,6 +14,7 @@ class UCampusAnimInstance;
 class UInputAction;
 class UInputMappingContext;
 class USpringArmComponent;
+class UStaticMeshComponent;
 struct FInputActionValue;
 
 UCLASS()
@@ -50,6 +51,11 @@ public:
 	void AddTouchLook(const FVector2D& DegreesDelta);
 	void SetFireHeld(bool bHeld) { bFireHeld = bHeld; }
 	void SetAiming(bool bAim);
+
+	/** Free look (three.js eye button): orbit the camera only; body, aim and movement keep the real yaw. */
+	void SetFreeLookHeld(bool bHeld);
+	void AddFreeLook(float YawDegrees, float PitchDegrees);
+	bool IsFreeLooking() const { return bFreeLookHeld || !FreeLook.IsNearlyZero(0.1f); }
 	void ToggleSprint();
 	void ToggleCrouch();
 	void ToggleArmed();
@@ -58,7 +64,18 @@ public:
 	/** Server: apply a hit from another player. */
 	void ApplyHit(float Damage, AController* InstigatorController);
 
+	/** Jump button: climbs onto a ledge in front when there is one (mantle), otherwise jumps. */
+	void JumpPressed();
+
+	/** True while climbing; the anim instance plays the mantle clip at this time. Kind: 0 stand, 1 walk, 2 run. */
+	bool GetTraversal(int32& OutKind, float& OutTime) const;
+
+	/** World time of the last hit the server confirmed for this shooter (HUD hit-marker). */
+	float GetLastHitConfirmTime() const { return LastHitConfirmTime; }
+	bool WasLastHitAKill() const { return bLastHitKill; }
+
 protected:
+	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void PawnClientRestart() override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
@@ -100,8 +117,34 @@ private:
 	UFUNCTION(Server, Reliable)
 	void ServerReload();
 
+	/** Remote players see the shot: anim, tracer, and the mark where it hit the world. */
 	UFUNCTION(NetMulticast, Unreliable)
-	void MulticastFire();
+	void MulticastFire(FVector_NetQuantize End, FVector_NetQuantizeNormal Normal, bool bMark);
+
+	UFUNCTION(Client, Unreliable)
+	void ClientConfirmHit(bool bKill);
+
+	bool TryStartTraversal();
+	void StartTraversal(const FVector& StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind);
+	void TickTraversal(float DeltaSeconds);
+	void EndTraversal();
+	/** Mantle clip timing: when the root has finished rising, plus a short settle. */
+	static float TraversalEndTime(const class UAnimSequence* Clip);
+	/** When the clip's root has finished rising (hands done pulling up). */
+	static float RiseEndTime(const class UAnimSequence* Clip);
+	static FVector ClipRoot(const class UAnimSequence* Clip, float Time);
+	/** Where shots start for the tracer: the rifle muzzle. */
+	FVector GunPoint() const;
+
+	/** After the pose is final: grip in the right hand, barrel toward the left (support) hand. */
+	void UpdateGun();
+	void SpawnShotFx(const FVector& End, const FVector& Normal, bool bMark) const;
+
+	UFUNCTION(Server, Reliable)
+	void ServerStartTraversal(FVector_NetQuantize StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastStartTraversal(FVector_NetQuantize StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind);
 
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastUpperBody(bool bReload);
@@ -111,6 +154,10 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<UCameraComponent> FollowCamera;
+
+	/** The rifle model (Unreal template SM_Rifle), placed between the hands every frame. */
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	TObjectPtr<UStaticMeshComponent> Gun;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UInputMappingContext> InputMapping;
@@ -239,6 +286,30 @@ private:
 	float Health = 100.f;
 
 	bool bSprinting = false;
+
+	// Traversal (mantle) state, identical on every machine that runs it.
+	bool bTraversing = false;
+	uint8 TraversalKind = 0;
+	float TraversalTime = 0.f;
+	float TraversalEnd = 0.f;
+	float TraversalYaw = 0.f;
+	float TraversalScaleZ = 1.f;
+	float TraversalScaleForward = 1.f;
+	/** Distance from the wall face to the standing spot on top (part 2 of the climb). */
+	float TraversalOverTop = 0.f;
+	FVector TraversalStartFeet = FVector::ZeroVector;
+	FVector TraversalRootStart = FVector::ZeroVector;
+
+	/** Gun rotation relative to the right hand, captured while both hands hold it (used during reload). */
+	FQuat GunInHand = FQuat::Identity;
+	bool bGunInHandValid = false;
+
+	/** Camera-only offset from the control rotation, degrees (X yaw, Y pitch). */
+	FVector2D FreeLook = FVector2D::ZeroVector;
+	bool bFreeLookHeld = false;
+
+	float LastHitConfirmTime = -100.f;
+	bool bLastHitKill = false;
 	bool bFireHeld = false;
 	bool bDead = false;
 	FVector2D TouchMove = FVector2D::ZeroVector;

@@ -39,6 +39,12 @@ namespace TouchStyle
 	constexpr float FireSensitivity = 1.f;
 	constexpr float JoyReach = 1.6f;
 	constexpr float EdgeTurnRadPerSec = 2.4f;
+	// Free-look eye (hud.js / game.js): drag x2.2, keeps turning at 2.7 rad/s past 40% of the ring.
+	constexpr float FreeLookDragScale = 2.2f;
+	constexpr float FreeLookHoldRadPerSec = 2.7f;
+	constexpr float FreeLookDeadZone = 0.4f;
+	const FLinearColor EyeBack(FColor(20, 24, 30, 115));
+	const FLinearColor EyeRing(FColor(255, 255, 255, 191));
 }
 
 SCampusTouchControls::SCampusTouchControls()
@@ -137,6 +143,9 @@ SCampusTouchControls::FLayout SCampusTouchControls::MakeLayout(const FVector2D& 
 	L.Crouch = FromRight(L.W * 0.056f, 0.78f, 7.5f * U);
 	L.ProneR = 3.5f * U;
 	L.Prone = FromRight(L.W * 0.275f, 0.84f, 7.f * U);
+	// Eye: left 21u, top 12.6u, 4.2u across (min 34 CSS px).
+	L.EyeR = FMath::Max(2.1f * U, 17.f * L.H / 400.f);
+	L.Eye = FVector2D(21.f * U + L.EyeR, 12.6f * U + L.EyeR);
 	L.SprintR = 2.5f * U;
 	L.Sprint = FromLeft(0.165f, 0.34f, 5.f * U);
 
@@ -160,6 +169,7 @@ SCampusTouchControls::EControl SCampusTouchControls::HitTest(const FLayout& L, c
 	if (In(L.Crouch, L.CrouchR * Pad)) return EControl::Crouch;
 	if (In(L.Prone, L.ProneR * Pad)) return EControl::Prone;
 	if (In(L.Sprint, L.SprintR * 1.4f)) return EControl::Sprint;
+	if (In(L.Eye, L.EyeR * 1.4f)) return EControl::Eye;
 	if (P.X >= L.WeaponMin.X && P.Y >= L.WeaponMin.Y && P.X <= L.WeaponMin.X + L.WeaponSize.X && P.Y <= L.WeaponMin.Y + L.WeaponSize.Y) return EControl::Weapon;
 	return EControl::None;
 }
@@ -200,7 +210,7 @@ void SCampusTouchControls::PressControl(EControl Control)
 		Character->Reload();
 		break;
 	case EControl::Jump:
-		Character->Jump();
+		Character->JumpPressed();
 		break;
 	case EControl::Crouch:
 		Character->ToggleCrouch();
@@ -250,6 +260,7 @@ void SCampusTouchControls::ReleaseAll()
 	{
 		Character->SetTouchMove(FVector2D::ZeroVector);
 		Character->SetFireHeld(false);
+		Character->SetFreeLookHeld(false);
 		Character->SetSprintHeld(false);
 		Character->StopJumping();
 	}
@@ -273,6 +284,15 @@ FReply SCampusTouchControls::OnTouchStarted(const FGeometry& MyGeometry, const F
 	{
 		Finger.Role = ERole::FireDrag;
 		Finger.Offset = P - (Finger.Control == EControl::Fire ? L.Fire : L.FireLeft);
+	}
+	else if (Finger.Control == EControl::Eye)
+	{
+		Finger.Role = ERole::FreeLook;
+		Finger.Offset = FVector2D::ZeroVector;
+		if (ACampusCharacter* Looker = GetCharacter())
+		{
+			Looker->SetFreeLookHeld(true);
+		}
 	}
 	else if (Finger.Control != EControl::None)
 	{
@@ -340,6 +360,17 @@ FReply SCampusTouchControls::OnTouchMoved(const FGeometry& MyGeometry, const FPo
 		ApplyLook(Delta, TouchStyle::FireSensitivity);
 		break;
 	}
+	case ERole::FreeLook:
+	{
+		// Orbit the camera only (x2.2 drag); the knob follows the finger inside the ring.
+		Finger->Offset = P - L.Eye;
+		if (ACampusCharacter* Character = GetCharacter())
+		{
+			const float Scale = DegreesPerUnit() * TouchStyle::Sensitivity * TouchStyle::FreeLookDragScale;
+			Character->AddFreeLook(Delta.X * Scale, -Delta.Y * Scale);
+		}
+		break;
+	}
 	case ERole::Look:
 		ApplyLook(Delta, 1.f);
 		break;
@@ -368,6 +399,13 @@ FReply SCampusTouchControls::OnTouchEnded(const FGeometry& MyGeometry, const FPo
 	else if (Finger.Role == ERole::FireDrag || Finger.Role == ERole::Button)
 	{
 		ReleaseControl(Finger.Control);
+	}
+	else if (Finger.Role == ERole::FreeLook)
+	{
+		if (ACampusCharacter* Character = GetCharacter())
+		{
+			Character->SetFreeLookHeld(false);
+		}
 	}
 	return FReply::Handled().ReleaseMouseCapture();
 }
@@ -420,6 +458,19 @@ void SCampusTouchControls::Tick(const FGeometry& AllottedGeometry, const double 
 	{
 		FFinger& Finger = Pair.Value;
 		Finger.HeldTime += InDeltaTime;
+		if (Finger.Role == ERole::FreeLook)
+		{
+			const float Reach = CachedLayout.EyeR * 1.5f; // knob travel: 0.75 x button width
+			const float Length = Finger.Offset.Size();
+			const float Push = (Length / Reach - TouchStyle::FreeLookDeadZone) / (1.f - TouchStyle::FreeLookDeadZone);
+			if (Push > 0.f)
+			{
+				const float Degrees = FMath::RadiansToDegrees(TouchStyle::FreeLookHoldRadPerSec) * FMath::Min(Push, 1.f) * InDeltaTime;
+				const FVector2D Dir = Finger.Offset / Length;
+				Character->AddFreeLook(Dir.X * Degrees, -Dir.Y * Degrees);
+			}
+			continue;
+		}
 		if (Finger.Role != ERole::FireDrag)
 		{
 			continue;
@@ -659,6 +710,40 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	Plain(EControl::Prone, L.Prone, L.ProneR, false, 0.45f);
 	Plain(EControl::Sprint, L.Sprint, L.SprintR, bAutoRun || (Character && Character->IsSprinting()), 1.f);
 
+	{
+		const bool bEyeHeld = IsHeld(EControl::Eye);
+		DrawCircle(Out, Layer, G, L.Eye, L.EyeR, TouchStyle::EyeBack);
+		DrawRing(Out, Layer + 1, G, L.Eye, L.EyeR, TouchStyle::EyeRing);
+		FVector2D EyeKnob = L.Eye;
+		for (const TPair<int32, FFinger>& Pair : Fingers)
+		{
+			if (Pair.Value.Role == ERole::FreeLook)
+			{
+				FVector2D Offset = Pair.Value.Offset;
+				const float Reach = L.EyeR * 1.5f;
+				if (Offset.Size() > Reach)
+				{
+					Offset = Offset.GetSafeNormal() * Reach;
+				}
+				EyeKnob = L.Eye + Offset;
+			}
+		}
+		// Eye glyph: almond outline and pupil (three.js btn-eye SVG).
+		const float EyeSize = L.EyeR * 0.55f;
+		TArray<FVector2f> Upper, Lower;
+		for (int32 I = 0; I <= 12; ++I)
+		{
+			const float T = -1.f + 2.f * I / 12.f;
+			const float Y = EyeSize * 0.55f * (1.f - T * T);
+			Upper.Add(FVector2f(EyeKnob.X + T * EyeSize, EyeKnob.Y - Y));
+			Lower.Add(FVector2f(EyeKnob.X + T * EyeSize, EyeKnob.Y + Y));
+		}
+		const FLinearColor EyeColor = bEyeHeld ? TouchStyle::IconOn : FLinearColor::White;
+		DrawPolyline(Out, Layer + 2, G, Upper, EyeColor, 2.f);
+		DrawPolyline(Out, Layer + 2, G, Lower, EyeColor, 2.f);
+		DrawCircle(Out, Layer + 2, G, EyeKnob, EyeSize * 0.32f, EyeColor);
+	}
+
 	// Zoom pill, only while aiming.
 	if (bAiming && Character)
 	{
@@ -796,6 +881,27 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 		DrawPolyline(Out, Layer + 1, G, { FVector2f(Center.X - LensR, Center.Y), FVector2f(Center.X + LensR, Center.Y) }, FLinearColor::Black, 1.5f);
 		DrawPolyline(Out, Layer + 1, G, { FVector2f(Center.X, Center.Y - LensR), FVector2f(Center.X, Center.Y + LensR) }, FLinearColor::Black, 1.5f);
 		DrawCircle(Out, Layer + 2, G, Center, 3.f, TouchStyle::Red);
+	}
+
+	// Hit marker (three.js #hitmark): a white X for 0.25 s when the server confirms a hit, red on a kill.
+	if (World)
+	{
+		const float Since = World->GetTimeSeconds() - Character->GetLastHitConfirmTime();
+		if (Since >= 0.f && Since < 0.25f)
+		{
+			const float Alpha = 1.f - Since / 0.25f;
+			const float Arm = 13.f * L.H / 400.f;
+			const FLinearColor Color = (Character->WasLastHitAKill() ? TouchStyle::Red : FLinearColor::White).CopyWithNewOpacity(Alpha);
+			const float Gap = Arm * 0.35f;
+			auto Stroke = [&](float SX, float SY)
+			{
+				DrawPolyline(Out, Layer + 4, G, { FVector2f(Center.X + SX * Gap, Center.Y + SY * Gap), FVector2f(Center.X + SX * Arm, Center.Y + SY * Arm) }, Color, 3.f);
+			};
+			Stroke(1.f, 1.f);
+			Stroke(-1.f, 1.f);
+			Stroke(1.f, -1.f);
+			Stroke(-1.f, -1.f);
+		}
 	}
 
 	// Damage vignette.

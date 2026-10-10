@@ -63,6 +63,9 @@ public:
 	/** Length of the reload clip, so the character can block firing while it plays. */
 	float GetReloadDuration() const;
 
+	/** Mantle clip by approach speed: 0 stand, 1 walk, 2 run. The character reads its root motion. */
+	const UAnimSequence* GetMantleClip(int32 Kind) const;
+
 protected:
 	virtual void NativeUpdateAnimation(float DeltaSeconds) override;
 	virtual FAnimInstanceProxy* CreateAnimInstanceProxy() override;
@@ -94,7 +97,12 @@ private:
 	float AirTime = 0.f;
 	float LandTime = 0.f;
 	bool bWasInAir = false;
+	float TraversalWeight = 0.f;
+	int32 LastTraversalKind = INDEX_NONE;
+	float LastTraversalTime = 0.f;
 	bool bJumped = false;
+	int32 JumpKind = 0;
+	int32 LandKind = 0;
 
 	// One-shots: clip index and time since start, INDEX_NONE when idle.
 	int32 UpperBodyClip = INDEX_NONE;

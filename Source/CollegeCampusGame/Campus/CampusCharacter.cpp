@@ -2,10 +2,13 @@
 
 #include "Camera/CameraComponent.h"
 #include "Campus/CampusAnimInstance.h"
+#include "Campus/CampusFx.h"
 #include "Campus/CampusGameMode.h"
 #include "Campus/CampusMatchState.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Engine/LocalPlayer.h"
@@ -19,6 +22,7 @@
 #include "Camera/PlayerCameraManager.h"
 #include "Net/UnrealNetwork.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Animation/AnimSequence.h"
 
 ACampusCharacter::ACampusCharacter()
 {
@@ -29,8 +33,9 @@ ACampusCharacter::ACampusCharacter()
 	static ConstructorHelpers::FObjectFinder<USkeletalMesh> MeshFinder(TEXT("/Game/CampusCharacter/SKM_CampusMannequin.SKM_CampusMannequin"));
 	USkeletalMeshComponent* MeshComponent = GetMesh();
 	MeshComponent->SetSkeletalMeshAsset(MeshFinder.Object);
-	// The mesh is 166 cm tall with its feet at the origin: half-height 83 puts them on the capsule base.
-	MeshComponent->SetRelativeLocationAndRotation(FVector(0.f, 0.f, -83.f), FRotator(0.f, -90.f, 0.f));
+	// The mesh is 166 cm tall with its feet at the origin. The movement code keeps the capsule hovering
+	// ~2.4 cm above the floor (MAX_FLOOR_DIST), so sink the mesh by that gap to plant the feet.
+	MeshComponent->SetRelativeLocationAndRotation(FVector(0.f, 0.f, -83.f - 2.4f), FRotator(0.f, -90.f, 0.f));
 	MeshComponent->SetAnimationMode(EAnimationMode::AnimationBlueprint);
 	MeshComponent->AnimClass = UCampusAnimInstance::StaticClass();
 	// Off-screen characters skip pose work; saves CPU on phones in busy rooms.
@@ -64,7 +69,9 @@ ACampusCharacter::ACampusCharacter()
 	CameraBoom->TargetArmLength = DefaultArmLength;
 	CameraBoom->SocketOffset = FVector(0.f, HipSide, 0.f);
 	CameraBoom->SetRelativeLocation(FVector(0.f, 0.f, HipPivotHeight));
-	CameraBoom->bUsePawnControlRotation = true;
+	// Rotation is set every frame from the control rotation plus the free-look offset (see Tick).
+	CameraBoom->bUsePawnControlRotation = false;
+	CameraBoom->SetUsingAbsoluteRotation(true);
 	// No lag: the camera follows the finger exactly (three.js applies look once per frame, no smoothing).
 	CameraBoom->bEnableCameraLag = false;
 	CameraBoom->bEnableCameraRotationLag = false;
@@ -72,9 +79,30 @@ ACampusCharacter::ACampusCharacter()
 	CameraBoom->bDoCollisionTest = true;
 	CameraBoom->ProbeSize = 18.f;
 
+	// The rifle mesh is loaded in BeginPlay, not here: nothing extra loads during engine start-up.
+	Gun = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Gun"));
+	Gun->SetupAttachment(MeshComponent);
+	Gun->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Gun->SetGenerateOverlapEvents(false);
+	Gun->SetCastShadow(true);
+	Gun->SetVisibility(false);
+	Gun->SetUsingAbsoluteLocation(true);
+	Gun->SetUsingAbsoluteRotation(true);
+
 	FollowCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FollowCamera"));
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FollowCamera->bUsePawnControlRotation = false;
+}
+
+void ACampusCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+	if (Gun && !Gun->GetStaticMesh())
+	{
+		Gun->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Weapons/Rifle/Meshes/SM_Rifle.SM_Rifle")));
+	}
+	// Place the gun after the final pose of every frame, so it never trails the hands.
+	GetMesh()->RegisterOnBoneTransformsFinalizedDelegate(FOnBoneTransformsFinalizedMultiCast::FDelegate::CreateUObject(this, &ACampusCharacter::UpdateGun));
 }
 
 void ACampusCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -88,6 +116,11 @@ void ACampusCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 void ACampusCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	if (bTraversing)
+	{
+		TickTraversal(DeltaSeconds);
+	}
 
 	if (IsLocallyControlled())
 	{
@@ -145,6 +178,19 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	CameraBoom->TargetArmLength = FMath::Lerp(DefaultArmLength, AimArmLength, AimBlend);
 	CameraBoom->SocketOffset = FVector(0.f, FMath::Lerp(HipSide, AimSide, AimBlend), FMath::Lerp(0.f, AimUp, AimBlend));
 	CameraBoom->SetRelativeLocation(FVector(0.f, 0.f, PivotHeight));
+
+	// Free look: released offset swings back the shortest way (three.js: x *= exp(-14 dt), snap < 0.002 rad).
+	if (!bFreeLookHeld && !FreeLook.IsZero())
+	{
+		FreeLook *= FMath::Exp(-14.f * DeltaSeconds);
+		if (FreeLook.Size() < FMath::RadiansToDegrees(0.002f))
+		{
+			FreeLook = FVector2D::ZeroVector;
+		}
+	}
+	const FRotator Control = Controller ? Controller->GetControlRotation() : GetActorRotation();
+	const float CameraPitch = FMath::Clamp(FRotator::NormalizeAxis(Control.Pitch) + FreeLook.Y, -MaxPitch, MaxPitch);
+	CameraBoom->SetWorldRotation(FRotator(CameraPitch, Control.Yaw + FreeLook.X, 0.f));
 }
 
 void ACampusCharacter::BuildInput()
@@ -241,7 +287,7 @@ void ACampusCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 	Input->BindAction(MoveAction, ETriggerEvent::Triggered, this, &ACampusCharacter::Move);
 	Input->BindAction(LookAction, ETriggerEvent::Triggered, this, &ACampusCharacter::Look);
 	Input->BindAction(LookGamepadAction, ETriggerEvent::Triggered, this, &ACampusCharacter::LookGamepad);
-	Input->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
+	Input->BindAction(JumpAction, ETriggerEvent::Started, this, &ACampusCharacter::JumpPressed);
 	Input->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
 	Input->BindAction(SprintAction, ETriggerEvent::Started, this, &ACampusCharacter::SprintPressed);
 	Input->BindAction(SprintAction, ETriggerEvent::Completed, this, &ACampusCharacter::SprintReleased);
@@ -256,7 +302,7 @@ void ACampusCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 
 void ACampusCharacter::ApplyMove(const FVector2D& Axis)
 {
-	if (!Controller)
+	if (!Controller || bTraversing)
 	{
 		return;
 	}
@@ -376,8 +422,33 @@ void ACampusCharacter::ToggleArmed()
 	ServerSetArmed(bArmed);
 }
 
+void ACampusCharacter::SetFreeLookHeld(bool bHeld)
+{
+	bFreeLookHeld = bHeld;
+	if (bHeld)
+	{
+		// three.js: holding free look cancels ADS and blocks the trigger.
+		bFireHeld = false;
+		if (bAiming)
+		{
+			SetAiming(false);
+		}
+	}
+}
+
+void ACampusCharacter::AddFreeLook(float YawDegrees, float PitchDegrees)
+{
+	// Yaw is unlimited (wrapped); free-look pitch is clamped to +-0.9 rad.
+	FreeLook.X = FRotator::NormalizeAxis(FreeLook.X + YawDegrees);
+	FreeLook.Y = FMath::Clamp(FreeLook.Y + PitchDegrees, -FMath::RadiansToDegrees(0.9f), FMath::RadiansToDegrees(0.9f));
+}
+
 void ACampusCharacter::SetAiming(bool bAim)
 {
+	if (bAim && IsFreeLooking())
+	{
+		return;
+	}
 	if (bAim && !bArmed)
 	{
 		ToggleArmed();
@@ -390,7 +461,7 @@ void ACampusCharacter::SetAiming(bool bAim)
 void ACampusCharacter::TryFire()
 {
 	const float Now = GetWorld()->GetTimeSeconds();
-	if (!bArmed || bDead || Now < NextFireTime || Now < ReloadEndTime)
+	if (!bArmed || bDead || bTraversing || IsFreeLooking() || Now < NextFireTime || Now < ReloadEndTime)
 	{
 		return;
 	}
@@ -418,6 +489,16 @@ void ACampusCharacter::TryFire()
 	{
 		Controller->GetPlayerViewPoint(ViewLocation, ViewRotation);
 		ServerFire(ViewLocation, ViewRotation.Vector());
+
+		// Instant local feedback (three.js draws its own marks and tracer the same frame).
+		FCollisionObjectQueryParams Objects;
+		Objects.AddObjectTypesToQuery(ECC_WorldStatic);
+		Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
+		Objects.AddObjectTypesToQuery(ECC_Pawn);
+		FHitResult Hit;
+		const FVector End = ViewLocation + ViewRotation.Vector() * Range;
+		const bool bHit = GetWorld()->LineTraceSingleByObjectType(Hit, ViewLocation, End, Objects, FCollisionQueryParams(SCENE_QUERY_STAT(CampusFireFx), false, this));
+		SpawnShotFx(bHit ? Hit.ImpactPoint : End, bHit ? Hit.ImpactNormal : FVector::UpVector, bHit && !Cast<ACampusCharacter>(Hit.GetActor()));
 	}
 	if (AmmoInMag == 0)
 	{
@@ -505,15 +586,17 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	{
 		return;
 	}
-	MulticastFire();
-
+	// Trace world and pawns (character capsules do not block the Visibility channel).
+	FCollisionObjectQueryParams Objects;
+	Objects.AddObjectTypesToQuery(ECC_WorldStatic);
+	Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
+	Objects.AddObjectTypesToQuery(ECC_Pawn);
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CampusFire), false, this);
 	FHitResult Hit;
-	if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, Start + FVector(Direction) * Range, ECC_Visibility, Params))
-	{
-		return;
-	}
-	ACampusCharacter* Victim = Cast<ACampusCharacter>(Hit.GetActor());
+	const FVector End = FVector(Start) + FVector(Direction) * Range;
+	const bool bHit = GetWorld()->LineTraceSingleByObjectType(Hit, Start, End, Objects, Params);
+	ACampusCharacter* Victim = bHit ? Cast<ACampusCharacter>(Hit.GetActor()) : nullptr;
+	MulticastFire(bHit ? FVector(Hit.ImpactPoint) : End, bHit ? FVector(Hit.ImpactNormal) : FVector::UpVector, bHit && !Victim);
 	if (!Victim)
 	{
 		return;
@@ -524,18 +607,367 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	{
 		return;
 	}
+	const bool bWasAlive = Victim->GetHealth() > 0.f;
 	Victim->ApplyHit(Damage, GetController());
+	ClientConfirmHit(bWasAlive && Victim->GetHealth() <= 0.f);
 }
 
-void ACampusCharacter::MulticastFire_Implementation()
+void ACampusCharacter::MulticastFire_Implementation(FVector_NetQuantize End, FVector_NetQuantizeNormal Normal, bool bMark)
 {
-	if (!IsLocallyControlled())
+	// The shooter already played its own anim and effects when it fired.
+	if (IsLocallyControlled())
 	{
-		if (UCampusAnimInstance* Anim = GetCampusAnim())
+		return;
+	}
+	if (UCampusAnimInstance* Anim = GetCampusAnim())
+	{
+		Anim->PlayFire();
+	}
+	SpawnShotFx(End, Normal, bMark);
+}
+
+void ACampusCharacter::ClientConfirmHit_Implementation(bool bKill)
+{
+	LastHitConfirmTime = GetWorld()->GetTimeSeconds();
+	bLastHitKill = bKill;
+}
+
+namespace CampusGun
+{
+	// SM_Rifle: barrel along +Y, 78 cm long, muzzle at +Y 51 cm, grip near the origin.
+	constexpr float MuzzleForward = 51.f;
+	constexpr float MuzzleUp = 6.f;
+	// Grip offset from the right hand bone (pivot sits a little below and behind the knuckles).
+	const FVector GripOffset(0.f, -4.f, -3.f);
+}
+
+FVector ACampusCharacter::GunPoint() const
+{
+	if (Gun && Gun->IsVisible())
+	{
+		const FTransform& GunTransform = Gun->GetComponentTransform();
+		return GunTransform.TransformPosition(FVector(0.f, CampusGun::MuzzleForward, CampusGun::MuzzleUp));
+	}
+	return GetActorLocation() + GetActorForwardVector() * 45.f + GetActorRightVector() * 18.f + FVector(0.f, 0.f, 45.f);
+}
+
+void ACampusCharacter::UpdateGun()
+{
+	USkeletalMeshComponent* MeshComponent = GetMesh();
+	if (!Gun || !MeshComponent)
+	{
+		return;
+	}
+	const bool bShow = bArmed && !(IsLocallyControlled() && AimBlend > 0.5f);
+	if (Gun->IsVisible() != bShow)
+	{
+		Gun->SetVisibility(bShow);
+	}
+	if (!bShow)
+	{
+		return;
+	}
+
+	const FTransform RightHand = MeshComponent->GetSocketTransform(TEXT("hand_r"));
+	const FVector LeftHand = MeshComponent->GetSocketLocation(TEXT("hand_l"));
+	const FVector Barrel = LeftHand - RightHand.GetLocation();
+	const UCampusAnimInstance* Anim = GetCampusAnim();
+	const bool bTwoHanded = Barrel.Size() > 15.f && Barrel.Size() < 70.f && !IsReloading();
+
+	FQuat Rotation;
+	if (bTwoHanded)
+	{
+		// Barrel (+Y) toward the support hand, the gun's up (+Z) as close to world up as the barrel allows.
+		Rotation = FRotationMatrix::MakeFromYZ(Barrel.GetSafeNormal(), FVector::UpVector).ToQuat();
+		GunInHand = RightHand.GetRotation().Inverse() * Rotation;
+		bGunInHandValid = true;
+	}
+	else if (bGunInHandValid)
+	{
+		// One hand on the gun (reload / equip): keep the last grip relative to the right hand.
+		Rotation = RightHand.GetRotation() * GunInHand;
+	}
+	else
+	{
+		Rotation = FRotationMatrix::MakeFromYZ(GetActorForwardVector(), FVector::UpVector).ToQuat();
+	}
+	Gun->SetWorldLocationAndRotation(RightHand.GetLocation() + Rotation.RotateVector(CampusGun::GripOffset), Rotation);
+}
+
+void ACampusCharacter::SpawnShotFx(const FVector& End, const FVector& Normal, bool bMark) const
+{
+	if (UCampusFxSubsystem* Fx = GetWorld()->GetSubsystem<UCampusFxSubsystem>())
+	{
+		Fx->AddTracer(GunPoint(), End);
+		if (bMark)
 		{
-			Anim->PlayFire();
+			Fx->AddImpact(End, Normal);
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Traversal: mantle onto ledges 0.45 - 2.3 m high. The clip's own root motion (rise 100 cm, then
+// forward onto the top) is stretched to the measured ledge height and distance, so the hands land
+// on the edge for any box size. Everyone runs the same deterministic path from the same inputs.
+
+namespace CampusTraversal
+{
+	constexpr float MinHeight = 45.f;
+	constexpr float MaxHeight = 230.f;
+	constexpr float WallReach = 110.f;
+	constexpr float OntoTop = 35.f;
+}
+
+void ACampusCharacter::JumpPressed()
+{
+	if (bTraversing)
+	{
+		return;
+	}
+	if (!TryStartTraversal())
+	{
+		Jump();
+	}
+}
+
+bool ACampusCharacter::GetTraversal(int32& OutKind, float& OutTime) const
+{
+	if (!bTraversing)
+	{
+		return false;
+	}
+	OutKind = TraversalKind;
+	OutTime = TraversalTime;
+	return true;
+}
+
+FVector ACampusCharacter::ClipRoot(const UAnimSequence* Clip, float Time)
+{
+	return Clip ? Clip->ExtractRootTrackTransform(FAnimExtractContext(double(Time)), nullptr).GetTranslation() : FVector::ZeroVector;
+}
+
+float ACampusCharacter::RiseEndTime(const UAnimSequence* Clip)
+{
+	if (!Clip)
+	{
+		return 0.f;
+	}
+	const float Length = Clip->GetPlayLength();
+	const float TopZ = ClipRoot(Clip, Length).Z;
+	for (int32 Step = 0; Step <= 60; ++Step)
+	{
+		const float Time = Length * Step / 60.f;
+		if (ClipRoot(Clip, Time).Z >= TopZ - 1.f)
+		{
+			return Time;
+		}
+	}
+	return Length;
+}
+
+float ACampusCharacter::TraversalEndTime(const UAnimSequence* Clip)
+{
+	if (!Clip)
+	{
+		return 0.f;
+	}
+	const float Length = Clip->GetPlayLength();
+	const float TopZ = ClipRoot(Clip, Length).Z;
+	for (int32 Step = 0; Step <= 60; ++Step)
+	{
+		const float Time = Length * Step / 60.f;
+		if (ClipRoot(Clip, Time).Z >= TopZ - 1.f)
+		{
+			return FMath::Min(Time + 0.3f, Length);
+		}
+	}
+	return Length;
+}
+
+bool ACampusCharacter::TryStartTraversal()
+{
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	const UCampusAnimInstance* Anim = GetCampusAnim();
+	if (!Movement || !Movement->IsMovingOnGround() || !Anim || bIsCrouched)
+	{
+		return false;
+	}
+
+	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	const FVector Feet = GetActorLocation() - FVector(0.f, 0.f, HalfHeight);
+	FVector Forward = GetActorForwardVector();
+	Forward.Z = 0.f;
+	Forward.Normalize();
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(CampusTraversal), false, this);
+
+	// 1) A wall in front at knee height, roughly facing us.
+	FHitResult Wall;
+	const FVector KneeStart = Feet + FVector(0.f, 0.f, 40.f);
+	if (!GetWorld()->LineTraceSingleByChannel(Wall, KneeStart, KneeStart + Forward * CampusTraversal::WallReach, ECC_Visibility, Params))
+	{
+		return false;
+	}
+	FVector WallNormal = Wall.ImpactNormal;
+	WallNormal.Z = 0.f;
+	if (!WallNormal.Normalize() || FVector::DotProduct(-WallNormal, Forward) < 0.6f)
+	{
+		return false;
+	}
+
+	// 2) The top of it, just past the edge.
+	FHitResult Top;
+	const FVector Over = Wall.ImpactPoint - WallNormal * 25.f;
+	if (!GetWorld()->LineTraceSingleByChannel(Top, FVector(Over.X, Over.Y, Feet.Z + CampusTraversal::MaxHeight + 30.f), FVector(Over.X, Over.Y, Feet.Z + 20.f), ECC_Visibility, Params)
+		|| Top.ImpactNormal.Z < 0.7f)
+	{
+		return false;
+	}
+	const float Height = Top.ImpactPoint.Z - Feet.Z;
+	if (Height < CampusTraversal::MinHeight || Height > CampusTraversal::MaxHeight)
+	{
+		return false;
+	}
+
+	// 3) Room to stand on top.
+	const FVector Landing = Top.ImpactPoint - WallNormal * CampusTraversal::OntoTop;
+	const FVector StandAt = Landing + FVector(0.f, 0.f, HalfHeight + 2.f);
+	if (GetWorld()->OverlapBlockingTestByChannel(StandAt, FQuat::Identity, ECC_Pawn, GetCapsuleComponent()->GetCollisionShape(), Params))
+	{
+		return false;
+	}
+
+	// 4) Pick the clip by approach speed and stretch its root path onto this ledge.
+	const float Speed = GetVelocity().Size2D();
+	const uint8 Kind = Speed < 60.f ? 0 : (Speed < 320.f ? 1 : 2);
+	const UAnimSequence* Clip = Anim->GetMantleClip(Kind);
+	if (!Clip)
+	{
+		return false;
+	}
+	const FVector Facing = -WallNormal;
+	const float Yaw = Facing.Rotation().Yaw;
+	// Part 1 target: capsule front touching the wall. Part 2 target: standing on top.
+	const float CapsuleRadius = GetCapsuleComponent()->GetScaledCapsuleRadius();
+	const float ToWall = FMath::Max(0.f, FVector::DotProduct(Wall.ImpactPoint - Feet, Facing) - CapsuleRadius - 2.f);
+	const float ToLanding = FMath::Max(ToWall + 10.f, FVector::DotProduct(Landing - Feet, Facing));
+	const FVector RootStart = ClipRoot(Clip, 0.f);
+	const FVector RootRise = ClipRoot(Clip, RiseEndTime(Clip)) - RootStart;
+	const float ScaleZ = RootRise.Z > 1.f ? Height / RootRise.Z : 1.f;
+	const float ScaleForward = RootRise.Y > 1.f ? FMath::Clamp(ToWall / RootRise.Y, 0.f, 3.f) : 0.f;
+	TraversalOverTop = ToLanding - ToWall;
+
+	if (HasAuthority())
+	{
+		StartTraversal(Feet, Yaw, ScaleZ, ScaleForward, TraversalOverTop, Kind);
+		MulticastStartTraversal(Feet, Yaw, ScaleZ, ScaleForward, TraversalOverTop, Kind);
+	}
+	else
+	{
+		StartTraversal(Feet, Yaw, ScaleZ, ScaleForward, TraversalOverTop, Kind);
+		ServerStartTraversal(Feet, Yaw, ScaleZ, ScaleForward, TraversalOverTop, Kind);
+	}
+	return true;
+}
+
+void ACampusCharacter::ServerStartTraversal_Implementation(FVector_NetQuantize StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind)
+{
+	// Loose sanity check: the start must be where the server has us.
+	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	if (FVector::Dist(FVector(StartFeet), GetActorLocation() - FVector(0.f, 0.f, HalfHeight)) > 150.f || ScaleZ > 3.f)
+	{
+		return;
+	}
+	StartTraversal(StartFeet, Yaw, ScaleZ, ScaleForward, OverTop, Kind);
+	MulticastStartTraversal(StartFeet, Yaw, ScaleZ, ScaleForward, OverTop, Kind);
+}
+
+void ACampusCharacter::MulticastStartTraversal_Implementation(FVector_NetQuantize StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind)
+{
+	if (HasAuthority() || IsLocallyControlled())
+	{
+		return;
+	}
+	StartTraversal(StartFeet, Yaw, ScaleZ, ScaleForward, OverTop, Kind);
+}
+
+void ACampusCharacter::StartTraversal(const FVector& StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind)
+{
+	const UCampusAnimInstance* Anim = GetCampusAnim();
+	const UAnimSequence* Clip = Anim ? Anim->GetMantleClip(Kind) : nullptr;
+	if (!Clip)
+	{
+		return;
+	}
+	bTraversing = true;
+	TraversalKind = Kind;
+	TraversalTime = 0.f;
+	TraversalEnd = TraversalEndTime(Clip);
+	TraversalYaw = Yaw;
+	TraversalScaleZ = ScaleZ;
+	TraversalScaleForward = ScaleForward;
+	TraversalOverTop = OverTop;
+	TraversalStartFeet = StartFeet;
+	TraversalRootStart = ClipRoot(Clip, 0.f);
+	bFireHeld = false;
+	if (bSprinting)
+	{
+		bSprinting = false;
+		UpdateMovementSettings();
+	}
+
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	Movement->StopMovementImmediately();
+	Movement->SetMovementMode(MOVE_Flying);
+	bUseControllerRotationYaw = false;
+	SetActorRotation(FRotator(0.f, Yaw, 0.f));
+}
+
+void ACampusCharacter::TickTraversal(float DeltaSeconds)
+{
+	const UCampusAnimInstance* Anim = GetCampusAnim();
+	const UAnimSequence* Clip = Anim ? Anim->GetMantleClip(TraversalKind) : nullptr;
+	TraversalTime += DeltaSeconds;
+	if (!Clip)
+	{
+		EndTraversal();
+		return;
+	}
+	const float Time = FMath::Min(TraversalTime, TraversalEnd);
+	const FVector Root = ClipRoot(Clip, Time) - TraversalRootStart;
+	// Part 1 (until the root finishes rising): forward scaled to stop at the wall face, height scaled
+	// to the ledge. Part 2: the rest of the clip's forward travel maps onto the distance over the top.
+	const float RiseEnd = RiseEndTime(Clip);
+	const FVector RiseRoot = ClipRoot(Clip, RiseEnd) - TraversalRootStart;
+	float Forward;
+	if (Time <= RiseEnd)
+	{
+		Forward = Root.Y * TraversalScaleForward;
+	}
+	else
+	{
+		const FVector EndRoot = ClipRoot(Clip, TraversalEnd) - TraversalRootStart;
+		const float Over = FMath::Max(EndRoot.Y - RiseRoot.Y, 1.f);
+		Forward = RiseRoot.Y * TraversalScaleForward + (Root.Y - RiseRoot.Y) / Over * TraversalOverTop;
+	}
+	// Mesh space: +Y forward, +X to the character's left, +Z up.
+	const FVector Local(Forward, -Root.X, FMath::Min(Root.Z, RiseRoot.Z) * TraversalScaleZ);
+	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	const FVector Location = TraversalStartFeet + FRotator(0.f, TraversalYaw, 0.f).RotateVector(Local) + FVector(0.f, 0.f, HalfHeight);
+	SetActorLocation(Location, false, nullptr, ETeleportType::None);
+	if (TraversalTime >= TraversalEnd)
+	{
+		EndTraversal();
+	}
+}
+
+void ACampusCharacter::EndTraversal()
+{
+	bTraversing = false;
+	bUseControllerRotationYaw = true;
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	Movement->SetMovementMode(MOVE_Walking);
+	Movement->StopMovementImmediately();
 }
 
 void ACampusCharacter::MulticastUpperBody_Implementation(bool bReload)
