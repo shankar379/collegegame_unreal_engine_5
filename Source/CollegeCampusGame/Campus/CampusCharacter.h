@@ -1,5 +1,7 @@
 // Campus Combat player character: the orange UEFN mannequin on CharacterMovement,
 // with unarmed, crouch and rifle stances driven by UCampusAnimInstance.
+// Keyboard / mouse / gamepad come through Enhanced Input; phones use the Touch* calls
+// from the on-screen controls. The server owns health and hits.
 
 #pragma once
 
@@ -22,8 +24,39 @@ class ACampusCharacter : public ACharacter
 public:
 	ACampusCharacter();
 
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
 	bool IsArmed() const { return bArmed; }
 	bool IsAiming() const { return bAiming; }
+	bool IsSprinting() const { return bSprinting; }
+	float GetHealth() const { return Health; }
+	float GetMaxHealth() const { return MaxHealth; }
+	int32 GetAmmoInMag() const { return AmmoInMag; }
+	int32 GetAmmoReserve() const { return AmmoReserve; }
+	bool IsReloading() const;
+	/** 0..1 while reloading, for the reload ring. */
+	float GetReloadProgress() const;
+	/** Current scope zoom (1x, 2x, 4x), used while aiming. */
+	float GetZoom() const { return ZoomLevels[ZoomIndex]; }
+	/** 0 hip .. 1 fully aimed (eases in over the ADS time). */
+	float GetAimBlend() const { return AimBlend; }
+	/** Look speed multiplier while zoomed: 1 / (1 + (zoom - 1) * aim). */
+	float GetLookScale() const { return 1.f / (1.f + (GetZoom() - 1.f) * AimBlend); }
+	void CycleZoom() { ZoomIndex = (ZoomIndex + 1) % UE_ARRAY_COUNT(ZoomLevels); }
+	void SetSprintHeld(bool bHeld);
+
+	// On-screen controls.
+	void SetTouchMove(const FVector2D& Axis) { TouchMove = Axis; }
+	void AddTouchLook(const FVector2D& DegreesDelta);
+	void SetFireHeld(bool bHeld) { bFireHeld = bHeld; }
+	void SetAiming(bool bAim);
+	void ToggleSprint();
+	void ToggleCrouch();
+	void ToggleArmed();
+	void Reload();
+
+	/** Server: apply a hit from another player. */
+	void ApplyHit(float Damage, AController* InstigatorController);
 
 protected:
 	virtual void Tick(float DeltaSeconds) override;
@@ -31,7 +64,7 @@ protected:
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 
 private:
-	/** Builds the input actions and mapping in code; keys match the touch interface's gamepad keys. */
+	/** Builds the input actions and mapping in code. */
 	void BuildInput();
 
 	void Move(const FInputActionValue& Value);
@@ -39,15 +72,39 @@ private:
 	void LookGamepad(const FInputActionValue& Value);
 	void SprintPressed();
 	void SprintReleased();
-	void ToggleCrouch();
-	void ToggleArmed();
-	void AimPressed();
-	void AimReleased();
-	void Fire();
-	void Reload();
+	void AimPressed() { SetAiming(true); }
+	void AimReleased() { SetAiming(false); }
+	void FirePressed() { bFireHeld = true; }
+	void FireReleased() { bFireHeld = false; }
 
+	void ApplyMove(const FVector2D& Axis);
+	void TryFire();
 	void UpdateMovementSettings();
+	bool CanSprintNow() const;
+	/** Turns the view: positive pitch looks up. Every look source (touch, mouse, stick, recoil) uses this. */
+	void ApplyLook(float YawDegrees, float PitchUpDegrees);
 	UCampusAnimInstance* GetCampusAnim() const;
+
+	UFUNCTION(Server, Reliable)
+	void ServerSetArmed(bool bNewArmed);
+
+	UFUNCTION(Server, Reliable)
+	void ServerSetAiming(bool bNewAiming);
+
+	UFUNCTION(Server, Reliable)
+	void ServerSetSprinting(bool bNewSprinting);
+
+	UFUNCTION(Server, Unreliable)
+	void ServerFire(FVector_NetQuantize Start, FVector_NetQuantizeNormal Direction);
+
+	UFUNCTION(Server, Reliable)
+	void ServerReload();
+
+	UFUNCTION(NetMulticast, Unreliable)
+	void MulticastFire();
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastUpperBody(bool bReload);
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<USpringArmComponent> CameraBoom;
@@ -88,37 +145,111 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UInputAction> ReloadAction;
 
+	// Speeds match the three.js game (player.js): stand 4.2 m/s, sprint 6.6, crouch 2.0, aiming x0.55.
 	UPROPERTY(EditAnywhere, Category="Movement")
-	float JogSpeed = 400.f;
+	float JogSpeed = 420.f;
 
 	UPROPERTY(EditAnywhere, Category="Movement")
-	float SprintSpeed = 600.f;
+	float SprintSpeed = 660.f;
 
 	UPROPERTY(EditAnywhere, Category="Movement")
-	float RifleJogSpeed = 375.f;
+	float RifleJogSpeed = 420.f;
 
 	UPROPERTY(EditAnywhere, Category="Movement")
-	float AimWalkSpeed = 200.f;
+	float AimWalkSpeed = 231.f;
 
 	UPROPERTY(EditAnywhere, Category="Movement")
-	float CrouchSpeed = 180.f;
+	float CrouchSpeed = 200.f;
 
 	/** Degrees per second at full right-stick deflection. */
 	UPROPERTY(EditAnywhere, Category="Camera")
 	float GamepadLookRate = 150.f;
 
+	// Camera rig from the three.js game (CAMERA dist 3.0 / side 0.6 / up 0.4 at a 1.12 m eye;
+	// AIM_CAMERA dist 0 / side 0.06 / up 0.02), scaled to this 165 cm eye.
 	UPROPERTY(EditAnywhere, Category="Camera")
-	float DefaultArmLength = 300.f;
+	float DefaultArmLength = 320.f;
 
 	UPROPERTY(EditAnywhere, Category="Camera")
-	float AimArmLength = 160.f;
+	float AimArmLength = 0.f;
+
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float HipSide = 70.f;
+
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float AimSide = 9.f;
+
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float AimUp = 3.f;
+
+	/** Boom pivot above the capsule centre: eye (165 - 90) + up (59). */
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float HipPivotHeight = 120.f;
+
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float CrouchPivotHeight = 75.f;
+
+	/** three.js BASE_FOV: vertical degrees. */
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float BaseVerticalFov = 62.f;
+
+	/** three.js MAX_PITCH 1.35 rad. */
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float MaxPitch = 77.3f;
+
+	/** three.js MOUSE_LOOK 0.0022 rad per pixel. */
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float MouseDegreesPerPixel = 0.126f;
+
+	// AK from weapons.js: 600 rpm, 30 / 120, recoil 0.016 rad up, +-0.006 rad side, 70% recovers (tau 0.22 s).
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float FireInterval = 0.1f;
 
 	UPROPERTY(EditAnywhere, Category="Combat")
-	float FireInterval = 0.12f;
+	float RecoilUpDeg = 0.92f;
 
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float RecoilSideDeg = 0.34f;
+
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float RecoilRecoverShare = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float RecoilRecoverTau = 0.22f;
+
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float Damage = 25.f;
+
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float Range = 10000.f;
+
+	UPROPERTY(EditAnywhere, Category="Combat")
+	int32 MagazineSize = 30;
+
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float MaxHealth = 100.f;
+
+	UPROPERTY(Replicated)
 	bool bArmed = false;
+
+	UPROPERTY(Replicated)
 	bool bAiming = false;
+
+	UPROPERTY(Replicated)
+	float Health = 100.f;
+
 	bool bSprinting = false;
+	bool bFireHeld = false;
+	bool bDead = false;
+	FVector2D TouchMove = FVector2D::ZeroVector;
+	int32 AmmoInMag = 30;
+	int32 AmmoReserve = 120;
+	float ReloadStartTime = 0.f;
 	float ReloadEndTime = 0.f;
+	float RecoilToRecover = 0.f;
+	float AimLinear = 0.f;
+	float AimBlend = 0.f;
+	static constexpr float ZoomLevels[3] = { 1.f, 2.f, 4.f };
+	int32 ZoomIndex = 1;
 	float NextFireTime = 0.f;
 };

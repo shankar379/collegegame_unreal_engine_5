@@ -19,6 +19,7 @@ public class CollegeCampusGame : ModuleRules
 			"GameplayStateTreeModule",
 			"UMG",
 			"Slate",
+			"SlateCore",
 			"HTTP",
 			"Json"
 		});

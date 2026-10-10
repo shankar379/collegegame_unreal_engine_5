@@ -17,6 +17,8 @@ struct FCampusAnimSample
 	float Time = 0.f;
 	float Weight = 0.f;
 	bool bLoop = true;
+	/** Pelvis travel over one loop to strip (see CampusClips::FClipDef). */
+	FVector3f PelvisDrift = FVector3f::ZeroVector;
 };
 
 /** Worker-thread side: turns the sample list prepared on the game thread into the final pose. */

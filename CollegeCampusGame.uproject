@@ -1,120 +1,188 @@
-﻿{
-    "FileVersion":  3,
-    "EngineAssociation":  "5.8",
-    "Category":  "",
-    "Description":  "",
-    "Modules":  [
-                    {
-                        "Name":  "CollegeCampusGame",
-                        "Type":  "Runtime",
-                        "LoadingPhase":  "Default",
-                        "AdditionalDependencies":  [
-                                                       "Engine",
-                                                       "AIModule",
-                                                       "UMG"
-                                                   ]
-                    }
-                ],
-    "Plugins":  [
-                    {
-                        "Name":  "StateTree",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "GameplayStateTree",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "AnimationWarping",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "PoseSearch",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "AnimationLocomotionLibrary",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "MotionWarping",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "Chooser",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "Mover",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "NetworkPrediction",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "ChaosMover",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "AnimationLayering",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "MovieSceneAnimMixer",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "DrawDebugLibrary",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "SmartObjects",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "Locomotor",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "CurveExpression",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "GameplayInteractions",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "LiveLink",
-                        "Enabled":  false
-                    },
-                    {
-                        "Name":  "LiveLinkControlRig",
-                        "Enabled":  false
-                    },
-                    {
-                        "Name":  "MoverExamples",
-                        "Enabled":  false
-                    },
-                    {
-                        "Name":  "ModelingToolsEditorMode",
-                        "Enabled":  false
-                    },
-                    {
-                        "Name":  "HairStrands",
-                        "Enabled":  false
-                    },
-                    {
-                        "Name":  "RigLogic",
-                        "Enabled":  false
-                    },
-                    {
-                        "Name":  "PythonScriptPlugin",
-                        "Enabled":  true
-                    },
-                    {
-                        "Name":  "EditorScriptingUtilities",
-                        "Enabled":  true
-                    }
-                ]
+{
+    "FileVersion": 3,
+    "EngineAssociation": "5.8",
+    "Category": "",
+    "Description": "",
+    "Modules": [
+        {
+            "Name": "CollegeCampusGame",
+            "Type": "Runtime",
+            "LoadingPhase": "Default",
+            "AdditionalDependencies": [
+                "Engine",
+                "AIModule",
+                "UMG"
+            ]
+        }
+    ],
+    "Plugins": [
+        {
+            "Name": "StateTree",
+            "Enabled": true
+        },
+        {
+            "Name": "GameplayStateTree",
+            "Enabled": true
+        },
+        {
+            "Name": "AnimationWarping",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "PoseSearch",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "AnimationLocomotionLibrary",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "MotionWarping",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "Chooser",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "Mover",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "NetworkPrediction",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "ChaosMover",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "AnimationLayering",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "MovieSceneAnimMixer",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "DrawDebugLibrary",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "SmartObjects",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "Locomotor",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "CurveExpression",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "GameplayInteractions",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "LiveLink",
+            "Enabled": false
+        },
+        {
+            "Name": "LiveLinkControlRig",
+            "Enabled": false
+        },
+        {
+            "Name": "MoverExamples",
+            "Enabled": false
+        },
+        {
+            "Name": "ModelingToolsEditorMode",
+            "Enabled": false
+        },
+        {
+            "Name": "HairStrands",
+            "Enabled": false
+        },
+        {
+            "Name": "RigLogic",
+            "Enabled": false
+        },
+        {
+            "Name": "PythonScriptPlugin",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        },
+        {
+            "Name": "EditorScriptingUtilities",
+            "Enabled": true,
+            "PlatformDenyList": [
+                "Android",
+                "IOS"
+            ]
+        }
+    ]
 }

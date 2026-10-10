@@ -23,41 +23,54 @@ namespace CampusClips
 	struct FClipDef
 	{
 		const TCHAR* Path;
-		float RefSpeed; // cm/s the clip was authored at, 0 for clips that do not move
+		/** cm/s the clip travels at, measured from its root (or pelvis) motion; 0 for in-place clips. */
+		float RefSpeed;
+		/** Pelvis travel over one loop, in mesh space. The Lyra rifle clips were retargeted with their
+		 *  forward motion on the pelvis instead of the root, so it is removed per sample (else the body
+		 *  slides ahead of the capsule and snaps back every loop). Zero for clips that move the root. */
+		FVector3f PelvisDrift = FVector3f::ZeroVector;
+		/** Step cycles in the loop and the time the left foot first leads (measured from the foot
+		 *  bones). Loops are sampled per step cycle from this point, so every clip in a blend has its
+		 *  feet in the same place even when the clips hold different numbers of steps. */
+		int32 Cycles = 0;
+		float FirstStep = 0.f;
 	};
 
+	// Speeds and drifts measured from the clips themselves (root or pelvis travel / clip length).
 	static const FClipDef Defs[Num] =
 	{
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Idle.A_Idle"), 0.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_F.A_Walk_F"), 160.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_B.A_Walk_B"), 160.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_L.A_Walk_L"), 160.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_R.A_Walk_R"), 160.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_F.A_Run_F"), 375.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_B.A_Run_B"), 375.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_L.A_Run_L"), 375.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_R.A_Run_R"), 375.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Sprint_F.A_Sprint_F"), 600.f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_F.A_Walk_F"), 200.f, FVector3f::ZeroVector, 4, 0.000f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_B.A_Walk_B"), 150.f, FVector3f::ZeroVector, 4, 0.602f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_L.A_Walk_L"), 180.f, FVector3f::ZeroVector, 4, 0.517f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Walk_R.A_Walk_R"), 180.f, FVector3f::ZeroVector, 4, 0.533f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_F.A_Run_F"), 500.f, FVector3f::ZeroVector, 4, 0.600f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_B.A_Run_B"), 300.f, FVector3f::ZeroVector, 4, 0.285f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_L.A_Run_L"), 350.f, FVector3f::ZeroVector, 4, 0.571f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Run_R.A_Run_R"), 350.f, FVector3f::ZeroVector, 4, 0.235f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Sprint_F.A_Sprint_F"), 700.f, FVector3f::ZeroVector, 4, 0.467f },
 
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_Idle.A_Crouch_Idle"), 0.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_F.A_Crouch_F"), 150.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_B.A_Crouch_B"), 150.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_L.A_Crouch_L"), 150.f },
-		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_R.A_Crouch_R"), 150.f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_F.A_Crouch_F"), 225.f, FVector3f::ZeroVector, 4, 0.000f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_B.A_Crouch_B"), 180.f, FVector3f::ZeroVector, 4, 0.536f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_L.A_Crouch_L"), 200.f, FVector3f::ZeroVector, 4, 0.067f },
+		{ TEXT("/Game/CampusAnims/Unarmed/A_Crouch_R.A_Crouch_R"), 200.f, FVector3f::ZeroVector, 4, 0.567f },
 
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Idle.A_Rifle_Idle"), 0.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_F.A_Rifle_Walk_F"), 170.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_B.A_Rifle_Walk_B"), 170.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_L.A_Rifle_Walk_L"), 170.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_R.A_Rifle_Walk_R"), 170.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_F.A_Rifle_Run_F"), 375.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_B.A_Rifle_Run_B"), 375.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_L.A_Rifle_Run_L"), 375.f },
-		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_R.A_Rifle_Run_R"), 375.f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_F.A_Rifle_Walk_F"), 295.f, FVector3f(0.f, 453.f, 0.f), 2, 0.607f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_B.A_Rifle_Walk_B"), 291.f, FVector3f(0.f, -349.f, 0.f), 2, 0.100f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_L.A_Rifle_Walk_L"), 291.f, FVector3f(359.f, 0.f, 0.f), 2, 0.533f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Walk_R.A_Rifle_Walk_R"), 291.f, FVector3f(-437.f, 0.f, 0.f), 2, 0.600f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_F.A_Rifle_Run_F"), 604.f, FVector3f(0.f, 927.f, 0.f), 3, 0.135f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_B.A_Rifle_Run_B"), 574.f, FVector3f(0.f, -1033.f, 0.f), 4, 0.336f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_L.A_Rifle_Run_L"), 573.f, FVector3f(267.f, 0.f, 0.f), 1, 0.133f },
+		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Run_R.A_Rifle_Run_R"), 582.f, FVector3f(-621.f, 0.f, 0.f), 2, 0.100f },
 
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Start.A_Jump_Start"), 0.f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Fall.A_Jump_Fall"), 0.f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Land.A_Jump_Land"), 0.f },
+		// The rifle jump clips drop ~15 m on the pelvis (non-linear), so the air uses the unarmed clips
+		// with the rifle held by the upper body. Kept in the table so the indices stay stable.
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Jump_Start.A_Rifle_Jump_Start"), 0.f },
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Jump_Fall.A_Rifle_Jump_Fall"), 0.f },
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Jump_Land.A_Rifle_Jump_Land"), 0.f },
@@ -66,6 +79,10 @@ namespace CampusClips
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Reload.A_Rifle_Reload"), 0.f },
 		{ TEXT("/Game/CampusAnims/Rifle/A_Rifle_Equip.A_Rifle_Equip"), 0.f },
 	};
+
+	// Gait thresholds (cm/s) between the walk, run and sprint clips of each set, from the speeds above.
+	constexpr float UnarmedWalk = 200.f, UnarmedRun = 500.f, UnarmedSprint = 700.f;
+	constexpr float RifleWalk = 293.f, RifleRun = 600.f;
 
 	// Seconds of the jump start clip used before crossfading into the fall loop.
 	constexpr float JumpStartWindow = 0.4f;
@@ -81,6 +98,22 @@ void FCampusAnimInstanceProxy::SamplePose(const FCampusAnimSample& Sample, FPose
 {
 	FAnimationPoseData PoseData(Out);
 	Sample.Sequence->GetAnimationPose(PoseData, FAnimExtractContext(double(Sample.Time), false, FDeltaTimeRecord(), Sample.bLoop));
+
+	// Remove the clip's travel from the pelvis so the body stays over the capsule.
+	if (!Sample.PelvisDrift.IsZero())
+	{
+		const FBoneContainer& Bones = Out.Pose.GetBoneContainer();
+		const int32 MeshIndex = Bones.GetPoseBoneIndexForBoneName(TEXT("pelvis"));
+		const float Length = Sample.Sequence->GetPlayLength();
+		if (MeshIndex != INDEX_NONE && Length > 0.f)
+		{
+			const FCompactPoseBoneIndex Pelvis = Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(MeshIndex));
+			if (Pelvis.IsValid())
+			{
+				Out.Pose[Pelvis].AddToTranslation(-FVector(Sample.PelvisDrift) * (Sample.Time / Length));
+			}
+		}
+	}
 }
 
 bool FCampusAnimInstanceProxy::Evaluate(FPoseContext& Output)
@@ -166,7 +199,7 @@ void FCampusAnimInstanceProxy::ApplyUpperBody(FPoseContext& Output)
 	// Compact bones are ordered parents-first, so one pass marks spine_01 and all its children.
 	TArray<bool, TInlineAllocator<128>> IsUpper;
 	IsUpper.SetNumZeroed(Output.Pose.GetNumBones());
-	for (const FCompactPoseBoneIndex Index : Output.Pose.ForEachBoneIndex())
+	for (const FCompactPoseBoneIndex& Index : Output.Pose.ForEachBoneIndex())
 	{
 		const FCompactPoseBoneIndex Parent = Bones.GetParentBoneIndex(Index);
 		const bool bUpper = Index == Spine || (Parent.IsValid() && IsUpper[Parent.GetInt()]);
@@ -209,7 +242,7 @@ void FCampusAnimInstanceProxy::ApplyAimPitch(FPoseContext& Output) const
 
 	// The mesh faces +Y in component space, so +X is the pitch axis.
 	const float RadiansPerBone = FMath::DegreesToRadians(Pitch / Chain.Num());
-	for (const FCompactPoseBoneIndex Index : Chain)
+	for (const FCompactPoseBoneIndex& Index : Chain)
 	{
 		FQuat ParentRotation = FQuat::Identity;
 		for (FCompactPoseBoneIndex Parent = Bones.GetParentBoneIndex(Index); Parent.IsValid(); Parent = Bones.GetParentBoneIndex(Parent))
@@ -296,8 +329,11 @@ void UCampusAnimInstance::AddLocomotion(TArray<FCampusAnimSample>& Out, FGaitAcc
 	float DirWeights[4] = { FMath::Max(0.f, FMath::Cos(Radians)), FMath::Max(0.f, -FMath::Cos(Radians)), FMath::Max(0.f, -FMath::Sin(Radians)), FMath::Max(0.f, FMath::Sin(Radians)) };
 	const float DirTotal = DirWeights[0] + DirWeights[1] + DirWeights[2] + DirWeights[3];
 
-	const float RunAlpha = bHasRunTier ? FMath::GetMappedRangeValueClamped(FVector2f(180.f, 380.f), FVector2f(0.f, 1.f), Speed) : 0.f;
-	const float SprintAlpha = bHasSprint ? FMath::GetMappedRangeValueClamped(FVector2f(380.f, 600.f), FVector2f(0.f, 1.f), Speed) : 0.f;
+	const bool bRifleSet = FirstClip == CampusClips::Rifle;
+	const float WalkRef = bRifleSet ? CampusClips::RifleWalk : CampusClips::UnarmedWalk;
+	const float RunRef = bRifleSet ? CampusClips::RifleRun : CampusClips::UnarmedRun;
+	const float RunAlpha = bHasRunTier ? FMath::GetMappedRangeValueClamped(FVector2f(WalkRef, RunRef), FVector2f(0.f, 1.f), Speed) : 0.f;
+	const float SprintAlpha = bHasSprint ? FMath::GetMappedRangeValueClamped(FVector2f(CampusClips::UnarmedRun, CampusClips::UnarmedSprint), FVector2f(0.f, 1.f), Speed) : 0.f;
 
 	auto AddMoving = [&](int32 ClipIndex, float Weight)
 	{
@@ -306,10 +342,13 @@ void UCampusAnimInstance::AddLocomotion(TArray<FCampusAnimSample>& Out, FGaitAcc
 		{
 			return;
 		}
+		const CampusClips::FClipDef& Def = CampusClips::Defs[ClipIndex];
 		const float Length = Sequence->GetPlayLength();
-		Out.Add({ Sequence, MovePhase * Length, Weight, true });
+		const float StepCycle = Length / FMath::Max(Def.Cycles, 1);
+		const float Time = FMath::Fmod(Def.FirstStep + MovePhase * StepCycle, Length);
+		Out.Add({ Sequence, Time, Weight, true, Def.PelvisDrift });
 		Gait.Weight += Weight;
-		Gait.CycleLength += Weight * Length;
+		Gait.CycleLength += Weight * StepCycle;
 		Gait.RefSpeed += Weight * CampusClips::Defs[ClipIndex].RefSpeed;
 	};
 
@@ -418,7 +457,7 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	if (Gait.Weight > UE_KINDA_SMALL_NUMBER)
 	{
 		const float CycleLength = Gait.CycleLength / Gait.Weight;
-		const float PlayRate = FMath::Clamp(Speed / FMath::Max(Gait.RefSpeed / Gait.Weight, 1.f), 0.7f, 1.5f);
+		const float PlayRate = FMath::Clamp(Speed / FMath::Max(Gait.RefSpeed / Gait.Weight, 1.f), 0.4f, 1.6f);
 		MovePhase = FMath::Fmod(MovePhase + DeltaSeconds * PlayRate / FMath::Max(CycleLength, 0.1f), 1.f);
 	}
 
@@ -434,12 +473,12 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	if (AirWeight > UE_KINDA_SMALL_NUMBER)
 	{
 		const float StartWeight = bJumped ? 1.f - FMath::Clamp((AirTime - JumpStartWindow) / 0.2f, 0.f, 1.f) : 0.f;
-		AddOneShotPair(Samples, JumpStart, RifleJumpStart, AirTime, AirWeight * StartWeight, false);
-		AddOneShotPair(Samples, Fall, RifleFall, AirTime, AirWeight * (1.f - StartWeight), true);
+		AddOneShotPair(Samples, JumpStart, JumpStart, AirTime, AirWeight * StartWeight, false);
+		AddOneShotPair(Samples, Fall, Fall, AirTime, AirWeight * (1.f - StartWeight), true);
 	}
 	if (Land > UE_KINDA_SMALL_NUMBER)
 	{
-		AddOneShotPair(Samples, CampusClips::Land, RifleLand, LandTime, Land, false);
+		AddOneShotPair(Samples, CampusClips::Land, CampusClips::Land, LandTime, Land, false);
 	}
 
 	// Upper-body one-shot (reload / equip), else hold the rifle while crouched.
@@ -459,11 +498,13 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			Proxy.UpperBody = { Sequence, UpperBodyTime, UpperAlpha, false };
 		}
 	}
-	if (UpperBodyClip == INDEX_NONE && CrouchWeight * RifleWeight > 0.01f)
+	// Sets without rifle clips (crouch, air, landing) hold the rifle with the upper body only.
+	const float HoldRifle = RifleWeight * FMath::Max3(CrouchWeight, AirWeight, Land);
+	if (UpperBodyClip == INDEX_NONE && HoldRifle > 0.01f)
 	{
 		if (const UAnimSequence* RifleIdle = Clip(CampusClips::Rifle))
 		{
-			Proxy.UpperBody = { RifleIdle, FMath::Fmod(IdleTime, RifleIdle->GetPlayLength()), CrouchWeight * RifleWeight, true };
+			Proxy.UpperBody = { RifleIdle, FMath::Fmod(IdleTime, RifleIdle->GetPlayLength()), HoldRifle, true };
 		}
 	}
 
