@@ -33,6 +33,16 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
+	/** Bullets wear a door down; at 0 it is gone (no mesh, no collision) for everyone until the next round. */
+	UPROPERTY(EditAnywhere, Category="Door")
+	float MaxHealth = 150.f;
+
+	/** Server only. */
+	void ApplyDamage(float Amount);
+	/** Server only: whole again (each round starts with every door back). */
+	void Repair();
+	bool IsBroken() const { return Health <= 0.f; }
+
 protected:
 	virtual void BeginPlay() override;
 
@@ -53,6 +63,16 @@ private:
 	/** Swing target in degrees (0 shut, +-OpenAngle open): set by the host only, replicated. */
 	UPROPERTY(Replicated)
 	float Target = 0.f;
+
+	UPROPERTY(ReplicatedUsing=OnRep_Health)
+	float Health = 150.f;
+
+	UFUNCTION()
+	void OnRep_Health();
+	/** Hit shake on every phone, so damage shows before the door breaks. */
+	float ShakeTime = 0.f;
+	float LastHealth = 150.f;
+	void ApplyBrokenState();
 	float CheckTimer = 0.f;
 	bool bSolid = true;
 };

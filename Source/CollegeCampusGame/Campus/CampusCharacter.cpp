@@ -6,6 +6,7 @@
 #include "Campus/CampusZipline.h"
 #include "EngineUtils.h"
 #include "Campus/CampusFx.h"
+#include "Campus/CampusDoor.h"
 #include "Campus/CampusGameMode.h"
 #include "Campus/CampusMatchState.h"
 #include "Components/CapsuleComponent.h"
@@ -970,6 +971,13 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	else
 	{
 		MulticastFire(bWall ? FVector(Hit.ImpactPoint) : End, bWall ? FVector(Hit.ImpactNormal) : FVector::UpVector, bWall);
+		// doors break under fire (same falloff as on players)
+		if (ACampusDoor* Door = bWall ? Cast<ACampusDoor>(Hit.GetActor()) : nullptr)
+		{
+			const float DoorFalloff = FMath::GetMappedRangeValueClamped(FVector2D(FalloffStart, FMath::Max(FalloffEnd, FalloffStart + 1.f)),
+				FVector2D(1.f, FalloffMinShare), Hit.Distance);
+			Door->ApplyDamage(Damage * DoorFalloff);
+		}
 		return;
 	}
 	const ACampusPlayerState* MyState = GetPlayerState<ACampusPlayerState>();

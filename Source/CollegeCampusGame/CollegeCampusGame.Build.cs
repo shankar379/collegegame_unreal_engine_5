@@ -25,7 +25,7 @@ public class CollegeCampusGame : ModuleRules
 			"AnimationCore"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { });
+		PrivateDependencyModuleNames.AddRange(new string[] { "OnlineSubsystem", "OnlineSubsystemUtils" });
 
 		if (Target.Platform == UnrealTargetPlatform.Android)
 		{
@@ -33,6 +33,7 @@ public class CollegeCampusGame : ModuleRules
 			AdditionalPropertiesForReceipt.Add("AndroidPlugin", System.IO.Path.Combine(ModuleDirectory, "CampusCombat_UPL.xml"));
 			// Android JNI (Razorpay payment sheet bridge, Campus/CampusRazorpay.cpp)
 			PrivateDependencyModuleNames.Add("Launch");
+			PrivateDependencyModuleNames.Add("AndroidPermission");
 		}
 
 		PublicIncludePaths.AddRange(new string[] {

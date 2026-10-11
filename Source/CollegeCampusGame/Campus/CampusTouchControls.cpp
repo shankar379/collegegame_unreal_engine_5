@@ -6,6 +6,7 @@
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
 #include "GameFramework/PlayerController.h"
+#include "Campus/CampusPlayerControllers.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
 #include "Engine/Texture2D.h"
@@ -198,6 +199,10 @@ SCampusTouchControls::FLayout SCampusTouchControls::MakeLayout(const FVector2D& 
 	L.Eye = FVector2D(21.f * U + L.EyeR, 12.6f * U + L.EyeR);
 	L.SprintR = 2.5f * U;
 	L.Sprint = FromLeft(0.165f, 0.34f, 5.f * U);
+	// team voice toggles, top centre-left (left of the score box)
+	L.VoiceR = 2.4f * U;
+	L.Mic = FVector2D(L.W * 0.5f - 18.f * U, 32.f + 3.2f * U);
+	L.Speaker = L.Mic - FVector2D(6.f * U, 0.f);
 
 	// Weapons panel, top right (26% x 20% in the web HUD; kept compact here).
 	L.WeaponSize = FVector2D(L.W * 0.17f, L.H * 0.13f);
@@ -222,6 +227,8 @@ SCampusTouchControls::EControl SCampusTouchControls::HitTest(const FLayout& L, c
 	if (In(L.Prone, L.ProneR * Pad)) return EControl::Prone;
 	if (In(L.Sprint, L.SprintR * 1.4f)) return EControl::Sprint;
 	if (In(L.Eye, L.EyeR * 1.4f)) return EControl::Eye;
+	if (In(L.Mic, L.VoiceR * 1.4f)) return EControl::Mic;
+	if (In(L.Speaker, L.VoiceR * 1.4f)) return EControl::Speaker;
 	if (P.X >= L.WeaponMin.X && P.Y >= L.WeaponMin.Y && P.X <= L.WeaponMin.X + L.WeaponSize.X && P.Y <= L.WeaponMin.Y + L.WeaponSize.Y) return EControl::Weapon;
 	return EControl::None;
 }
@@ -273,6 +280,18 @@ void SCampusTouchControls::PressControl(EControl Control)
 		break;
 	case EControl::Weapon:
 		Character->ToggleArmed();
+		break;
+	case EControl::Mic:
+		if (ACampusMatchPlayerController* Voice = Cast<ACampusMatchPlayerController>(Controller.Get()))
+		{
+			Voice->SetMicOn(!Voice->IsMicOn());
+		}
+		break;
+	case EControl::Speaker:
+		if (ACampusMatchPlayerController* Voice = Cast<ACampusMatchPlayerController>(Controller.Get()))
+		{
+			Voice->SetSpeakerOn(!Voice->IsSpeakerOn());
+		}
 		break;
 	case EControl::Prone:
 		bAutoRun = false;
@@ -891,6 +910,24 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	Plain(EControl::Crouch, L.Crouch, L.CrouchR, Character && Character->bIsCrouched && !Character->IsProne(), 1.f);
 	Plain(EControl::Prone, L.Prone, L.ProneR, Character && Character->IsProne(), 1.f);
 	Plain(EControl::Sprint, L.Sprint, L.SprintR, bAutoRun || (Character && Character->IsSprinting()), 1.f);
+
+	// team voice: green when on, grey with a slash when off
+	if (const ACampusMatchPlayerController* Voice = Cast<ACampusMatchPlayerController>(Controller.Get()))
+	{
+		auto Toggle = [&](const FVector2D& C, const TCHAR* Label, bool bOn)
+		{
+			const FLinearColor Back = bOn ? FLinearColor(0.1f, 0.55f, 0.25f, 0.85f) : FLinearColor(0.08f, 0.08f, 0.08f, 0.6f);
+			DrawCircle(Out, Layer, G, C, L.VoiceR, Back);
+			DrawText(Out, Layer + 1, G, Label, C, FMath::RoundToInt(L.U * 1.05f), FLinearColor::White);
+			if (!bOn)
+			{
+				const float S = L.VoiceR * 0.7f;
+				DrawPolyline(Out, Layer + 2, G, { FVector2f(C.X - S, C.Y + S), FVector2f(C.X + S, C.Y - S) }, TouchStyle::Red, 2.f);
+			}
+		};
+		Toggle(L.Mic, TEXT("MIC"), Voice->IsMicOn());
+		Toggle(L.Speaker, TEXT("SPK"), Voice->IsSpeakerOn());
+	}
 
 	{
 		const bool bEyeHeld = IsHeld(EControl::Eye);

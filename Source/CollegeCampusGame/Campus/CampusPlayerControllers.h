@@ -82,6 +82,12 @@ public:
 	/** Coins this player earns for the finished match. */
 	int32 ComputeReward() const;
 
+	/** Team voice (Free Fire style toggles): mic sends to teammates; speaker plays teammates. */
+	void SetMicOn(bool bOn);
+	void SetSpeakerOn(bool bOn);
+	bool IsMicOn() const { return bMicOn; }
+	bool IsSpeakerOn() const { return bSpeakerOn; }
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -98,4 +104,10 @@ private:
 	int32 AppliedMode = -1;
 
 	bool bResultRecorded = false;
+
+	bool bMicOn = false;
+	bool bSpeakerOn = true;
+	/** Android: the microphone permission is asked the first time the mic is turned on. */
+	UFUNCTION()
+	void OnMicPermission(const TArray<FString>& Permissions, const TArray<bool>& Granted);
 };

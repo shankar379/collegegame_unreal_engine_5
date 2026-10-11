@@ -2,6 +2,8 @@
 
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusCharacter.h"
+#include "Campus/CampusDoor.h"
+#include "EngineUtils.h"
 #include "Campus/CampusMatchState.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "Engine/World.h"
@@ -88,6 +90,39 @@ void ACampusMatchGameMode::PostLogin(APlayerController* NewPlayer)
 	Super::PostLogin(NewPlayer);
 	AdmitWithTicket(NewPlayer);
 	ReportRoom();
+	RefreshVoiceTeams();
+}
+
+void ACampusMatchGameMode::RefreshVoiceTeams()
+{
+	TArray<APlayerController*> Players;
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		if (APlayerController* Player = It->Get(); Player && Player->PlayerState)
+		{
+			Players.Add(Player);
+		}
+	}
+	for (APlayerController* Listener : Players)
+	{
+		const ACampusPlayerState* Mine = Listener->GetPlayerState<ACampusPlayerState>();
+		for (APlayerController* Speaker : Players)
+		{
+			const ACampusPlayerState* Theirs = Speaker->GetPlayerState<ACampusPlayerState>();
+			if (Speaker == Listener || !Mine || !Theirs || !Theirs->GetUniqueId().IsValid())
+			{
+				continue;
+			}
+			if (Mine->Team == Theirs->Team)
+			{
+				Listener->GameplayUnmutePlayer(Theirs->GetUniqueId());
+			}
+			else
+			{
+				Listener->GameplayMutePlayer(Theirs->GetUniqueId());
+			}
+		}
+	}
 }
 
 FString ACampusMatchGameMode::InitNewPlayer(APlayerController* NewPlayerController, const FUniqueNetIdRepl& UniqueId, const FString& Options,
@@ -252,6 +287,7 @@ void ACampusMatchGameMode::SwitchTeam(APlayerController* Requester)
 		Pawn->Destroy();
 	}
 	RestartPlayer(Requester);
+	RefreshVoiceTeams();
 }
 
 void ACampusMatchGameMode::OnKilled(AController* Victim, AController* Killer)
@@ -345,6 +381,11 @@ void ACampusMatchGameMode::EndRound()
 
 void ACampusMatchGameMode::StartRound(int32 Round, bool bDecider)
 {
+	// every round starts with all doors whole
+	for (TActorIterator<ACampusDoor> It(GetWorld()); It; ++It)
+	{
+		It->Repair();
+	}
 	ACampusGameState* State = GetCampusState();
 	if (!State)
 	{

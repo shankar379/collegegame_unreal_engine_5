@@ -17,6 +17,13 @@
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
+#include "GameFramework/PlayerState.h"
+#include "Interfaces/VoiceInterface.h"
+#include "OnlineSubsystemUtils.h"
+#if PLATFORM_ANDROID
+#include "AndroidPermissionFunctionLibrary.h"
+#include "AndroidPermissionCallbackProxy.h"
+#endif
 
 namespace
 {
@@ -347,4 +354,69 @@ void ACampusMatchPlayerController::RecordResult()
 void ACampusMatchPlayerController::LeaveToLobby()
 {
 	UGameplayStatics::OpenLevel(this, FName(UCampusGameInstance::LobbyMap));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Team voice
+
+namespace CampusVoice
+{
+	const TCHAR* MicPermission = TEXT("android.permission.RECORD_AUDIO");
+}
+
+void ACampusMatchPlayerController::SetMicOn(bool bOn)
+{
+#if PLATFORM_ANDROID
+	if (bOn && !UAndroidPermissionFunctionLibrary::CheckPermission(CampusVoice::MicPermission))
+	{
+		if (UAndroidPermissionCallbackProxy* Ask = UAndroidPermissionFunctionLibrary::AcquirePermissions({ CampusVoice::MicPermission }))
+		{
+			Ask->OnPermissionsGrantedDynamicDelegate.AddDynamic(this, &ACampusMatchPlayerController::OnMicPermission);
+		}
+		return; // turns on once granted
+	}
+#endif
+	bMicOn = bOn;
+	// push-to-talk session: only transmits between StartTalking and StopTalking
+	if (bOn)
+	{
+		StartTalking();
+	}
+	else
+	{
+		StopTalking();
+	}
+}
+
+void ACampusMatchPlayerController::OnMicPermission(const TArray<FString>& Permissions, const TArray<bool>& Granted)
+{
+	if (Granted.Num() > 0 && Granted[0])
+	{
+		SetMicOn(true);
+	}
+}
+
+void ACampusMatchPlayerController::SetSpeakerOn(bool bOn)
+{
+	bSpeakerOn = bOn;
+	IOnlineVoicePtr Voice = Online::GetVoiceInterface(GetWorld());
+	const AGameStateBase* State = GetWorld()->GetGameState();
+	if (!Voice.IsValid() || !State)
+	{
+		return;
+	}
+	for (const APlayerState* Other : State->PlayerArray)
+	{
+		if (Other && Other != PlayerState && Other->GetUniqueId().IsValid())
+		{
+			if (bOn)
+			{
+				Voice->UnmuteRemoteTalker(0, *Other->GetUniqueId(), false);
+			}
+			else
+			{
+				Voice->MuteRemoteTalker(0, *Other->GetUniqueId(), false);
+			}
+		}
+	}
 }

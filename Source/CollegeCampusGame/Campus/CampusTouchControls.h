@@ -37,7 +37,7 @@ public:
 	virtual FReply OnTouchEnded(const FGeometry& MyGeometry, const FPointerEvent& TouchEvent) override;
 
 private:
-	enum class EControl : uint8 { None, Fire, FireLeft, Scope, Zoom, Reload, Jump, Crouch, Prone, Sprint, Weapon, Eye };
+	enum class EControl : uint8 { None, Fire, FireLeft, Scope, Zoom, Reload, Jump, Crouch, Prone, Sprint, Weapon, Eye, Mic, Speaker };
 	enum class ERole : uint8 { Look, Joystick, FireDrag, Button, FreeLook };
 
 	struct FFinger
@@ -56,7 +56,8 @@ private:
 		FVector2D JoyHome;
 		float JoyR = 0.f;
 		FVector2D JoyZoneMin, JoyZoneMax;
-		FVector2D Fire, FireLeft, Scope, Zoom, Reload, Jump, Crouch, Prone, Sprint, Eye;
+		FVector2D Fire, FireLeft, Scope, Zoom, Reload, Jump, Crouch, Prone, Sprint, Eye, Mic, Speaker;
+		float VoiceR = 0.f;
 		float FireR = 0.f, FireLeftR = 0.f, ScopeR = 0.f, ReloadR = 0.f, JumpR = 0.f, CrouchR = 0.f, ProneR = 0.f, SprintR = 0.f, EyeR = 0.f;
 		FVector2D WeaponMin, WeaponSize;
 		FVector2D ZoomSize;

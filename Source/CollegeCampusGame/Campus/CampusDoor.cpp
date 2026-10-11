@@ -67,6 +67,47 @@ void ACampusDoor::BeginPlay()
 	Leaf->SetRelativeLocation(FVector(Width * 0.5f, 0.f, Height * 0.5f));
 	// Spread the proximity checks over frames.
 	CheckTimer = FMath::FRand() * CampusDoorTuning::CheckInterval;
+	Health = MaxHealth;
+	LastHealth = MaxHealth;
+}
+
+void ACampusDoor::ApplyDamage(float Amount)
+{
+	if (!HasAuthority() || Health <= 0.f || Amount <= 0.f)
+	{
+		return;
+	}
+	Health = FMath::Max(0.f, Health - Amount);
+	ForceNetUpdate(); // doors replicate at 2 Hz: a hit must show now
+	OnRep_Health();   // the host's own view
+}
+
+void ACampusDoor::Repair()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+	Health = MaxHealth;
+	ForceNetUpdate();
+	OnRep_Health();
+}
+
+void ACampusDoor::OnRep_Health()
+{
+	if (Health < LastHealth && Health > 0.f)
+	{
+		ShakeTime = 0.15f;
+	}
+	LastHealth = Health;
+	ApplyBrokenState();
+}
+
+void ACampusDoor::ApplyBrokenState()
+{
+	const bool bBroken = Health <= 0.f;
+	Leaf->SetVisibility(!bBroken);
+	Leaf->SetCollisionEnabled(bBroken || !bSolid ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryAndPhysics);
 }
 
 void ACampusDoor::LookForPlayers()
@@ -96,6 +137,16 @@ void ACampusDoor::Tick(float DeltaSeconds)
 	Super::Tick(DeltaSeconds);
 	using namespace CampusDoorTuning;
 
+	if (ShakeTime > 0.f)
+	{
+		ShakeTime = FMath::Max(0.f, ShakeTime - DeltaSeconds);
+		const float Jolt = ShakeTime > 0.f ? FMath::Sin(ShakeTime * 120.f) * 1.5f : 0.f;
+		Pivot->SetRelativeRotation(FRotator(0.f, Angle + Jolt, 0.f));
+	}
+	if (Health <= 0.f)
+	{
+		return; // gone: no swinging, no collision
+	}
 	CheckTimer -= DeltaSeconds;
 	if (CheckTimer <= 0.f && HasAuthority())
 	{
@@ -120,4 +171,5 @@ void ACampusDoor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(ACampusDoor, Target);
+	DOREPLIFETIME(ACampusDoor, Health);
 }

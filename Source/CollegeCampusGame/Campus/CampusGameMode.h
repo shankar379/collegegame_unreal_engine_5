@@ -43,6 +43,8 @@ public:
 	/** Hosted API room: a phone may only stay if its ticket checks out with the API. */
 	void AdmitWithTicket(APlayerController* NewPlayer);
 	void ReportResult();
+	/** Team voice: the server forwards voice only between teammates (enemies are gameplay-muted both ways). */
+	void RefreshVoiceTeams();
 
 	/** Host only, from the waiting room. */
 	void RequestStart(APlayerController* Requester);
