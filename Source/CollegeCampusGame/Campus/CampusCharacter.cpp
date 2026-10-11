@@ -24,6 +24,7 @@
 #include "InputModifiers.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Net/UnrealNetwork.h"
+#include "GameFramework/PlayerState.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
 #include "Sound/SoundAttenuation.h"
@@ -33,6 +34,10 @@
 ACampusCharacter::ACampusCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UCampusMovementComponent>(ACharacter::CharacterMovementComponentName))
 {
+	// players send 60 updates a second (engine default 100 is capped by the server tick anyway; keep min high so
+	// a still player does not fall to 2 Hz and teleport when it moves)
+	SetNetUpdateFrequency(60.f);
+	SetMinNetUpdateFrequency(30.f);
 	PrimaryActorTick.bCanEverTick = true;
 
 	GetCapsuleComponent()->InitCapsuleSize(30.f, 83.f);
@@ -153,6 +158,10 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	if (HasAuthority())
+	{
+		RecordHitbox();
+	}
 	if (bTraversing)
 	{
 		TickTraversal(DeltaSeconds);
@@ -895,19 +904,23 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	}
 	ServerShotCredit -= 1.f;
 	--ServerAmmoInMag;
-	// Trace world and pawns (character capsules do not block the Visibility channel).
+	// The world blocks where it is now; players are checked where the shooter saw them (lag compensation).
 	FCollisionObjectQueryParams Objects;
 	Objects.AddObjectTypesToQuery(ECC_WorldStatic);
 	Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
-	Objects.AddObjectTypesToQuery(ECC_Pawn);
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CampusFire), false, this);
 	FHitResult Hit;
 	const FVector End = FVector(Start) + FVector(Direction) * Range;
-	const bool bHit = GetWorld()->LineTraceSingleByObjectType(Hit, Start, End, Objects, Params);
-	ACampusCharacter* Victim = bHit ? Cast<ACampusCharacter>(Hit.GetActor()) : nullptr;
-	MulticastFire(bHit ? FVector(Hit.ImpactPoint) : End, bHit ? FVector(Hit.ImpactNormal) : FVector::UpVector, bHit && !Victim);
-	if (!Victim)
+	const bool bWall = GetWorld()->LineTraceSingleByObjectType(Hit, Start, End, Objects, Params);
+	FVector VictimPoint;
+	ACampusCharacter* Victim = RewoundVictim(Start, Direction, bWall ? Hit.Distance : Range, VictimPoint);
+	if (Victim)
 	{
+		MulticastFire(VictimPoint, -FVector(Direction), false);
+	}
+	else
+	{
+		MulticastFire(bWall ? FVector(Hit.ImpactPoint) : End, bWall ? FVector(Hit.ImpactNormal) : FVector::UpVector, bWall);
 		return;
 	}
 	const ACampusPlayerState* MyState = GetPlayerState<ACampusPlayerState>();
@@ -919,6 +932,112 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	const bool bWasAlive = Victim->GetHealth() > 0.f;
 	Victim->ApplyHit(Damage, GetController());
 	ClientConfirmHit(bWasAlive && Victim->GetHealth() <= 0.f);
+}
+
+namespace CampusLagComp
+{
+	/** History kept per player, and the most a shot may be rewound (higher pings get less help, not more). */
+	constexpr double KeepSeconds = 0.5;
+	constexpr double MaxRewind = 0.3;
+	/** Remote players are drawn a little behind their newest update (movement smoothing). */
+	constexpr double ViewDelay = 0.03;
+}
+
+void ACampusCharacter::RecordHitbox()
+{
+	const double Now = GetWorld()->GetTimeSeconds();
+	const UCapsuleComponent* Capsule = GetCapsuleComponent();
+	FHitboxFrame& Frame = HitboxHistory.AddDefaulted_GetRef();
+	Frame.Time = Now;
+	Frame.Center = Capsule->GetComponentLocation();
+	Frame.HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+	Frame.Radius = Capsule->GetScaledCapsuleRadius();
+	int32 Old = 0;
+	while (Old < HitboxHistory.Num() - 1 && HitboxHistory[Old].Time < Now - CampusLagComp::KeepSeconds)
+	{
+		++Old;
+	}
+	if (Old > 0)
+	{
+		HitboxHistory.RemoveAt(0, Old, EAllowShrinking::No);
+	}
+}
+
+ACampusCharacter::FHitboxFrame ACampusCharacter::HitboxAt(double Time) const
+{
+	if (HitboxHistory.IsEmpty())
+	{
+		FHitboxFrame Now;
+		Now.Center = GetCapsuleComponent()->GetComponentLocation();
+		Now.HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+		Now.Radius = GetCapsuleComponent()->GetScaledCapsuleRadius();
+		return Now;
+	}
+	if (Time <= HitboxHistory[0].Time)
+	{
+		return HitboxHistory[0];
+	}
+	for (int32 Index = HitboxHistory.Num() - 1; Index > 0; --Index)
+	{
+		const FHitboxFrame& A = HitboxHistory[Index - 1];
+		const FHitboxFrame& B = HitboxHistory[Index];
+		if (A.Time <= Time)
+		{
+			const float Alpha = B.Time > A.Time ? float((Time - A.Time) / (B.Time - A.Time)) : 1.f;
+			FHitboxFrame Out;
+			Out.Time = Time;
+			Out.Center = FMath::Lerp(A.Center, B.Center, FMath::Clamp(Alpha, 0.f, 1.f));
+			Out.HalfHeight = FMath::Lerp(A.HalfHeight, B.HalfHeight, Alpha);
+			Out.Radius = FMath::Lerp(A.Radius, B.Radius, Alpha);
+			return Out;
+		}
+	}
+	return HitboxHistory.Last();
+}
+
+ACampusCharacter* ACampusCharacter::RewoundVictim(const FVector& Start, const FVector& Direction, float BlockDistance, FVector& OutPoint) const
+{
+	// The shot left the phone half a ping ago, and what it aimed at was already half a ping old there.
+	double Rewind = CampusLagComp::ViewDelay;
+	if (const APlayerState* State = GetPlayerState())
+	{
+		Rewind += State->GetPingInMilliseconds() * 0.001;
+	}
+	if (IsLocallyControlled())
+	{
+		Rewind = 0.0; // the host's own shots see the server's world directly
+	}
+	const double When = GetWorld()->GetTimeSeconds() - FMath::Min(Rewind, CampusLagComp::MaxRewind);
+	const FVector End = Start + Direction * BlockDistance;
+
+	ACampusCharacter* Best = nullptr;
+	float BestDistance = BlockDistance;
+	for (TActorIterator<ACampusCharacter> It(GetWorld()); It; ++It)
+	{
+		ACampusCharacter* Other = *It;
+		if (Other == this || Other->bDead)
+		{
+			continue;
+		}
+		const FHitboxFrame Box = Other->HitboxAt(When);
+		const FVector Half(0.f, 0.f, FMath::Max(Box.HalfHeight - Box.Radius, 0.f));
+		FVector OnShot, OnAxis;
+		FMath::SegmentDistToSegmentSafe(Start, End, Box.Center - Half, Box.Center + Half, OnShot, OnAxis);
+		const float Miss = FVector::Dist(OnShot, OnAxis);
+		if (Miss > Box.Radius)
+		{
+			continue;
+		}
+		// step back from the closest approach to the capsule's surface
+		const float Along = FVector::DotProduct(OnShot - Start, Direction) - FMath::Sqrt(FMath::Square(Box.Radius) - FMath::Square(Miss));
+		if (Along >= 0.f && Along < BestDistance)
+		{
+			BestDistance = Along;
+			Best = Other;
+		}
+	}
+	OutPoint = Start + Direction * BestDistance;
+	return Best;
 }
 
 void ACampusCharacter::MulticastFire_Implementation(FVector_NetQuantize End, FVector_NetQuantizeNormal Normal, bool bMark)

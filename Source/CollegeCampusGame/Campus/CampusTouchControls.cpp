@@ -977,6 +977,14 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 		}
 		DrawText(Out, Layer + 1, G, FString::Printf(TEXT("ALIVE %d    KILL %d"), Alive, Mine ? Mine->Kills : 0),
 			FVector2D(L.W - L.W * 0.01f, 3.f * U), FMath::RoundToInt(U * 1.4f), FLinearColor::White, 1.f, 0.5f);
+		// Ping to the match server (green / yellow / red), under the counter.
+		if (Mine && World->GetNetMode() == NM_Client)
+		{
+			const int32 Ping = FMath::RoundToInt(Mine->GetPingInMilliseconds());
+			const FLinearColor PingColor = Ping < 60 ? FLinearColor(0.3f, 1.f, 0.4f) : Ping < 120 ? FLinearColor(1.f, 0.85f, 0.2f) : TouchStyle::Red;
+			DrawText(Out, Layer + 1, G, FString::Printf(TEXT("%d ms"), Ping), FVector2D(L.W - L.W * 0.01f, 5.f * U),
+				FMath::RoundToInt(U * 1.1f), PingColor, 1.f, 0.5f);
+		}
 
 		// Kill feed, right side.
 		for (int32 Index = 0; Index < State->Feed.Num(); ++Index)

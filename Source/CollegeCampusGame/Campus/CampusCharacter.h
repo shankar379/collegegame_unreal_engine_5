@@ -439,5 +439,20 @@ private:
 	int32 ServerAmmoReserve = 120;
 	float ServerShotCredit = 3.f;
 	float ServerCreditTime = 0.f;
+
+	/** Server-only lag compensation: where this capsule was over the last half second. */
+	struct FHitboxFrame
+	{
+		double Time = 0.0;
+		FVector Center = FVector::ZeroVector;
+		float HalfHeight = 0.f;
+		float Radius = 0.f;
+	};
+	TArray<FHitboxFrame> HitboxHistory;
+	void RecordHitbox();
+	/** The capsule as it was at Time (interpolated between recorded frames). */
+	FHitboxFrame HitboxAt(double Time) const;
+	/** The enemy this shot hit as the shooter saw the world (rewound by its ping), nearer than BlockDistance. */
+	ACampusCharacter* RewoundVictim(const FVector& Start, const FVector& Direction, float BlockDistance, FVector& OutPoint) const;
 	float ServerReloadEndTime = 0.f;
 };
