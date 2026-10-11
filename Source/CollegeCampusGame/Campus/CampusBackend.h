@@ -54,7 +54,21 @@ struct FCampusRoom
 	FString Map;
 	int32 TeamSize = 4;
 	int32 MaxPlayers = 8;
+	/** Join only: proof for the match server that the API let this player in (short-lived). */
+	FString Ticket;
 	bool IsValid() const { return !Code.IsEmpty(); }
+};
+
+/** One player's final line, reported by the match server (never by the player's own phone). */
+struct FCampusMatchResult
+{
+	FString PlayerId;
+	int32 Team = 0;
+	int32 Kills = 0;
+	int32 Deaths = 0;
+	int32 DamageDealt = 0;
+	int32 DamageTaken = 0;
+	bool bWon = false;
 };
 
 UCLASS()
@@ -105,6 +119,10 @@ public:
 	/** Called by the host's match: keeps the room listed and marks it playing once the match starts. */
 	void SetHostedRoomState(bool bPlaying, int32 PlayerCount);
 	void CloseHostedRoom();
+	/** Host: checks a connecting phone's ticket. bRejected = the API said no (a network failure is not a no). */
+	void AdmitPlayer(const FString& Ticket, TFunction<void(bool bRejected, const FString& PlayerId)> Done);
+	/** Host: final stats of every admitted player; ends the room on the server. */
+	void ReportMatchResult(const TArray<FCampusMatchResult>& Players);
 	const FCampusRoom& GetHostedRoom() const { return HostedRoom; }
 
 	// ---- cached state (valid after the calls above)

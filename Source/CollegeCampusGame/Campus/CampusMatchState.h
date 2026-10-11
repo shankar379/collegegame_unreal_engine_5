@@ -35,6 +35,10 @@ public:
 	UPROPERTY(Replicated)
 	ECampusTeam Team = ECampusTeam::Red;
 
+	/** Server only: the account the API admitted for this connection, and the ticket it came with. */
+	FString AccountId;
+	FString JoinTicket;
+
 	UPROPERTY(Replicated)
 	int32 Kills = 0;
 

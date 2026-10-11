@@ -86,7 +86,94 @@ void ACampusMatchGameMode::PostLogin(APlayerController* NewPlayer)
 		PlayerState->bIsHost = NewPlayer->IsLocalPlayerController();
 	}
 	Super::PostLogin(NewPlayer);
+	AdmitWithTicket(NewPlayer);
 	ReportRoom();
+}
+
+FString ACampusMatchGameMode::InitNewPlayer(APlayerController* NewPlayerController, const FUniqueNetIdRepl& UniqueId, const FString& Options,
+	const FString& Portal)
+{
+	const FString Result = Super::InitNewPlayer(NewPlayerController, UniqueId, Options, Portal);
+	if (ACampusPlayerState* PlayerState = NewPlayerController ? NewPlayerController->GetPlayerState<ACampusPlayerState>() : nullptr)
+	{
+		PlayerState->JoinTicket = UGameplayStatics::ParseOption(Options, TEXT("Ticket"));
+	}
+	return Result;
+}
+
+void ACampusMatchGameMode::AdmitWithTicket(APlayerController* NewPlayer)
+{
+	const ACampusGameState* State = GetCampusState();
+	UCampusBackend* Backend = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBackend>() : nullptr;
+	ACampusPlayerState* PlayerState = NewPlayer->GetPlayerState<ACampusPlayerState>();
+	if (!State || !Backend || !PlayerState || !Backend->GetHostedRoom().IsValid() || Backend->GetHostedRoom().Code != State->RoomCode)
+	{
+		return; // not an API room (editor play, LAN quick match)
+	}
+	if (NewPlayer->IsLocalPlayerController())
+	{
+		PlayerState->AccountId = Backend->PlayerId;
+		return;
+	}
+	TWeakObjectPtr<APlayerController> WeakPlayer(NewPlayer);
+	TWeakObjectPtr<ACampusMatchGameMode> WeakThis(this);
+	Backend->AdmitPlayer(PlayerState->JoinTicket, [WeakThis, WeakPlayer](bool bRejected, const FString& PlayerId)
+	{
+		APlayerController* Player = WeakPlayer.Get();
+		ACampusMatchGameMode* Self = WeakThis.Get();
+		if (!Player || !Self)
+		{
+			return;
+		}
+		ACampusPlayerState* Admitted = Player->GetPlayerState<ACampusPlayerState>();
+		// the same account twice (a copied ticket) is refused like a bad one
+		bool bDuplicate = false;
+		for (const APlayerState* Other : Self->GameState->PlayerArray)
+		{
+			const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Other);
+			bDuplicate |= Campus && Campus != Admitted && !PlayerId.IsEmpty() && Campus->AccountId == PlayerId;
+		}
+		if (bRejected || bDuplicate)
+		{
+			if (Self->GameSession)
+			{
+				Self->GameSession->KickPlayer(Player, FText::FromString(TEXT("Join this room from the lobby with its code.")));
+			}
+			return;
+		}
+		if (Admitted)
+		{
+			Admitted->AccountId = PlayerId; // empty when the API was unreachable: plays, but no recorded result
+		}
+	});
+}
+
+void ACampusMatchGameMode::ReportResult()
+{
+	const ACampusGameState* State = GetCampusState();
+	UCampusBackend* Backend = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBackend>() : nullptr;
+	if (!State || !Backend || !Backend->GetHostedRoom().IsValid() || Backend->GetHostedRoom().Code != State->RoomCode)
+	{
+		return;
+	}
+	TArray<FCampusMatchResult> Lines;
+	for (const APlayerState* Player : GameState->PlayerArray)
+	{
+		const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
+		if (!Campus || Campus->AccountId.IsEmpty())
+		{
+			continue;
+		}
+		FCampusMatchResult& Line = Lines.AddDefaulted_GetRef();
+		Line.PlayerId = Campus->AccountId;
+		Line.Team = int32(Campus->Team);
+		Line.Kills = Campus->Kills;
+		Line.Deaths = Campus->Deaths;
+		Line.DamageDealt = FMath::RoundToInt(Campus->DamageDealt);
+		Line.DamageTaken = FMath::RoundToInt(Campus->DamageTaken);
+		Line.bWon = State->Winner == int32(Campus->Team);
+	}
+	Backend->ReportMatchResult(Lines);
 }
 
 FTransform ACampusMatchGameMode::SpawnTransformFor(const ACampusPlayerState* PlayerState) const
@@ -253,6 +340,7 @@ void ACampusMatchGameMode::EndRound()
 	State->MulticastFeed(FString::Printf(TEXT("Match over  ·  %s wins %d - %d"),
 		State->Winner == 0 ? TEXT("RED") : TEXT("BLUE"), FMath::Max(State->RedScore, State->BlueScore), FMath::Min(State->RedScore, State->BlueScore)));
 	ReportRoom();
+	ReportResult();
 }
 
 void ACampusMatchGameMode::StartRound(int32 Round, bool bDecider)

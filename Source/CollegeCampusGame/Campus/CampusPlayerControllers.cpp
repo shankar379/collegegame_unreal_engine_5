@@ -168,7 +168,8 @@ void ACampusLobbyPlayerController::JoinRoomByCode(const FString& Code, TFunction
 				OnFailed(Error);
 				return;
 			}
-			Self->ClientTravel(FString::Printf(TEXT("%s:%d"), *Room.Address, Room.Port), TRAVEL_Absolute);
+			// the ticket rides along as a URL option; the host checks it with the API (ACampusMatchGameMode::AdmitWithTicket)
+			Self->ClientTravel(FString::Printf(TEXT("%s:%d?Ticket=%s"), *Room.Address, Room.Port, *Room.Ticket), TRAVEL_Absolute);
 		}
 	});
 }

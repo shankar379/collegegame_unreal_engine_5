@@ -823,8 +823,53 @@ void UCampusBackend::JoinRoom(const FString& Code, FRoomDone Done)
 			Done(false, ErrorText(Status, Json), FCampusRoom());
 			return;
 		}
-		Done(true, FString(), ReadRoom(Obj(Json, TEXT("room"))));
+		FCampusRoom Room = ReadRoom(Obj(Json, TEXT("room")));
+		Room.Ticket = Str(Json, TEXT("ticket"));
+		Done(true, FString(), Room);
 	});
+}
+
+void UCampusBackend::AdmitPlayer(const FString& Ticket, TFunction<void(bool bRejected, const FString& PlayerId)> Done)
+{
+	if (!HostedRoom.IsValid() || Ticket.IsEmpty())
+	{
+		Done(HostedRoom.IsValid(), FString());
+		return;
+	}
+	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
+	Body->SetStringField(TEXT("ticket"), Ticket);
+	Request(TEXT("POST"), FString::Printf(TEXT("/rooms/%s/admit"), *HostedRoom.Code), Body, true, false, [Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		Done(Status >= 400 && Status < 500, Status == 200 ? Str(Json, TEXT("player_id")) : FString());
+	});
+}
+
+void UCampusBackend::ReportMatchResult(const TArray<FCampusMatchResult>& Players)
+{
+	if (!HostedRoom.IsValid() || Players.IsEmpty())
+	{
+		return;
+	}
+	TArray<TSharedPtr<FJsonValue>> Lines;
+	for (const FCampusMatchResult& Player : Players)
+	{
+		TSharedPtr<FJsonObject> Line = MakeShared<FJsonObject>();
+		Line->SetStringField(TEXT("player_id"), Player.PlayerId);
+		Line->SetNumberField(TEXT("team"), Player.Team);
+		Line->SetNumberField(TEXT("kills"), Player.Kills);
+		Line->SetNumberField(TEXT("deaths"), Player.Deaths);
+		Line->SetNumberField(TEXT("damage_dealt"), Player.DamageDealt);
+		Line->SetNumberField(TEXT("damage_taken"), Player.DamageTaken);
+		Line->SetBoolField(TEXT("won"), Player.bWon);
+		Lines.Add(MakeShared<FJsonValueObject>(Line));
+	}
+	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
+	Body->SetArrayField(TEXT("players"), Lines);
+	Request(TEXT("POST"), FString::Printf(TEXT("/rooms/%s/result"), *HostedRoom.Code), Body, true, false, [](int32 Status, TSharedPtr<FJsonObject>)
+	{
+		UE_LOG(LogTemp, Log, TEXT("Campus: match result reported (%d)"), Status);
+	});
+	HostedRoom = FCampusRoom(); // the server closed it; no more heartbeats
 }
 
 void UCampusBackend::SetHostedRoomState(bool bPlaying, int32 PlayerCount)

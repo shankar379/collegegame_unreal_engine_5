@@ -33,11 +33,16 @@ public:
 
 	virtual void InitGameState() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
+	virtual FString InitNewPlayer(APlayerController* NewPlayerController, const FUniqueNetIdRepl& UniqueId, const FString& Options,
+		const FString& Portal = TEXT("")) override;
 	virtual void Logout(AController* Exiting) override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 
 	/** Host only: room fill + started state to the API (UCampusBackend heartbeat). */
 	void ReportRoom();
+	/** Hosted API room: a phone may only stay if its ticket checks out with the API. */
+	void AdmitWithTicket(APlayerController* NewPlayer);
+	void ReportResult();
 
 	/** Host only, from the waiting room. */
 	void RequestStart(APlayerController* Requester);
