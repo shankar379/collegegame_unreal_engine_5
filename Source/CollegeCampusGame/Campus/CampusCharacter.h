@@ -461,6 +461,13 @@ private:
 	float CameraAimBlend = 0.f;
 	/** Camera pivot height above the feet, eased toward the stance's (cm); < 0 until the first frame. */
 	float CameraAboveFeet = -1.f;
+	/** Speed of the stance height glide (critically damped spring: starts and ends gently). */
+	float CameraAboveFeetSpeed = 0.f;
+
+	/** The capsule changes size inside the movement tick, after Tick placed the boom: keep the boom where it was
+	 *  in the world for that frame (else it pops by the height change for one frame). */
+	virtual void OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+	virtual void OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
 	static constexpr float ZoomLevels[3] = { 1.f, 2.f, 4.f };
 	int32 ZoomIndex = 1;
 	float NextFireTime = 0.f;

@@ -276,7 +276,18 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	{
 		CameraAboveFeet = StanceAboveFeet; // first frame
 	}
-	CameraAboveFeet = FMath::FInterpTo(CameraAboveFeet, StanceAboveFeet, DeltaSeconds, 4.f);
+	// critically damped spring (~0.35 s): FInterpTo moved fastest on the first frame, so standing up from prone
+	// (a 1.2 m rise) shot the camera up before the get-up animation had started moving the body
+	{
+		constexpr float SmoothTime = 0.35f;
+		const float Omega = 2.f / SmoothTime;
+		const float X = Omega * DeltaSeconds;
+		const float Decay = 1.f / (1.f + X + 0.48f * X * X + 0.235f * X * X * X);
+		const float Change = CameraAboveFeet - StanceAboveFeet;
+		const float Temp = (CameraAboveFeetSpeed + Omega * Change) * DeltaSeconds;
+		CameraAboveFeetSpeed = (CameraAboveFeetSpeed - Omega * Temp) * Decay;
+		CameraAboveFeet = StanceAboveFeet + (Change + Temp) * Decay;
+	}
 	float PivotHeight = CameraAboveFeet - HalfHeight;
 	// While aiming, the sight follows the real head height (standing, crouched or any later stance),
 	// so the scope never floats above a crouched character.
@@ -676,6 +687,20 @@ void ACampusCharacter::ToggleProne()
 	}
 	Crouch();
 	SetProne(true);
+}
+
+void ACampusCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+	// the capsule centre (boom mount) just dropped by the adjust: raise the boom by the same, this frame
+	CameraBoom->AddRelativeLocation(FVector(0.f, 0.f, ScaledHalfHeightAdjust));
+}
+
+void ACampusCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+	// the capsule centre just rose by the adjust: lower the boom by the same, this frame
+	CameraBoom->AddRelativeLocation(FVector(0.f, 0.f, -ScaledHalfHeightAdjust));
 }
 
 void ACampusCharacter::SetProne(bool bNewProne)
