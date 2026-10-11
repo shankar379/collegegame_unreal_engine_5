@@ -719,11 +719,16 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			ProneTransTo = bProneNow ? LieTime : (Movement->IsCrouching() ? KneelTime : StandTime);
 			ProneTransDuration = FMath::Abs(ProneTransTo - ProneTransFrom) / TransRate;
 			ProneTransElapsed = 0.f;
+			if (bProneNow)
+			{
+				ProneYawState = 0.f; // a new get-down starts square to the body, not with the last crawl's turn
+			}
 		}
 		bWasProne = bProneNow;
 		bWasCrouched = Movement->IsCrouching() && !bProneNow;
 
 		float TransShare = 0.f;
+		float TransFadeOut = 1.f;
 		if (ProneTransElapsed >= 0.f)
 		{
 			ProneTransElapsed += DeltaSeconds;
@@ -735,7 +740,8 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			{
 				const float Alpha = ProneTransElapsed / FMath::Max(ProneTransDuration, 0.01f);
 				// quick blend in, then a crossfade into the lying pose (down) or back to locomotion (up)
-				TransShare = FMath::Min(1.f, ProneTransElapsed / 0.1f) * FMath::Min(1.f, (ProneTransDuration - ProneTransElapsed) / BlendOut);
+				TransFadeOut = FMath::Min(1.f, (ProneTransDuration - ProneTransElapsed) / BlendOut);
+				TransShare = FMath::Min(1.f, ProneTransElapsed / 0.1f) * TransFadeOut;
 				if (const UAnimSequence* GetUp = Clip(CampusClips::ProneGetUp))
 				{
 					Samples.Add({ GetUp, FMath::Lerp(ProneTransFrom, ProneTransTo, Alpha), 0.f, false });
@@ -744,7 +750,9 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		}
 		// the lying / crawling body shows once a down transition has (nearly) finished, until an up starts
 		const bool bDownPlaying = ProneTransElapsed >= 0.f && bProneTransDown;
-		const float LyingShare = bProneNow ? (bDownPlaying ? 1.f - TransShare : 1.f) : 0.f;
+		// going down, the lying body only takes over as the get-down fades out at its end (0 at the start: the old
+		// 1 - TransShare was ~1 on the first frames, a snap to the floor and back before the get-down played)
+		const float LyingShare = bProneNow ? (bDownPlaying ? 1.f - TransFadeOut : 1.f) : 0.f;
 		ProneShare = FMath::Clamp(LyingShare + TransShare, 0.f, 1.f);
 
 		if (ProneShare > 0.f)

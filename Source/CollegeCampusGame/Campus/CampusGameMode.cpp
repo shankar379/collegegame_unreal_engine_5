@@ -408,11 +408,13 @@ void ACampusMatchGameMode::CheckRoundOver(bool bForce)
 	int32 BluePlayers = 0;
 	const int32 RedAlive = AliveOn(ECampusTeam::Red, &RedPlayers);
 	const int32 BlueAlive = AliveOn(ECampusTeam::Blue, &BluePlayers);
-	// elimination only counts when both teams have players (alone in a room: rounds end on the timer)
-	const bool bBothTeams = RedPlayers > 0 && BluePlayers > 0;
-	if (bBothTeams && (RedAlive == 0 || BlueAlive == 0))
+	// a team with players and nobody left standing loses the round (alone in a room: dying ends it as a draw,
+	// instead of waiting dead for the whole clock)
+	const bool bRedOut = RedPlayers > 0 && RedAlive == 0;
+	const bool bBlueOut = BluePlayers > 0 && BlueAlive == 0;
+	if (bRedOut || bBlueOut)
 	{
-		FinishRound(RedAlive == 0 && BlueAlive == 0 ? -1 : (RedAlive > 0 ? 0 : 1));
+		FinishRound(bRedOut == bBlueOut ? -1 : (bRedOut ? (BlueAlive > 0 ? 1 : -1) : (RedAlive > 0 ? 0 : -1)));
 		return;
 	}
 	if (bForce)

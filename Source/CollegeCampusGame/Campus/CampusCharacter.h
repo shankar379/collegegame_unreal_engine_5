@@ -286,7 +286,7 @@ private:
 	float CrouchPivotHeight = 75.f;
 
 	UPROPERTY(EditAnywhere, Category="Camera")
-	float PronePivotHeight = 15.f;
+	float PronePivotHeight = 35.f;
 
 	/** three.js BASE_FOV: vertical degrees. */
 	UPROPERTY(EditAnywhere, Category="Camera")

@@ -89,7 +89,10 @@ ACampusCharacter::ACampusCharacter(const FObjectInitializer& ObjectInitializer)
 	CameraBoom->bUsePawnControlRotation = false;
 	CameraBoom->SetUsingAbsoluteRotation(true);
 	// No lag: the camera follows the finger exactly (three.js applies look once per frame, no smoothing).
-	CameraBoom->bEnableCameraLag = false;
+	// a short lag: a collision pull-in (low camera near the floor) or a small correction eases instead of snapping
+	CameraBoom->bEnableCameraLag = true;
+	CameraBoom->CameraLagSpeed = 18.f;
+	CameraBoom->CameraLagMaxDistance = 60.f;
 	CameraBoom->bEnableCameraRotationLag = false;
 	// Fat probe so the camera pulls in before clipping walls (three.js casts five offset rays).
 	CameraBoom->bDoCollisionTest = true;
@@ -678,6 +681,11 @@ void ACampusCharacter::ToggleProne()
 void ACampusCharacter::SetProne(bool bNewProne)
 {
 	bProne = bNewProne;
+	if (UCampusMovementComponent* Movement = Cast<UCampusMovementComponent>(GetCharacterMovement()))
+	{
+		Movement->bWantsProne = bNewProne;
+		Movement->ProneMaxSpeed = ProneSpeed;
+	}
 	UpdateMovementSettings();
 	if (!HasAuthority())
 	{
@@ -688,6 +696,10 @@ void ACampusCharacter::SetProne(bool bNewProne)
 void ACampusCharacter::ServerSetProne_Implementation(bool bNewProne)
 {
 	bProne = bNewProne;
+	if (UCampusMovementComponent* Movement = Cast<UCampusMovementComponent>(GetCharacterMovement()))
+	{
+		Movement->ProneMaxSpeed = ProneSpeed; // bWantsProne itself arrives with each move
+	}
 	UpdateMovementSettings();
 }
 

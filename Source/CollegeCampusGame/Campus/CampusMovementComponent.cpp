@@ -14,6 +14,66 @@ namespace CampusStep
 	constexpr float MinRise = 4.f;
 }
 
+float UCampusMovementComponent::GetMaxSpeed() const
+{
+	if (bWantsProne && MovementMode == MOVE_Walking)
+	{
+		return ProneMaxSpeed;
+	}
+	return Super::GetMaxSpeed();
+}
+
+void UCampusMovementComponent::UpdateFromCompressedFlags(uint8 Flags)
+{
+	Super::UpdateFromCompressedFlags(Flags);
+	bWantsProne = (Flags & FSavedMove_Character::FLAG_Custom_0) != 0;
+}
+
+FNetworkPredictionData_Client* UCampusMovementComponent::GetPredictionData_Client() const
+{
+	if (!ClientPredictionData)
+	{
+		UCampusMovementComponent* Mutable = const_cast<UCampusMovementComponent*>(this);
+		Mutable->ClientPredictionData = new FNetworkPredictionData_Client_Campus(*this);
+	}
+	return ClientPredictionData;
+}
+
+void FSavedMove_Campus::Clear()
+{
+	Super::Clear();
+	bSavedWantsProne = false;
+}
+
+uint8 FSavedMove_Campus::GetCompressedFlags() const
+{
+	return Super::GetCompressedFlags() | (bSavedWantsProne ? FLAG_Custom_0 : 0);
+}
+
+bool FSavedMove_Campus::CanCombineWith(const FSavedMovePtr& NewMove, ACharacter* Character, float MaxDelta) const
+{
+	return bSavedWantsProne == static_cast<const FSavedMove_Campus*>(NewMove.Get())->bSavedWantsProne
+		&& Super::CanCombineWith(NewMove, Character, MaxDelta);
+}
+
+void FSavedMove_Campus::SetMoveFor(ACharacter* Character, float InDeltaTime, FVector const& NewAccel, FNetworkPredictionData_Client_Character& ClientData)
+{
+	Super::SetMoveFor(Character, InDeltaTime, NewAccel, ClientData);
+	if (const UCampusMovementComponent* Movement = Cast<UCampusMovementComponent>(Character->GetCharacterMovement()))
+	{
+		bSavedWantsProne = Movement->bWantsProne;
+	}
+}
+
+void FSavedMove_Campus::PrepMoveFor(ACharacter* Character)
+{
+	Super::PrepMoveFor(Character);
+	if (UCampusMovementComponent* Movement = Cast<UCampusMovementComponent>(Character->GetCharacterMovement()))
+	{
+		Movement->bWantsProne = bSavedWantsProne;
+	}
+}
+
 bool UCampusMovementComponent::CanStepUp(const FHitResult& Hit) const
 {
 	if (!Super::CanStepUp(Hit) || !CharacterOwner || !UpdatedComponent)
