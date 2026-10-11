@@ -1,0 +1,1 @@
+imported /Game/CampusUI/Icons/T_Icon_campusmap.T_Icon_campusmap 1024x1024

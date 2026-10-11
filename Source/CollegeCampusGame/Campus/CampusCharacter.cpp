@@ -1,7 +1,10 @@
 #include "Campus/CampusCharacter.h"
+#include "Campus/CampusMovementComponent.h"
 
 #include "Camera/CameraComponent.h"
 #include "Campus/CampusAnimInstance.h"
+#include "Campus/CampusZipline.h"
+#include "EngineUtils.h"
 #include "Campus/CampusFx.h"
 #include "Campus/CampusGameMode.h"
 #include "Campus/CampusMatchState.h"
@@ -21,10 +24,14 @@
 #include "InputModifiers.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Net/UnrealNetwork.h"
+#include "Kismet/GameplayStatics.h"
+#include "Sound/SoundBase.h"
+#include "Sound/SoundAttenuation.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Animation/AnimSequence.h"
 
-ACampusCharacter::ACampusCharacter()
+ACampusCharacter::ACampusCharacter(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<UCampusMovementComponent>(ACharacter::CharacterMovementComponentName))
 {
 	PrimaryActorTick.bCanEverTick = true;
 
@@ -49,11 +56,12 @@ ACampusCharacter::ACampusCharacter()
 
 	UCharacterMovementComponent* Movement = GetCharacterMovement();
 	Movement->bOrientRotationToMovement = false;
-	Movement->JumpZVelocity = 600.f;
+	Movement->JumpZVelocity = 440.f;
 	Movement->AirControl = 0.35f;
 	Movement->MaxWalkSpeed = JogSpeed;
 	Movement->MinAnalogWalkSpeed = 20.f;
-	Movement->BrakingDecelerationWalking = 2000.f;
+	Movement->BrakingDecelerationWalking = StopBraking;
+	Movement->BrakingFrictionFactor = 0.f;
 	Movement->MaxWalkSpeedCrouched = CrouchSpeed;
 	Movement->SetCrouchedHalfHeight(55.f);
 	Movement->GetNavAgentPropertiesRef().bCanCrouch = true;
@@ -62,7 +70,10 @@ ACampusCharacter::ACampusCharacter()
 	Movement->bUseFlatBaseForFloorChecks = true;
 	Movement->PerchRadiusThreshold = 20.f;
 	Movement->PerchAdditionalHeight = 0.f;
-	Movement->MaxStepHeight = 45.f;
+	// three.js player.js: STEP_UP 0.85 m (steps, curbs, the college's 0.77 m base edge) and WALKABLE 0.6
+	// (floors up to ~53 degrees, the stair ramps).
+	Movement->MaxStepHeight = 85.f;
+	Movement->SetWalkableFloorAngle(53.f);
 
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(RootComponent);
@@ -97,6 +108,29 @@ ACampusCharacter::ACampusCharacter()
 void ACampusCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+	ShotSound = LoadObject<USoundBase>(nullptr, TEXT("/Game/CampusAudio/S_Rifle_Shot.S_Rifle_Shot"));
+	RemoteShotSound = LoadObject<USoundBase>(nullptr, TEXT("/Game/CampusAudio/S_Rifle_Shot_Remote.S_Rifle_Shot_Remote"));
+	ReloadSound = LoadObject<USoundBase>(nullptr, TEXT("/Game/CampusAudio/S_Reload.S_Reload"));
+	DryFireSound = LoadObject<USoundBase>(nullptr, TEXT("/Game/CampusAudio/S_DryFire.S_DryFire"));
+	HitSound = LoadObject<USoundBase>(nullptr, TEXT("/Game/CampusAudio/S_Hit.S_Hit"));
+	ShotAttenuation = NewObject<USoundAttenuation>(this);
+	{
+		FSoundAttenuationSettings& Settings = ShotAttenuation->Attenuation;
+		Settings.bAttenuate = true;
+		Settings.bSpatialize = true;
+		Settings.DistanceAlgorithm = EAttenuationDistanceModel::Inverse;
+		Settings.AttenuationShape = EAttenuationShape::Sphere;
+		Settings.AttenuationShapeExtents = FVector(1040.f, 0.f, 0.f);
+		Settings.FalloffDistance = 13000.f - 1040.f;
+		Settings.dBAttenuationAtMax = -60.f;
+		// Air absorption: farther shots lose their crack (three.js lowers the lowpass with distance).
+		Settings.bAttenuateWithLPF = true;
+		Settings.LPFRadiusMin = 1040.f;
+		Settings.LPFRadiusMax = 13000.f;
+		Settings.LPFFrequencyAtMin = 20000.f;
+		Settings.LPFFrequencyAtMax = 1500.f;
+	}
+
 	if (Gun && !Gun->GetStaticMesh())
 	{
 		Gun->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Weapons/Rifle/Meshes/SM_Rifle.SM_Rifle")));
@@ -110,6 +144,8 @@ void ACampusCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME_CONDITION(ACampusCharacter, bArmed, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACampusCharacter, bAiming, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(ACampusCharacter, bProne, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(ACampusCharacter, bSliding, COND_SkipOwner);
 	DOREPLIFETIME(ACampusCharacter, Health);
 }
 
@@ -120,6 +156,28 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	if (bTraversing)
 	{
 		TickTraversal(DeltaSeconds);
+	}
+	if (Zip)
+	{
+		TickZip(DeltaSeconds);
+	}
+	// Fell off the map: dead, like any other death (the death screen offers the way back to the lobby).
+	if (HasAuthority() && !bDead && GetActorLocation().Z < KillHeight)
+	{
+		ApplyHit(Health + 1.f, nullptr);
+	}
+	if (bSliding)
+	{
+		SlideTime += DeltaSeconds;
+		// owner and server both end it (the server must not keep a 760 cm/s slide if the owner's RPC never comes)
+		if ((IsLocallyControlled() || HasAuthority()) && (GetVelocity().Size2D() < 280.f || SlideTime > 1.5f || !GetCharacterMovement()->IsMovingOnGround()))
+		{
+			SetSliding(false);
+			if (bSprinting && IsLocallyControlled())
+			{
+				UnCrouch();
+			}
+		}
 	}
 
 	if (IsLocallyControlled())
@@ -132,16 +190,28 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 		{
 			TryFire();
 		}
-		if (bSprinting)
-		{
-			UpdateMovementSettings();
-		}
+	}
+	// The listen-server host's own pawn never sends ServerMove, so the engine never fills RemoteViewPitch for it and
+	// every joined phone would see the host aiming level forever. Feed it here (replicated to others by APawn).
+	if (HasAuthority() && IsLocallyControlled() && GetNetMode() == NM_ListenServer && Controller)
+	{
+		SetRemoteViewPitch(Controller->GetControlRotation().Pitch);
+	}
+	// owner AND server re-check the run rule every frame (the stick can turn mid-sprint)
+	if (bRunHeld && (IsLocallyControlled() || HasAuthority()))
+	{
+		UpdateMovementSettings();
 	}
 
 	// ADS moves linearly over 0.18 s; one smoothstep value drives camera, FOV and look speed together
 	// so none of them lags a frame behind (three.js updateAds).
 	AimLinear = FMath::FInterpConstantTo(AimLinear, bAiming ? 1.f : 0.f, DeltaSeconds, 1.f / 0.18f);
 	AimBlend = AimLinear * AimLinear * (3.f - 2.f * AimLinear);
+	// Free look while aiming: the character stays in its aiming stance, only the camera leaves the sight for the
+	// normal shoulder view so you can look around; releasing the eye drops straight back into the sight.
+	FreeLookCamera = FMath::FInterpConstantTo(FreeLookCamera, IsFreeLooking() ? 1.f : 0.f, DeltaSeconds, 1.f / 0.18f);
+	const float CamAim = AimBlend * (1.f - FreeLookCamera * FreeLookCamera * (3.f - 2.f * FreeLookCamera));
+	CameraAimBlend = CamAim;
 
 	// FOV: three.js uses a 70 deg VERTICAL FOV, divided by the eased zoom. Unreal's FOV is horizontal,
 	// so convert with this viewport's aspect (a 20:9 phone gets a wide view, like the web game).
@@ -157,12 +227,12 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 				Aspect = float(SizeX) / float(SizeY);
 			}
 		}
-		const float VerticalFov = BaseVerticalFov / (1.f + (GetZoom() - 1.f) * AimBlend);
+		const float VerticalFov = BaseVerticalFov / (1.f + (GetZoom() - 1.f) * CamAim);
 		const float HorizontalFov = FMath::RadiansToDegrees(2.f * FMath::Atan(FMath::Tan(FMath::DegreesToRadians(VerticalFov * 0.5f)) * Aspect));
 		FollowCamera->SetFieldOfView(HorizontalFov);
 
 		// Own body hides once the sight is mostly up (three.js: hidden when e > 0.5).
-		GetMesh()->SetOwnerNoSee(AimBlend > 0.5f);
+		GetMesh()->SetOwnerNoSee(CamAim > 0.5f);
 	}
 
 	// Recoil: part of each kick recovers by itself (exponential, tau).
@@ -174,9 +244,26 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	}
 
 	// Camera rig: CAMERA -> AIM_CAMERA lerped by the eased ADS value (dist 0 = at the sight).
-	const float PivotHeight = (bIsCrouched ? CrouchPivotHeight : HipPivotHeight);
-	CameraBoom->TargetArmLength = FMath::Lerp(DefaultArmLength, AimArmLength, AimBlend);
-	CameraBoom->SocketOffset = FVector(0.f, FMath::Lerp(HipSide, AimSide, AimBlend), FMath::Lerp(0.f, AimUp, AimBlend));
+	// Stance height glides instead of snapping: it is tracked ABOVE THE FEET, because crouch / prone shrink the
+	// capsule instantly (its centre, where the boom is mounted, drops in one frame) while the body takes ~1 s to
+	// go down. Fast enough to follow the get-down / get-up animation, slow enough to never jump.
+	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	const float StanceAboveFeet = HalfHeight + (bProne ? PronePivotHeight : (bIsCrouched ? CrouchPivotHeight : HipPivotHeight));
+	if (CameraAboveFeet < 0.f)
+	{
+		CameraAboveFeet = StanceAboveFeet; // first frame
+	}
+	CameraAboveFeet = FMath::FInterpTo(CameraAboveFeet, StanceAboveFeet, DeltaSeconds, 4.f);
+	float PivotHeight = CameraAboveFeet - HalfHeight;
+	// While aiming, the sight follows the real head height (standing, crouched or any later stance),
+	// so the scope never floats above a crouched character.
+	if (CamAim > 0.f && GetMesh())
+	{
+		const float HeadHeight = GetMesh()->GetSocketLocation(TEXT("head")).Z - GetActorLocation().Z + 4.f;
+		PivotHeight = FMath::Lerp(PivotHeight, HeadHeight, CamAim);
+	}
+	CameraBoom->TargetArmLength = FMath::Lerp(DefaultArmLength, AimArmLength, CamAim);
+	CameraBoom->SocketOffset = FVector(0.f, FMath::Lerp(HipSide, AimSide, CamAim), FMath::Lerp(0.f, AimUp, CamAim));
 	CameraBoom->SetRelativeLocation(FVector(0.f, 0.f, PivotHeight));
 
 	// Free look: released offset swings back the shortest way (three.js: x *= exp(-14 dt), snap < 0.002 rad).
@@ -302,7 +389,7 @@ void ACampusCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 
 void ACampusCharacter::ApplyMove(const FVector2D& Axis)
 {
-	if (!Controller || bTraversing)
+	if (!Controller || bTraversing || bSliding || Zip)
 	{
 		return;
 	}
@@ -351,21 +438,16 @@ void ACampusCharacter::ApplyLook(float YawDegrees, float PitchUpDegrees)
 
 void ACampusCharacter::SprintPressed()
 {
-	if (bArmed)
-	{
-		return;
-	}
-	bSprinting = true;
-	if (bIsCrouched)
-	{
-		UnCrouch();
-	}
+	bRunHeld = true;
+	// armed: no standing sprint, but a crouched rifleman runs bent over (UpdateMovementSettings)
+	bSprinting = !bArmed;
 	UpdateMovementSettings();
 	ServerSetSprinting(true);
 }
 
 void ACampusCharacter::SprintReleased()
 {
+	bRunHeld = false;
 	bSprinting = false;
 	UpdateMovementSettings();
 	ServerSetSprinting(false);
@@ -385,29 +467,217 @@ void ACampusCharacter::ToggleSprint()
 
 void ACampusCharacter::ToggleCrouch()
 {
+	if (bSliding)
+	{
+		SetSliding(false);
+		return;
+	}
+	if (!bIsCrouched && !bProne && bSprinting && !bArmed && GetVelocity().Size2D() > 450.f && GetCharacterMovement()->IsMovingOnGround())
+	{
+		Crouch();
+		SetSliding(true);
+		return;
+	}
+	if (bProne)
+	{
+		// From prone the crouch button kneels up and stays crouched.
+		SetProne(false);
+		return;
+	}
 	if (bIsCrouched)
 	{
 		UnCrouch();
 	}
 	else
 	{
-		if (bSprinting)
-		{
-			SprintReleased();
-		}
+		// Running stays on: crouched it becomes a crouch-run.
 		Crouch();
 	}
+}
+
+void ACampusCharacter::SetSliding(bool bNewSliding)
+{
+	ApplySliding(bNewSliding);
+	if (!HasAuthority())
+	{
+		ServerSetSliding(bNewSliding);
+	}
+}
+
+void ACampusCharacter::ServerSetSliding_Implementation(bool bNewSliding)
+{
+	ApplySliding(bNewSliding);
+}
+
+void ACampusCharacter::ApplySliding(bool bNewSliding)
+{
+	bSliding = bNewSliding;
+	SlideTime = 0.f;
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	Movement->GroundFriction = bSliding ? 0.f : 8.f;
+	Movement->BrakingDecelerationWalking = bSliding ? SlideBraking : StopBraking;
+	UpdateMovementSettings();
+}
+
+ACampusZipline* ACampusCharacter::FindZipline(int32& OutEnd) const
+{
+	const FVector Feet = GetActorLocation() - FVector(0.f, 0.f, GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+	for (TActorIterator<ACampusZipline> It(GetWorld()); It; ++It)
+	{
+		OutEnd = It->NearEnd(Feet);
+		if (OutEnd != INDEX_NONE)
+		{
+			return *It;
+		}
+	}
+	return nullptr;
+}
+
+bool ACampusCharacter::CanUseZipline() const
+{
+	int32 End = INDEX_NONE;
+	return !Zip && !bTraversing && FindZipline(End) != nullptr;
+}
+
+void ACampusCharacter::ServerStartZip_Implementation(ACampusZipline* Line, int32 FromEnd)
+{
+	if (!Line || FromEnd < 0 || FromEnd > 1 || Zip)
+	{
+		ClientCancelZip();
+		return;
+	}
+	const FVector Feet = GetActorLocation() - FVector(0.f, 0.f, GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+	if (Line->NearEnd(Feet) != FromEnd)
+	{
+		ClientCancelZip();
+		return;
+	}
+	StartZip(Line, FromEnd);
+	MulticastStartZip(Line, FromEnd);
+}
+
+void ACampusCharacter::ClientCancelZip_Implementation()
+{
+	if (!Zip)
+	{
+		return;
+	}
+	Zip = nullptr;
+	bUseControllerRotationYaw = true;
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	Movement->SetMovementMode(MOVE_Walking);
+	Movement->StopMovementImmediately();
+}
+
+void ACampusCharacter::ClientCancelTraversal_Implementation()
+{
+	if (bTraversing)
+	{
+		EndTraversal();
+	}
+}
+
+void ACampusCharacter::MulticastStartZip_Implementation(ACampusZipline* Line, int32 FromEnd)
+{
+	if (HasAuthority() || IsLocallyControlled())
+	{
+		return;
+	}
+	StartZip(Line, FromEnd);
+}
+
+void ACampusCharacter::StartZip(ACampusZipline* Line, int32 FromEnd)
+{
+	if (!Line)
+	{
+		return;
+	}
+	if (bSliding)
+	{
+		ApplySliding(false);
+	}
+	if (bIsCrouched)
+	{
+		UnCrouch();
+	}
+	Zip = Line;
+	ZipDir = FromEnd == 0 ? 1 : -1;
+	ZipS = FromEnd == 0 ? 0.f : Line->Length;
+	ZipV = 0.f;
+	bFireHeld = false;
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	Movement->StopMovementImmediately();
+	Movement->SetMovementMode(MOVE_Flying);
+	bUseControllerRotationYaw = false;
+}
+
+void ACampusCharacter::TickZip(float DeltaSeconds)
+{
+	// three.js Zipline.update: accelerate to the line speed, brake smoothly into the far tower.
+	const float Left = ZipDir > 0 ? Zip->Length - ZipS : ZipS;
+	const float BrakeV = FMath::Sqrt(2.f * ACampusZipline::Accel * FMath::Max(Left - 150.f, 0.f)) + 150.f;
+	ZipV = FMath::Min3(ZipV + ACampusZipline::Accel * DeltaSeconds, ACampusZipline::Speed, BrakeV);
+	ZipS = FMath::Clamp(ZipS + ZipDir * ZipV * DeltaSeconds, 0.f, Zip->Length);
+	const float Alpha = ZipS / FMath::Max(Zip->Length, 1.f);
+	const FVector Feet = Zip->PointAt(Alpha) - FVector(0.f, 0.f, ACampusZipline::Hang);
+	const FVector Travel = Zip->TangentAt(Alpha) * ZipDir;
+	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	SetActorLocationAndRotation(Feet + FVector(0.f, 0.f, HalfHeight), FRotator(0.f, Travel.Rotation().Yaw, 0.f), false, nullptr, ETeleportType::TeleportPhysics);
+	if ((ZipDir > 0 && ZipS >= Zip->Length) || (ZipDir < 0 && ZipS <= 0.f))
+	{
+		const FVector Land = Zip->Landing(ZipDir > 0 ? 1 : 0);
+		Zip = nullptr;
+		SetActorLocation(Land + FVector(0.f, 0.f, HalfHeight), false, nullptr, ETeleportType::TeleportPhysics);
+		bUseControllerRotationYaw = true;
+		UCharacterMovementComponent* Movement = GetCharacterMovement();
+		Movement->SetMovementMode(MOVE_Walking);
+		Movement->StopMovementImmediately();
+	}
+}
+
+void ACampusCharacter::ToggleProne()
+{
+	if (bProne)
+	{
+		SetProne(false);
+		UnCrouch();
+		return;
+	}
+	if (bTraversing || !GetCharacterMovement()->IsMovingOnGround())
+	{
+		return;
+	}
+	if (bSprinting)
+	{
+		SprintReleased();
+	}
+	Crouch();
+	SetProne(true);
+}
+
+void ACampusCharacter::SetProne(bool bNewProne)
+{
+	bProne = bNewProne;
+	UpdateMovementSettings();
+	if (!HasAuthority())
+	{
+		ServerSetProne(bProne);
+	}
+}
+
+void ACampusCharacter::ServerSetProne_Implementation(bool bNewProne)
+{
+	bProne = bNewProne;
+	UpdateMovementSettings();
 }
 
 void ACampusCharacter::ToggleArmed()
 {
 	bArmed = !bArmed;
+	// the run intent survives the swap: a rifle can't sprint standing, fists sprint straight away while run is held
+	bSprinting = bRunHeld && !bArmed;
 	if (bArmed)
 	{
-		if (bSprinting)
-		{
-			SprintReleased();
-		}
 		if (UCampusAnimInstance* Anim = GetCampusAnim())
 		{
 			Anim->PlayEquip();
@@ -427,12 +697,9 @@ void ACampusCharacter::SetFreeLookHeld(bool bHeld)
 	bFreeLookHeld = bHeld;
 	if (bHeld)
 	{
-		// three.js: holding free look cancels ADS and blocks the trigger.
+		// Free look moves the camera only: the character keeps its stance, aim and sight (no ADS cancel, which
+		// popped the camera out and the body back in - the glitch). Only the trigger pauses while looking around.
 		bFireHeld = false;
-		if (bAiming)
-		{
-			SetAiming(false);
-		}
 	}
 }
 
@@ -445,7 +712,7 @@ void ACampusCharacter::AddFreeLook(float YawDegrees, float PitchDegrees)
 
 void ACampusCharacter::SetAiming(bool bAim)
 {
-	if (bAim && IsFreeLooking())
+	if (bAim && bFreeLookHeld)
 	{
 		return;
 	}
@@ -467,11 +734,24 @@ void ACampusCharacter::TryFire()
 	}
 	if (AmmoInMag <= 0)
 	{
+		if (AmmoReserve <= 0)
+		{
+			if (DryFireSound && Now >= NextDryFireTime)
+			{
+				UGameplayStatics::PlaySound2D(this, DryFireSound);
+				NextDryFireTime = Now + 0.3f;
+			}
+			return;
+		}
 		Reload();
 		return;
 	}
 	NextFireTime = Now + FireInterval;
 	--AmmoInMag;
+	if (ShotSound)
+	{
+		UGameplayStatics::PlaySound2D(this, ShotSound);
+	}
 	if (UCampusAnimInstance* Anim = GetCampusAnim())
 	{
 		Anim->PlayFire();
@@ -523,7 +803,7 @@ float ACampusCharacter::GetReloadProgress() const
 
 void ACampusCharacter::SetSprintHeld(bool bHeld)
 {
-	if (bHeld != bSprinting)
+	if (bHeld != bRunHeld)
 	{
 		bHeld ? SprintPressed() : SprintReleased();
 	}
@@ -539,6 +819,10 @@ void ACampusCharacter::Reload()
 	if (UCampusAnimInstance* Anim = GetCampusAnim())
 	{
 		Anim->PlayReload();
+		if (ReloadSound)
+		{
+			UGameplayStatics::PlaySound2D(this, ReloadSound);
+		}
 		ReloadStartTime = Now;
 		ReloadEndTime = Now + Anim->GetReloadDuration();
 	}
@@ -551,13 +835,13 @@ void ACampusCharacter::Reload()
 void ACampusCharacter::ServerSetArmed_Implementation(bool bNewArmed)
 {
 	bArmed = bNewArmed;
+	bSprinting = bRunHeld && !bArmed; // same rule as the owner (ToggleArmed)
 	if (!bArmed)
 	{
 		bAiming = false;
 	}
 	else
 	{
-		bSprinting = false;
 		MulticastUpperBody(false);
 	}
 	UpdateMovementSettings();
@@ -571,12 +855,26 @@ void ACampusCharacter::ServerSetAiming_Implementation(bool bNewAiming)
 
 void ACampusCharacter::ServerSetSprinting_Implementation(bool bNewSprinting)
 {
+	bRunHeld = bNewSprinting;
 	bSprinting = bNewSprinting && !bArmed;
 	UpdateMovementSettings();
 }
 
 void ACampusCharacter::ServerReload_Implementation()
 {
+	// same rule as the phone's Reload(): only when it changes something and not already reloading (stops a looped
+	// RPC from making everyone watch an endless reload)
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (!bArmed || bDead || Now < ServerReloadEndTime || ServerAmmoInMag >= MagazineSize || ServerAmmoReserve <= 0)
+	{
+		return;
+	}
+	const UCampusAnimInstance* Anim = GetCampusAnim();
+	// a little shorter than the clip: the phone's own clock and the RPC delay never make a legit shot look early
+	ServerReloadEndTime = Now + (Anim ? Anim->GetReloadDuration() : 2.f) * 0.8f;
+	const int32 Taken = FMath::Min(MagazineSize - ServerAmmoInMag, ServerAmmoReserve);
+	ServerAmmoInMag += Taken;
+	ServerAmmoReserve -= Taken;
 	MulticastUpperBody(true);
 }
 
@@ -586,6 +884,17 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	{
 		return;
 	}
+	// The server decides whether this shot could have happened: ammo, fire rate, reload, and a muzzle near the body.
+	const float Now = GetWorld()->GetTimeSeconds();
+	ServerShotCredit = FMath::Min(3.f, ServerShotCredit + (Now - ServerCreditTime) / FMath::Max(FireInterval, 0.01f));
+	ServerCreditTime = Now;
+	if (ServerShotCredit < 1.f || Now < ServerReloadEndTime || ServerAmmoInMag <= 0
+		|| FVector::DistSquared(FVector(Start), GetActorLocation()) > FMath::Square(250.f))
+	{
+		return;
+	}
+	ServerShotCredit -= 1.f;
+	--ServerAmmoInMag;
 	// Trace world and pawns (character capsules do not block the Visibility channel).
 	FCollisionObjectQueryParams Objects;
 	Objects.AddObjectTypesToQuery(ECC_WorldStatic);
@@ -623,6 +932,10 @@ void ACampusCharacter::MulticastFire_Implementation(FVector_NetQuantize End, FVe
 	{
 		Anim->PlayFire();
 	}
+	if (RemoteShotSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, RemoteShotSound, GunPoint(), 1.f, 1.f, 0.f, ShotAttenuation);
+	}
 	SpawnShotFx(End, Normal, bMark);
 }
 
@@ -630,6 +943,10 @@ void ACampusCharacter::ClientConfirmHit_Implementation(bool bKill)
 {
 	LastHitConfirmTime = GetWorld()->GetTimeSeconds();
 	bLastHitKill = bKill;
+	if (HitSound)
+	{
+		UGameplayStatics::PlaySound2D(this, HitSound);
+	}
 }
 
 namespace CampusGun
@@ -658,7 +975,7 @@ void ACampusCharacter::UpdateGun()
 	{
 		return;
 	}
-	const bool bShow = bArmed && !(IsLocallyControlled() && AimBlend > 0.5f);
+	const bool bShow = bArmed && !(IsLocallyControlled() && CameraAimBlend > 0.5f);
 	if (Gun->IsVisible() != bShow)
 	{
 		Gun->SetVisibility(bShow);
@@ -714,15 +1031,72 @@ void ACampusCharacter::SpawnShotFx(const FVector& End, const FVector& Normal, bo
 namespace CampusTraversal
 {
 	constexpr float MinHeight = 45.f;
-	constexpr float MaxHeight = 230.f;
+	constexpr float MaxHeight = 275.f;
+	// Sample chooser (CHT_TraversalMontages_CMC): mantle up to 150 cm, climb 150 - 275 cm.
+	constexpr float ClimbAbove = 150.f;
 	constexpr float WallReach = 110.f;
 	constexpr float OntoTop = 35.f;
+	// Hurdle (sample: 1 m obstacle, thin): up to this high and this deep.
+	constexpr float HurdleMaxHeight = 125.f;
+	constexpr float HurdleMaxDepth = 70.f;
+	// radius of the wall / top probes: wide enough that a railing's rods and gaps read as one solid face
+	constexpr float ProbeRadius = 10.f;
+	// cos of the widest angle between our heading and the wall's face direction that still vaults (~65 deg)
+	constexpr float MinFacingDot = 0.42f;
+
+	/** Per clip (0-2 mantle stand/walk/run, 3-5 climb), measured from the sample's montages:
+	 *  HandsTime = end of the first "FrontLedge" motion-warp window (the hands land on the edge),
+	 *  HandForward / HandUp = the hands' position relative to the feet at that moment,
+	 *  EndTime = when the clip has settled on top (stand) or shortly after the rise (walk / run). */
+	struct FAnchor { float HandsTime; float HandForward; float HandUp; float EndTime; };
+	static const FAnchor Anchors[6] =
+	{
+		{ 0.365f, 29.9f, 114.3f, 1.25f },
+		{ 0.811f, 31.7f, 68.7f, 1.30f },
+		{ 0.568f, 58.9f, 65.9f, 1.05f },
+		{ 0.732f, 31.3f, 151.5f, 2.08f },
+		{ 1.294f, 32.5f, 179.9f, 2.95f },
+		{ 0.885f, 30.8f, 150.3f, 2.10f },
+	};
 }
 
 void ACampusCharacter::JumpPressed()
 {
-	if (bTraversing)
+	if (bTraversing || Zip)
 	{
+		return;
+	}
+	int32 ZipEnd = INDEX_NONE;
+	if (ACampusZipline* Line = FindZipline(ZipEnd))
+	{
+		StartZip(Line, ZipEnd);
+		if (HasAuthority())
+		{
+			MulticastStartZip(Line, ZipEnd);
+		}
+		else
+		{
+			ServerStartZip(Line, ZipEnd);
+		}
+		return;
+	}
+	if (bSliding)
+	{
+		SetSliding(false);
+		UnCrouch();
+		return;
+	}
+	if (bProne)
+	{
+		// Jump from prone gets up, like the crouch button from crouch.
+		ToggleProne();
+		return;
+	}
+	if (bIsCrouched)
+	{
+		// From crouch the first jump press stands up; the next one jumps (a takeoff matched to the speed then,
+		// or a vault / climb if a wall is in front).
+		UnCrouch();
 		return;
 	}
 	if (!TryStartTraversal())
@@ -768,21 +1142,7 @@ float ACampusCharacter::RiseEndTime(const UAnimSequence* Clip)
 
 float ACampusCharacter::TraversalEndTime(const UAnimSequence* Clip)
 {
-	if (!Clip)
-	{
-		return 0.f;
-	}
-	const float Length = Clip->GetPlayLength();
-	const float TopZ = ClipRoot(Clip, Length).Z;
-	for (int32 Step = 0; Step <= 60; ++Step)
-	{
-		const float Time = Length * Step / 60.f;
-		if (ClipRoot(Clip, Time).Z >= TopZ - 1.f)
-		{
-			return FMath::Min(Time + 0.3f, Length);
-		}
-	}
-	return Length;
+	return Clip ? Clip->GetPlayLength() : 0.f;
 }
 
 bool ACampusCharacter::TryStartTraversal()
@@ -801,25 +1161,53 @@ bool ACampusCharacter::TryStartTraversal()
 	Forward.Normalize();
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CampusTraversal), false, this);
 
-	// 1) A wall in front at knee height, roughly facing us.
+	// 1) A wall at knee height in the direction we are heading: where the stick pushes first (running along the
+	//    corridor and cutting toward the parapet), else where we face. A small sphere, not a line: the corridor
+	//    railings (grill rods 2.5 - 4 cm with gaps between them) let a thin line slip through. Walls up to ~65
+	//    degrees off that heading count; we turn square to the wall for the vault.
 	FHitResult Wall;
-	const FVector KneeStart = Feet + FVector(0.f, 0.f, 40.f);
-	if (!GetWorld()->LineTraceSingleByChannel(Wall, KneeStart, KneeStart + Forward * CampusTraversal::WallReach, ECC_Visibility, Params))
+	const FVector KneeStart = Feet + FVector(0.f, 0.f, 45.f);
+	const FCollisionShape Probe = FCollisionShape::MakeSphere(CampusTraversal::ProbeRadius);
+	FVector Heading = GetLastMovementInputVector();
+	Heading.Z = 0.f;
+	TArray<FVector, TInlineAllocator<2>> Headings;
+	if (Heading.Normalize(0.09f))
 	{
-		return false;
+		Headings.Add(Heading);
 	}
-	FVector WallNormal = Wall.ImpactNormal;
-	WallNormal.Z = 0.f;
-	if (!WallNormal.Normalize() || FVector::DotProduct(-WallNormal, Forward) < 0.6f)
+	if (Headings.IsEmpty() || FVector::DotProduct(Headings[0], Forward) < 0.95f)
+	{
+		Headings.Add(Forward);
+	}
+	FVector WallNormal = FVector::ZeroVector;
+	for (const FVector& Dir : Headings)
+	{
+		FHitResult Hit;
+		if (!GetWorld()->SweepSingleByChannel(Hit, KneeStart, KneeStart + Dir * CampusTraversal::WallReach, FQuat::Identity, ECC_Visibility, Probe, Params)
+			|| Hit.bStartPenetrating || Hit.ImpactNormal.Z > 0.7f)
+		{
+			continue;
+		}
+		FVector Normal = Hit.ImpactNormal;
+		Normal.Z = 0.f;
+		if (Normal.Normalize() && FVector::DotProduct(-Normal, Dir) >= CampusTraversal::MinFacingDot)
+		{
+			Wall = Hit;
+			WallNormal = Normal;
+			break;
+		}
+	}
+	if (WallNormal.IsZero())
 	{
 		return false;
 	}
 
-	// 2) The top of it, just past the edge.
+	// 2) The top of it. Swept down with the same small sphere just inside the face, so a 3 cm grill or a
+	//    15 cm parapet both report their top (a line 12 cm past the face missed thin railings entirely).
 	FHitResult Top;
-	const FVector Over = Wall.ImpactPoint - WallNormal * 25.f;
-	if (!GetWorld()->LineTraceSingleByChannel(Top, FVector(Over.X, Over.Y, Feet.Z + CampusTraversal::MaxHeight + 30.f), FVector(Over.X, Over.Y, Feet.Z + 20.f), ECC_Visibility, Params)
-		|| Top.ImpactNormal.Z < 0.7f)
+	const FVector Over = Wall.ImpactPoint - WallNormal * (CampusTraversal::ProbeRadius * 0.5f);
+	if (!GetWorld()->SweepSingleByChannel(Top, FVector(Over.X, Over.Y, Feet.Z + CampusTraversal::MaxHeight + 30.f), FVector(Over.X, Over.Y, Feet.Z + 20.f), FQuat::Identity, ECC_Visibility, Probe, Params)
+		|| Top.ImpactNormal.Z < 0.5f)
 	{
 		return false;
 	}
@@ -827,6 +1215,57 @@ bool ACampusCharacter::TryStartTraversal()
 	if (Height < CampusTraversal::MinHeight || Height > CampusTraversal::MaxHeight)
 	{
 		return false;
+	}
+
+	const float Speed = GetVelocity().Size2D();
+	const uint8 SpeedTier = Speed < 100.f ? 0 : (Speed < 250.f ? 1 : 2);
+	const FVector Facing = -WallNormal;
+	const float Yaw = Facing.Rotation().Yaw;
+	const float WallDistance = FVector::DotProduct(Wall.ImpactPoint - Feet, Facing);
+
+	// 3a) Thin and low (a railing, a low wall, a window sill): hurdle over it like the sample. The far side may
+	//    be lower than where we stand (the corridor parapet: the ground beside the base, or a drop from an upper
+	//    floor): the hurdle ends at our own feet height and we simply fall from there.
+	if (Height <= CampusTraversal::HurdleMaxHeight)
+	{
+		float Depth = -1.f;
+		bool bDropBeyond = false;
+		FHitResult Beyond;
+		for (float Step = 20.f; Step <= CampusTraversal::HurdleMaxDepth + 20.f; Step += 10.f)
+		{
+			const FVector At = Wall.ImpactPoint + Facing * Step;
+			const bool bHit = GetWorld()->LineTraceSingleByChannel(Beyond, FVector(At.X, At.Y, Top.ImpactPoint.Z + 20.f), FVector(At.X, At.Y, Feet.Z - 60.f), ECC_Visibility, Params);
+			if (!bHit || Beyond.ImpactPoint.Z < Top.ImpactPoint.Z - 30.f)
+			{
+				Depth = Step - 5.f;
+				bDropBeyond = !bHit || Beyond.ImpactPoint.Z < Feet.Z - 40.f;
+				break;
+			}
+		}
+		if (Depth > 0.f && (bDropBeyond || FMath::Abs(Beyond.ImpactPoint.Z - Feet.Z) < 40.f))
+		{
+			const FVector LandAt = Wall.ImpactPoint + Facing * (Depth + 70.f);
+			const FVector LandCapsule(LandAt.X, LandAt.Y, Feet.Z + HalfHeight + 5.f);
+			if (!GetWorld()->OverlapBlockingTestByChannel(LandCapsule, FQuat::Identity, ECC_Pawn, GetCapsuleComponent()->GetCollisionShape(), Params))
+			{
+				// a drop on the far side (corridor parapet, roof wall): the sample's vault, one hand on top and the
+				// legs swung over, cut as it clears and handed to the fall; level on both sides: the hurdle
+				const uint8 Kind = (bDropBeyond ? 9 : 6) + SpeedTier;
+				if (Anim->GetMantleClip(Kind))
+				{
+					StartTraversal(Feet, Yaw, Height, WallDistance, Depth, Kind);
+					if (HasAuthority())
+					{
+						MulticastStartTraversal(Feet, Yaw, Height, WallDistance, Depth, Kind);
+					}
+					else
+					{
+						ServerStartTraversal(Feet, Yaw, Height, WallDistance, Depth, Kind);
+					}
+					return true;
+				}
+			}
+		}
 	}
 
 	// 3) Room to stand on top.
@@ -837,61 +1276,50 @@ bool ACampusCharacter::TryStartTraversal()
 		return false;
 	}
 
-	// 4) Pick the clip by approach speed and stretch its root path onto this ledge.
-	const float Speed = GetVelocity().Size2D();
-	const uint8 Kind = Speed < 60.f ? 0 : (Speed < 320.f ? 1 : 2);
-	const UAnimSequence* Clip = Anim->GetMantleClip(Kind);
-	if (!Clip)
+	// 4) Pick the clip like the sample: by height (mantle / climb) and approach speed (stand / walk / run).
+	const uint8 Kind = (Height > CampusTraversal::ClimbAbove ? 3 : 0) + SpeedTier;
+	if (!Anim->GetMantleClip(Kind))
 	{
 		return false;
 	}
-	const FVector Facing = -WallNormal;
-	const float Yaw = Facing.Rotation().Yaw;
-	// Part 1 target: capsule front touching the wall. Part 2 target: standing on top.
-	const float CapsuleRadius = GetCapsuleComponent()->GetScaledCapsuleRadius();
-	const float ToWall = FMath::Max(0.f, FVector::DotProduct(Wall.ImpactPoint - Feet, Facing) - CapsuleRadius - 2.f);
-	const float ToLanding = FMath::Max(ToWall + 10.f, FVector::DotProduct(Landing - Feet, Facing));
-	const FVector RootStart = ClipRoot(Clip, 0.f);
-	const FVector RootRise = ClipRoot(Clip, RiseEndTime(Clip)) - RootStart;
-	const float ScaleZ = RootRise.Z > 1.f ? Height / RootRise.Z : 1.f;
-	const float ScaleForward = RootRise.Y > 1.f ? FMath::Clamp(ToWall / RootRise.Y, 0.f, 3.f) : 0.f;
-	TraversalOverTop = ToLanding - ToWall;
+	const float LandingDistance = FMath::Max(WallDistance + 10.f, FVector::DotProduct(Landing - Feet, Facing));
 
+	StartTraversal(Feet, Yaw, Height, WallDistance, LandingDistance, Kind);
 	if (HasAuthority())
 	{
-		StartTraversal(Feet, Yaw, ScaleZ, ScaleForward, TraversalOverTop, Kind);
-		MulticastStartTraversal(Feet, Yaw, ScaleZ, ScaleForward, TraversalOverTop, Kind);
+		MulticastStartTraversal(Feet, Yaw, Height, WallDistance, LandingDistance, Kind);
 	}
 	else
 	{
-		StartTraversal(Feet, Yaw, ScaleZ, ScaleForward, TraversalOverTop, Kind);
-		ServerStartTraversal(Feet, Yaw, ScaleZ, ScaleForward, TraversalOverTop, Kind);
+		ServerStartTraversal(Feet, Yaw, Height, WallDistance, LandingDistance, Kind);
 	}
 	return true;
 }
 
-void ACampusCharacter::ServerStartTraversal_Implementation(FVector_NetQuantize StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind)
+void ACampusCharacter::ServerStartTraversal_Implementation(FVector_NetQuantize StartFeet, float Yaw, float Height, float WallDistance, float LandingDistance, uint8 Kind)
 {
-	// Loose sanity check: the start must be where the server has us.
+	// Loose sanity check: the start must be where the server has us, and the ledge in range.
 	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-	if (FVector::Dist(FVector(StartFeet), GetActorLocation() - FVector(0.f, 0.f, HalfHeight)) > 150.f || ScaleZ > 3.f)
+	if (FVector::Dist(FVector(StartFeet), GetActorLocation() - FVector(0.f, 0.f, HalfHeight)) > 150.f
+		|| Height < CampusTraversal::MinHeight - 5.f || Height > CampusTraversal::MaxHeight + 5.f || Kind > 11)
 	{
+		ClientCancelTraversal();
 		return;
 	}
-	StartTraversal(StartFeet, Yaw, ScaleZ, ScaleForward, OverTop, Kind);
-	MulticastStartTraversal(StartFeet, Yaw, ScaleZ, ScaleForward, OverTop, Kind);
+	StartTraversal(StartFeet, Yaw, Height, WallDistance, LandingDistance, Kind);
+	MulticastStartTraversal(StartFeet, Yaw, Height, WallDistance, LandingDistance, Kind);
 }
 
-void ACampusCharacter::MulticastStartTraversal_Implementation(FVector_NetQuantize StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind)
+void ACampusCharacter::MulticastStartTraversal_Implementation(FVector_NetQuantize StartFeet, float Yaw, float Height, float WallDistance, float LandingDistance, uint8 Kind)
 {
 	if (HasAuthority() || IsLocallyControlled())
 	{
 		return;
 	}
-	StartTraversal(StartFeet, Yaw, ScaleZ, ScaleForward, OverTop, Kind);
+	StartTraversal(StartFeet, Yaw, Height, WallDistance, LandingDistance, Kind);
 }
 
-void ACampusCharacter::StartTraversal(const FVector& StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind)
+void ACampusCharacter::StartTraversal(const FVector& StartFeet, float Yaw, float Height, float WallDistance, float LandingDistance, uint8 Kind)
 {
 	const UCampusAnimInstance* Anim = GetCampusAnim();
 	const UAnimSequence* Clip = Anim ? Anim->GetMantleClip(Kind) : nullptr;
@@ -902,19 +1330,46 @@ void ACampusCharacter::StartTraversal(const FVector& StartFeet, float Yaw, float
 	bTraversing = true;
 	TraversalKind = Kind;
 	TraversalTime = 0.f;
-	TraversalEnd = TraversalEndTime(Clip);
+	if (Kind >= 6)
+	{
+		// Hurdle: highest root = over the obstacle; end a little after the feet are back down.
+		TraversalApexTime = 0.f;
+		float Best = -1.f;
+		const float Length = Clip->GetPlayLength();
+		for (int32 Step = 0; Step <= 90; ++Step)
+		{
+			const float Time = Length * Step / 90.f;
+			const float Z = ClipRoot(Clip, Time).Z;
+			if (Z > Best)
+			{
+				Best = Z;
+				TraversalApexTime = Time;
+			}
+		}
+		TraversalEnd = Length;
+		for (int32 Step = 0; Step <= 90; ++Step)
+		{
+			const float Time = TraversalApexTime + (Length - TraversalApexTime) * Step / 90.f;
+			if (ClipRoot(Clip, Time).Z < 1.f)
+			{
+				TraversalEnd = FMath::Min(Length, Time + 0.15f);
+				break;
+			}
+		}
+		const uint8 Tier = (Kind - 6) % 3;
+		TraversalExitSpeed = Tier == 0 ? 0.f : (Tier == 1 ? 200.f : JogSpeed);
+	}
+	else
+	{
+		TraversalEnd = FMath::Min(CampusTraversal::Anchors[FMath::Min<int32>(Kind, 5)].EndTime, Clip->GetPlayLength());
+	}
 	TraversalYaw = Yaw;
-	TraversalScaleZ = ScaleZ;
-	TraversalScaleForward = ScaleForward;
-	TraversalOverTop = OverTop;
+	TraversalScaleZ = Height;
+	TraversalScaleForward = WallDistance;
+	TraversalOverTop = LandingDistance;
 	TraversalStartFeet = StartFeet;
 	TraversalRootStart = ClipRoot(Clip, 0.f);
 	bFireHeld = false;
-	if (bSprinting)
-	{
-		bSprinting = false;
-		UpdateMovementSettings();
-	}
 
 	UCharacterMovementComponent* Movement = GetCharacterMovement();
 	Movement->StopMovementImmediately();
@@ -933,25 +1388,70 @@ void ACampusCharacter::TickTraversal(float DeltaSeconds)
 		EndTraversal();
 		return;
 	}
-	const float Time = FMath::Min(TraversalTime, TraversalEnd);
-	const FVector Root = ClipRoot(Clip, Time) - TraversalRootStart;
-	// Part 1 (until the root finishes rising): forward scaled to stop at the wall face, height scaled
-	// to the ledge. Part 2: the rest of the clip's forward travel maps onto the distance over the top.
-	const float RiseEnd = RiseEndTime(Clip);
-	const FVector RiseRoot = ClipRoot(Clip, RiseEnd) - TraversalRootStart;
-	float Forward;
-	if (Time <= RiseEnd)
+
+	// Motion warping like the sample: two anchors on the clip's own root path.
+	//  - Hands time: the root is placed so the hands sit exactly on the real edge (wall face, ledge height).
+	//  - End: standing on top of the ledge, a little past the edge.
+	// Between anchors the clip's root motion is stretched per axis, so its timing and arcs are kept.
+	if (TraversalKind >= 6)
 	{
-		Forward = Root.Y * TraversalScaleForward;
+		// Hurdle: the clip's obstacle front is at root Y = 0 and 100 cm high. Stretch the run-up so that
+		// front lands on the real wall, scale the height, and keep the clip's own travel after the apex.
+		const float Time = FMath::Min(TraversalTime, TraversalEnd);
+		const FVector R0 = TraversalRootStart;
+		const FVector RA = ClipRoot(Clip, TraversalApexTime);
+		const FVector R = ClipRoot(Clip, Time);
+		const float WallDistance = TraversalScaleForward;
+		float Forward;
+		if (Time <= TraversalApexTime && FMath::Abs(RA.Y - R0.Y) > 1.f)
+		{
+			Forward = (R.Y - R0.Y) / (RA.Y - R0.Y) * (WallDistance + RA.Y);
+		}
+		else
+		{
+			Forward = WallDistance + R.Y;
+		}
+		const FVector Local(Forward, -(R.X - R0.X), R.Z * TraversalScaleZ / 100.f);
+		const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+		SetActorLocation(TraversalStartFeet + FRotator(0.f, TraversalYaw, 0.f).RotateVector(Local) + FVector(0.f, 0.f, HalfHeight), false, nullptr, ETeleportType::None);
+		if (TraversalTime >= TraversalEnd)
+		{
+			EndTraversal();
+		}
+		return;
+	}
+	const CampusTraversal::FAnchor& A = CampusTraversal::Anchors[FMath::Min<int32>(TraversalKind, 5)];
+	const float Height = TraversalScaleZ;
+	const float WallDistance = TraversalScaleForward;
+	const float LandingDistance = TraversalOverTop;
+	const float Time = FMath::Min(TraversalTime, TraversalEnd);
+
+	const FVector R0 = TraversalRootStart;
+	const FVector RH = ClipRoot(Clip, A.HandsTime);
+	const FVector RE = ClipRoot(Clip, TraversalEnd);
+	const FVector R = ClipRoot(Clip, Time);
+	const float HandsForward = FMath::Max(WallDistance - A.HandForward, -15.f);
+	const float HandsUp = FMath::Max(0.f, Height - A.HandUp);
+
+	auto Remap = [](float Value, float From0, float From1, float To0, float To1)
+	{
+		const float Span = From1 - From0;
+		return FMath::Abs(Span) < 1.f ? To1 : To0 + (Value - From0) / Span * (To1 - To0);
+	};
+	float Forward, Up;
+	if (Time <= A.HandsTime)
+	{
+		Forward = Remap(R.Y, R0.Y, RH.Y, 0.f, HandsForward);
+		// Clips that are still on the ground at the grab (stand mantle) ease up over the approach.
+		Up = FMath::Abs(RH.Z - R0.Z) < 1.f ? HandsUp * (Time / FMath::Max(A.HandsTime, 0.01f)) : Remap(R.Z, R0.Z, RH.Z, 0.f, HandsUp);
 	}
 	else
 	{
-		const FVector EndRoot = ClipRoot(Clip, TraversalEnd) - TraversalRootStart;
-		const float Over = FMath::Max(EndRoot.Y - RiseRoot.Y, 1.f);
-		Forward = RiseRoot.Y * TraversalScaleForward + (Root.Y - RiseRoot.Y) / Over * TraversalOverTop;
+		Forward = Remap(R.Y, RH.Y, RE.Y, HandsForward, LandingDistance);
+		Up = Remap(R.Z, RH.Z, RE.Z, HandsUp, Height);
 	}
 	// Mesh space: +Y forward, +X to the character's left, +Z up.
-	const FVector Local(Forward, -Root.X, FMath::Min(Root.Z, RiseRoot.Z) * TraversalScaleZ);
+	const FVector Local(Forward, -(R.X - R0.X), Up);
 	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 	const FVector Location = TraversalStartFeet + FRotator(0.f, TraversalYaw, 0.f).RotateVector(Local) + FVector(0.f, 0.f, HalfHeight);
 	SetActorLocation(Location, false, nullptr, ETeleportType::None);
@@ -968,6 +1468,11 @@ void ACampusCharacter::EndTraversal()
 	UCharacterMovementComponent* Movement = GetCharacterMovement();
 	Movement->SetMovementMode(MOVE_Walking);
 	Movement->StopMovementImmediately();
+	if (TraversalKind >= 6)
+	{
+		// Hurdles and vaults keep the run going (off a vault that is straight into the fall).
+		Movement->Velocity = FRotator(0.f, TraversalYaw, 0.f).Vector() * TraversalExitSpeed;
+	}
 }
 
 void ACampusCharacter::MulticastUpperBody_Implementation(bool bReload)
@@ -987,6 +1492,16 @@ void ACampusCharacter::ApplyHit(float InDamage, AController* InstigatorControlle
 	if (!HasAuthority() || bDead)
 	{
 		return;
+	}
+	// scoreboard: damage actually taken (capped at what was left) and dealt by the shooter (kill plane = nobody)
+	const float Taken = FMath::Min(Health, InDamage);
+	if (ACampusPlayerState* VictimState = GetPlayerState<ACampusPlayerState>())
+	{
+		VictimState->DamageTaken += Taken;
+	}
+	if (ACampusPlayerState* ShooterState = InstigatorController ? InstigatorController->GetPlayerState<ACampusPlayerState>() : nullptr)
+	{
+		ShooterState->DamageDealt += Taken;
 	}
 	Health = FMath::Max(0.f, Health - InDamage);
 	if (Health <= 0.f)
@@ -1015,18 +1530,45 @@ void ACampusCharacter::UpdateMovementSettings()
 	{
 		Movement->MaxWalkSpeed = bSprinting ? SprintSpeed : JogSpeed;
 	}
-	// Sprint only counts while pushing forward; strafing or backing up stays at jog speed.
-	if (bSprinting && IsLocallyControlled() && !CanSprintNow())
+	// crouched: unarmed sprint, or the armed bent-over run (not while aiming down the sight)
+	const bool bCrouchRun = bRunHeld && (bArmed ? !bAiming : bSprinting);
+	Movement->MaxWalkSpeedCrouched = bCrouchRun ? CrouchSprintSpeed : CrouchSpeed;
+	// Sprint only counts while pushing forward; strafing or backing up stays at the normal speed.
+	// The server replays a client's moves with ITS speed limits, so both must use the same rule from data both have:
+	// the movement acceleration (the server gets it with every move), not the local input vector.
+	if (bRunHeld)
 	{
-		Movement->MaxWalkSpeed = JogSpeed;
+		const bool bHeading = CanSprintNow() || (bArmed && bSprintHeading); // (updates bSprintHeading)
+		if (bSprinting && !CanSprintNow())
+		{
+			Movement->MaxWalkSpeed = JogSpeed;
+		}
+		if (bProne || !bHeading)
+		{
+			Movement->MaxWalkSpeedCrouched = CrouchSpeed;
+		}
 	}
-	Movement->MaxWalkSpeedCrouched = CrouchSpeed;
+	if (bProne)
+	{
+		Movement->MaxWalkSpeedCrouched = ProneSpeed;
+	}
+	if (bSliding)
+	{
+		Movement->MaxWalkSpeedCrouched = SprintSpeed + 100.f;
+	}
 }
 
 bool ACampusCharacter::CanSprintNow() const
 {
-	const FVector Local = GetActorRotation().UnrotateVector(GetLastMovementInputVector());
-	return !bArmed && !bIsCrouched && Local.X > 0.3f;
+	// Forward enough to sprint, with a margin so speed can't flicker on the edge (enter above 0.3, leave below 0.1),
+	// and a frame without acceleration keeps the current answer instead of dropping the sprint.
+	const FVector Accel = GetCharacterMovement()->GetCurrentAcceleration();
+	if (!Accel.IsNearlyZero())
+	{
+		const float Forward = GetActorRotation().UnrotateVector(Accel.GetSafeNormal()).X;
+		bSprintHeading = bSprintHeading ? Forward > 0.1f : Forward > 0.3f;
+	}
+	return !bArmed && !bProne && bSprintHeading;
 }
 
 UCampusAnimInstance* ACampusCharacter::GetCampusAnim() const

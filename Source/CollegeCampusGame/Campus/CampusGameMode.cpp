@@ -1,9 +1,12 @@
 #include "Campus/CampusGameMode.h"
 
+#include "Campus/CampusBackend.h"
 #include "Campus/CampusCharacter.h"
 #include "Campus/CampusMatchState.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "Engine/World.h"
+#include "GameFramework/GameSession.h"
+#include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerState.h"
 #include "TimerManager.h"
 
@@ -31,14 +34,36 @@ void ACampusMatchGameMode::InitGameState()
 	Super::InitGameState();
 	if (ACampusGameState* State = GetCampusState())
 	{
-		static const TCHAR Letters[] = TEXT("ABCDEFGHJKLMNPQRSTUVWXYZ23456789");
-		FString Code;
-		for (int32 Index = 0; Index < 5; ++Index)
+		// "?Room=ABC123": the code the API issued for this room (ACampusLobbyPlayerController::HostRoom); a local
+		// code only when hosting without the API (editor play)
+		FString Code = UGameplayStatics::ParseOption(OptionsString, TEXT("Room")).ToUpper();
+		if (Code.IsEmpty())
 		{
-			Code.AppendChar(Letters[FMath::RandRange(0, UE_ARRAY_COUNT(Letters) - 2)]);
+			static const TCHAR Letters[] = TEXT("ABCDEFGHJKLMNPQRSTUVWXYZ23456789");
+			for (int32 Index = 0; Index < 6; ++Index)
+			{
+				Code.AppendChar(Letters[FMath::RandRange(0, UE_ARRAY_COUNT(Letters) - 2)]);
+			}
 		}
 		State->RoomCode = Code;
 		State->KillsToWin = KillsToWin;
+
+		// "?Map=RealMap?Team=2" from the host's lobby (ACampusLobbyPlayerController::HostRoom).
+		// "?Rounds=5?Minutes=5": picked by the host when creating the room (GAME_PLAN 1.2, three.js lobby: 4-7 rounds,
+		// 3 / 5 / 7 / 10 minutes each)
+		State->Rounds = FMath::Clamp(UGameplayStatics::GetIntOption(OptionsString, TEXT("Rounds"), 5), 4, 7);
+		State->RoundMinutes = FMath::Clamp(UGameplayStatics::GetIntOption(OptionsString, TEXT("Minutes"), 5), 3, 10);
+		const FString MapOption = UGameplayStatics::ParseOption(OptionsString, TEXT("Map"));
+		const int32 TeamOption = UGameplayStatics::GetIntOption(OptionsString, TEXT("Team"), 4);
+		State->MatchMap = MapOption == TEXT("RealMap") ? FName(TEXT("RealMap")) : FName(TEXT("Classic"));
+		State->TeamSize = TeamOption == 1 || TeamOption == 2 ? TeamOption : 4;
+		const bool bRealMap = State->MatchMap == TEXT("RealMap");
+		// 50 does not split into squads of 4: 12 squads = 48.
+		State->MaxPlayers = bRealMap ? (State->TeamSize == 4 ? 48 : 50) : 2 * FMath::Max(State->TeamSize, 1) * (State->TeamSize == 1 ? 4 : 1);
+		if (GameSession)
+		{
+			GameSession->MaxPlayers = State->MaxPlayers;
+		}
 	}
 }
 
@@ -49,19 +74,19 @@ void ACampusMatchGameMode::PostLogin(APlayerController* NewPlayer)
 	{
 		int32 Red = 0;
 		int32 Blue = 0;
-		bool bHasHost = false;
 		for (const APlayerState* Other : GameState->PlayerArray)
 		{
 			if (const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Other); Campus && Campus != PlayerState)
 			{
 				(Campus->Team == ECampusTeam::Red ? Red : Blue)++;
-				bHasHost |= Campus->bIsHost;
 			}
 		}
 		PlayerState->Team = Red <= Blue ? ECampusTeam::Red : ECampusTeam::Blue;
-		PlayerState->bIsHost = !bHasHost;
+		// the listen server's own player is the host (exact), not whoever logged in first
+		PlayerState->bIsHost = NewPlayer->IsLocalPlayerController();
 	}
 	Super::PostLogin(NewPlayer);
+	ReportRoom();
 }
 
 FTransform ACampusMatchGameMode::SpawnTransformFor(const ACampusPlayerState* PlayerState) const
@@ -82,11 +107,17 @@ FTransform ACampusMatchGameMode::SpawnTransformFor(const ACampusPlayerState* Pla
 			}
 		}
 	}
-	// Teams face each other across the floor; slots fan out sideways.
-	const float Side = Team == ECampusTeam::Red ? -1.f : 1.f;
-	const float Lateral = (Slot % 2 == 0 ? 1.f : -1.f) * 200.f * ((Slot + 1) / 2);
-	const FVector Location(1200.f * Side, Lateral, 120.f);
-	const FRotator Facing(0.f, Team == ECampusTeam::Red ? 0.f : 180.f, 0.f);
+	// The team base pads of the three.js game (src/game/game.js TEAM_BASES / BASE_SLOTS), where the campus sits
+	// in L_Match (Unreal = (x, z, y) * 100 + campus origin): BLUE on the road outside the main gate (z -143),
+	// RED at the open end behind the courtyard (z -15), 4 spots 3 m apart across each pad, facing each other.
+	static const FVector CampusOrigin(15710.f, 8222.6f, 0.f);
+	static const float BaseSlots[] = { -450.f, -150.f, 150.f, 450.f };
+	const bool bRed = Team == ECampusTeam::Red;
+	const float BaseY = (bRed ? -15.f : -143.f) * 100.f;
+	// more than 4 on a team: a second row 2 m further from the enemy
+	const float Row = (Slot / 4) * 200.f * (bRed ? 1.f : -1.f);
+	const FVector Location(CampusOrigin.X + BaseSlots[Slot % 4], CampusOrigin.Y + BaseY + Row, 110.f);
+	const FRotator Facing(0.f, bRed ? -90.f : 90.f, 0.f);
 	return FTransform(Facing, Location);
 }
 
@@ -113,25 +144,10 @@ void ACampusMatchGameMode::RequestStart(APlayerController* Requester)
 		return;
 	}
 
-	State->Phase = ECampusPhase::Playing;
-	State->EndTime = GetWorld()->GetTimeSeconds() + MatchSeconds;
 	State->RedScore = 0;
 	State->BlueScore = 0;
 	State->Winner = -1;
-
-	// Everyone back to their team's side for a clean start.
-	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
-	{
-		if (APlayerController* Player = It->Get())
-		{
-			if (APawn* Pawn = Player->GetPawn())
-			{
-				Pawn->Destroy();
-			}
-			RestartPlayer(Player);
-		}
-	}
-	State->MulticastFeed(TEXT("Match started"));
+	StartRound(1, false);
 	GetWorldTimerManager().SetTimer(ClockTimer, this, &ACampusMatchGameMode::CheckClock, 0.5f, true);
 }
 
@@ -154,8 +170,16 @@ void ACampusMatchGameMode::SwitchTeam(APlayerController* Requester)
 void ACampusMatchGameMode::OnKilled(AController* Victim, AController* Killer)
 {
 	ACampusGameState* State = GetCampusState();
-	if (!State || State->Phase != ECampusPhase::Playing)
+	if (!State)
 	{
+		return;
+	}
+	// A death outside a match (fell off the map in the waiting room or on the end screen) still removes the dead
+	// pawn and respawns it; it just does not score. Otherwise the player stays a "ghost": standing, unable to
+	// shoot or die (bDead is server-only).
+	if (State->Phase != ECampusPhase::Playing)
+	{
+		RespawnLater(Victim);
 		return;
 	}
 
@@ -168,34 +192,42 @@ void ACampusMatchGameMode::OnKilled(AController* Victim, AController* Killer)
 	if (KillerState && KillerState != VictimState)
 	{
 		++KillerState->Kills;
-		(KillerState->Team == ECampusTeam::Red ? State->RedScore : State->BlueScore)++;
+		(KillerState->Team == ECampusTeam::Red ? RedRoundKills : BlueRoundKills)++;
 	}
 	State->MulticastFeed(FString::Printf(TEXT("%s  >  %s"),
 		KillerState ? *KillerState->GetPlayerName() : TEXT("?"),
 		VictimState ? *VictimState->GetPlayerName() : TEXT("?")));
 
-	if (State->RedScore >= KillsToWin || State->BlueScore >= KillsToWin)
-	{
-		EndRound();
-		return;
-	}
-
+	// elimination: out until the next round (the pawn goes, no respawn timer)
 	if (Victim)
 	{
 		if (APawn* Pawn = Victim->GetPawn())
 		{
 			Pawn->Destroy();
 		}
-		FTimerHandle Respawn;
-		TWeakObjectPtr<AController> WeakVictim(Victim);
-		GetWorldTimerManager().SetTimer(Respawn, FTimerDelegate::CreateWeakLambda(this, [this, WeakVictim]()
-		{
-			if (AController* Controller = WeakVictim.Get())
-			{
-				RestartPlayer(Controller);
-			}
-		}), RespawnSeconds, false);
 	}
+	CheckRoundOver(false);
+}
+
+void ACampusMatchGameMode::RespawnLater(AController* Victim)
+{
+	if (!Victim)
+	{
+		return;
+	}
+	if (APawn* Pawn = Victim->GetPawn())
+	{
+		Pawn->Destroy();
+	}
+	FTimerHandle Respawn;
+	TWeakObjectPtr<AController> WeakVictim(Victim);
+	GetWorldTimerManager().SetTimer(Respawn, FTimerDelegate::CreateWeakLambda(this, [this, WeakVictim]()
+	{
+		if (AController* Controller = WeakVictim.Get())
+		{
+			RestartPlayer(Controller); // (no respawn once the match has Ended: RestartPlayer checks)
+		}
+	}), RespawnSeconds, false);
 }
 
 void ACampusMatchGameMode::CheckClock()
@@ -203,7 +235,7 @@ void ACampusMatchGameMode::CheckClock()
 	const ACampusGameState* State = GetCampusState();
 	if (State && State->Phase == ECampusPhase::Playing && GetWorld()->GetTimeSeconds() >= State->EndTime)
 	{
-		EndRound();
+		CheckRoundOver(true);
 	}
 }
 
@@ -215,7 +247,150 @@ void ACampusMatchGameMode::EndRound()
 		return;
 	}
 	GetWorldTimerManager().ClearTimer(ClockTimer);
+	GetWorldTimerManager().ClearTimer(BreakTimer);
 	State->Phase = ECampusPhase::Ended;
 	State->Winner = State->RedScore == State->BlueScore ? -1 : (State->RedScore > State->BlueScore ? 0 : 1);
-	State->MulticastFeed(TEXT("Match over"));
+	State->MulticastFeed(FString::Printf(TEXT("Match over  ·  %s wins %d - %d"),
+		State->Winner == 0 ? TEXT("RED") : TEXT("BLUE"), FMath::Max(State->RedScore, State->BlueScore), FMath::Min(State->RedScore, State->BlueScore)));
+	ReportRoom();
+}
+
+void ACampusMatchGameMode::StartRound(int32 Round, bool bDecider)
+{
+	ACampusGameState* State = GetCampusState();
+	if (!State)
+	{
+		return;
+	}
+	State->Round = Round;
+	State->bDecider = bDecider;
+	State->LastRoundWinner = -1;
+	State->Phase = ECampusPhase::Playing;
+	State->EndTime = GetWorld()->GetTimeSeconds() + State->RoundMinutes * 60.f;
+	RedRoundKills = 0;
+	BlueRoundKills = 0;
+	ReportRoom();
+	// everyone back in, on their team's side
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		if (APlayerController* Player = It->Get())
+		{
+			if (APawn* Pawn = Player->GetPawn())
+			{
+				Pawn->Destroy();
+			}
+			RestartPlayer(Player);
+		}
+	}
+	State->MulticastFeed(bDecider
+		? FString::Printf(TEXT("DECIDING ROUND  ·  %d - %d"), State->RedScore, State->BlueScore)
+		: FString::Printf(TEXT("ROUND %d of %d"), Round, State->Rounds));
+}
+
+int32 ACampusMatchGameMode::AliveOn(ECampusTeam Team, int32* OutPlayers) const
+{
+	int32 Alive = 0;
+	int32 Players = 0;
+	for (const APlayerState* Other : GameState->PlayerArray)
+	{
+		const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Other);
+		if (!Campus || Campus->Team != Team)
+		{
+			continue;
+		}
+		++Players;
+		const APawn* Pawn = Campus->GetPawn();
+		Alive += Pawn && !Pawn->IsPendingKillPending() ? 1 : 0;
+	}
+	if (OutPlayers)
+	{
+		*OutPlayers = Players;
+	}
+	return Alive;
+}
+
+void ACampusMatchGameMode::CheckRoundOver(bool bForce)
+{
+	const ACampusGameState* State = GetCampusState();
+	if (!State || State->Phase != ECampusPhase::Playing)
+	{
+		return;
+	}
+	int32 RedPlayers = 0;
+	int32 BluePlayers = 0;
+	const int32 RedAlive = AliveOn(ECampusTeam::Red, &RedPlayers);
+	const int32 BlueAlive = AliveOn(ECampusTeam::Blue, &BluePlayers);
+	// elimination only counts when both teams have players (alone in a room: rounds end on the timer)
+	const bool bBothTeams = RedPlayers > 0 && BluePlayers > 0;
+	if (bBothTeams && (RedAlive == 0 || BlueAlive == 0))
+	{
+		FinishRound(RedAlive == 0 && BlueAlive == 0 ? -1 : (RedAlive > 0 ? 0 : 1));
+		return;
+	}
+	if (bForce)
+	{
+		// time up: more players standing wins, then more kills this round, else a draw
+		const int32 Winner = RedAlive != BlueAlive ? (RedAlive > BlueAlive ? 0 : 1)
+			: (RedRoundKills != BlueRoundKills ? (RedRoundKills > BlueRoundKills ? 0 : 1) : -1);
+		FinishRound(Winner);
+	}
+}
+
+void ACampusMatchGameMode::FinishRound(int32 Winner)
+{
+	ACampusGameState* State = GetCampusState();
+	State->LastRoundWinner = Winner;
+	if (Winner == 0)
+	{
+		++State->RedScore;
+	}
+	else if (Winner == 1)
+	{
+		++State->BlueScore;
+	}
+	State->Phase = ECampusPhase::RoundOver;
+	State->MulticastFeed(FString::Printf(TEXT("%s  ·  RED %d - %d BLUE"),
+		Winner < 0 ? TEXT("Round drawn") : (Winner == 0 ? TEXT("RED wins the round") : TEXT("BLUE wins the round")), State->RedScore, State->BlueScore));
+	GetWorldTimerManager().SetTimer(BreakTimer, this, &ACampusMatchGameMode::NextRoundOrEnd, RoundBreakSeconds, false);
+}
+
+void ACampusMatchGameMode::NextRoundOrEnd()
+{
+	const ACampusGameState* State = GetCampusState();
+	if (!State)
+	{
+		return;
+	}
+	// every picked round is played, even when one team can no longer be caught; then a tie gets a decider
+	if (State->Round < State->Rounds)
+	{
+		StartRound(State->Round + 1, false);
+	}
+	else if (State->RedScore == State->BlueScore)
+	{
+		StartRound(State->Round + 1, true);
+	}
+	else
+	{
+		EndRound();
+	}
+}
+
+void ACampusMatchGameMode::Logout(AController* Exiting)
+{
+	Super::Logout(Exiting);
+	ReportRoom();
+	CheckRoundOver(false); // the last player of a team leaving ends the round
+}
+
+void ACampusMatchGameMode::ReportRoom()
+{
+	// The host's phone keeps its API room alive and tells it how full it is and whether the match has started
+	// (a started room keeps its Room Card spent).
+	const ACampusGameState* State = GetCampusState();
+	UCampusBackend* Backend = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBackend>() : nullptr;
+	if (State && Backend && Backend->GetHostedRoom().Code == State->RoomCode)
+	{
+		Backend->SetHostedRoomState(State->Phase != ECampusPhase::Waiting, GameState->PlayerArray.Num());
+	}
 }

@@ -14,6 +14,7 @@ class SCampusLobbyWidget;
 class SCampusMatchWidget;
 class SCampusTouchControls;
 class UCampusSave;
+class UCampusBackend;
 class UCampusGameInstance;
 
 UCLASS()
@@ -30,10 +31,15 @@ public:
 	/** Turns the podium character (drag in the empty middle of the screen). */
 	void RotateDisplay(float DeltaYaw);
 
-	/** Hosts a room on this device (listen server, LAN). */
-	void HostRoom();
+	UCampusBackend* GetBackend() const;
 
-	/** Joins the room server from CampusNetSettings (the PC on the Wi-Fi today, AWS later). */
+	/** Custom Room: the API issues a code (1 Room Card), then this phone hosts the match (listen server). */
+	void HostRoom(TFunction<void(const FString& Error)> OnFailed);
+
+	/** Resolves a friend's room code through the API and travels to the host phone. */
+	void JoinRoomByCode(const FString& Code, TFunction<void(const FString& Error)> OnFailed);
+
+	/** Quick Match: joins the room server from CampusNetSettings (the PC on the Wi-Fi today, AWS later). */
 	void JoinRoom();
 
 protected:
@@ -64,8 +70,11 @@ public:
 	UFUNCTION(Server, Reliable)
 	void ServerSwitchTeam();
 
-	/** Adds this match's reward to the profile and goes back to the lobby. */
+	/** Adds this match's reward to the profile (if not yet) and goes back to the lobby. */
 	void ClaimAndLeave();
+
+	/** Saves this match's reward once; runs by itself the moment the match ends. */
+	void RecordResult();
 
 	/** Leaves without a reward (waiting room "Leave"). */
 	void LeaveToLobby();
@@ -87,4 +96,6 @@ private:
 	TSharedPtr<SCampusMatchWidget> Widget;
 	TSharedPtr<SCampusTouchControls> TouchControls;
 	int32 AppliedMode = -1;
+
+	bool bResultRecorded = false;
 };

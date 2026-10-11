@@ -6,9 +6,11 @@
 
 #include "CoreMinimal.h"
 #include "Brushes/SlateRoundedBoxBrush.h"
+#include "UObject/StrongObjectPtr.h"
 #include "Widgets/SLeafWidget.h"
 
 class ACampusCharacter;
+class UTexture2D;
 class APlayerController;
 
 class SCampusTouchControls : public SLeafWidget
@@ -89,6 +91,9 @@ private:
 	FVector2D JoyKnob = FVector2D::ZeroVector;
 	FVector2D MoveAxis = FVector2D::ZeroVector;
 	bool bAutoRun = false;
+	/** Joystick held forward at the rim; after 2 s the run locks on. */
+	bool bAtRunRim = false;
+	float RunRimTime = 0.f;
 
 	// HUD easing.
 	float LagHealth = 100.f;
@@ -102,5 +107,23 @@ private:
 	void DrawPill(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, const FVector2D& Size, const FLinearColor& Color) const;
 
 	mutable TMap<uint64, TUniquePtr<FSlateRoundedBoxBrush>> BrushCache;
+
+	/** The three.js HUD icons (src/game/assets + icons.js), imported as UI textures. */
+	void LoadIcons();
+	const FSlateBrush* Icon(FName Name) const;
+
+	// ---- maps (three.js src/game/maps.js) and the scoreboard
+	/** The campus picture with you (yellow arrow) and your teammates; bBig = full-screen map with grid + names. */
+	void DrawMap(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size, bool bBig, float U) const;
+	/** Tap the timer: both teams side by side, kills / deaths / damage dealt / taken for this room's rounds. */
+	void DrawScoreboard(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
+	bool bBigMap = false;
+	bool bScoreboard = false;
+	void DrawImage(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FSlateBrush* Brush, const FVector2D& Center, const FVector2D& Size, const FLinearColor& Tint, float Angle = 0.f) const;
+	/** three.js .on / :active state: a soft orange (#f0a020) glow behind the icon. */
+	void DrawGlow(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Center, float Radius) const;
+
+	TMap<FName, FSlateBrush> IconBrushes;
+	TArray<TStrongObjectPtr<UTexture2D>> IconTextures;
 	const FSlateBrush* WhiteBrush = nullptr;
 };

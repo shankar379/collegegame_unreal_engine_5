@@ -183,6 +183,13 @@
                 "Android",
                 "IOS"
             ]
+        },
+        {
+            "Name": "GeometryScripting",
+            "Enabled": true,
+            "TargetAllowList": [
+                "Editor"
+            ]
         }
     ]
 }

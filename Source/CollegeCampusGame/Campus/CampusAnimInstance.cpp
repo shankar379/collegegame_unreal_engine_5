@@ -1,8 +1,12 @@
 #include "Campus/CampusAnimInstance.h"
 
 #include "AnimationRuntime.h"
+#include "BonePose.h"
+#include "TwoBoneIK.h"
+#include "Components/CapsuleComponent.h"
 #include "Animation/AnimSequence.h"
 #include "Campus/CampusCharacter.h"
+#include "Campus/CampusDynamicClips.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -22,6 +26,9 @@ namespace CampusClips
 		MantleStand, MantleWalk, MantleRun,
 		JumpStartWalk, JumpStartRun, JumpStartSprint,
 		LandWalk, LandRun, LandSprint,
+		ClimbStand, ClimbWalk, ClimbRun,
+		// Prone (Mixamo crawl retargeted to the mannequin, Content/CampusAnims/Prone) + the sample's face-down get-up
+		ProneIdle, ProneForward, ProneBackward, ProneGetUp,
 		Num
 	};
 	constexpr int32 SprintF = Unarmed + 17, SprintFR = Unarmed + 18, SprintFL = Unarmed + 19;
@@ -115,6 +122,18 @@ namespace CampusClips
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Land_Walk.A_Jump_Land_Walk"), 0.f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Land_Run.A_Jump_Land_Run"), 0.f },
 		{ TEXT("/Game/CampusAnims/Unarmed/A_Jump_Land_Sprint.A_Jump_Land_Sprint"), 0.f },
+
+		// Climb (jump, grab a high ledge, pull up): root rises 250 cm. The sample uses it for 1.5 - 2.75 m.
+		{ TEXT("/Game/CampusAnims/Traversal/A_Climb_Stand.A_Climb_Stand"), 0.f },
+		{ TEXT("/Game/CampusAnims/Traversal/A_Climb_Walk.A_Climb_Walk"), 0.f },
+		{ TEXT("/Game/CampusAnims/Traversal/A_Climb_Run.A_Climb_Run"), 0.f },
+
+		// In place; RefSpeed = how fast the hands / knees sweep the floor at 1x (measured), so the crawl's play
+		// rate matches the real prone speed and nothing skates.
+		{ TEXT("/Game/CampusAnims/Prone/A_Prone_Prone_Forward_Stop.A_Prone_Prone_Forward_Stop"), 0.f },
+		{ TEXT("/Game/CampusAnims/Prone/A_Prone_Prone_Forward.A_Prone_Prone_Forward"), 25.f },
+		{ TEXT("/Game/CampusAnims/Prone/A_Prone_Crawl_Backwards_In_Prone.A_Prone_Crawl_Backwards_In_Prone"), 45.f },
+		{ TEXT("/Game/Characters/UEFN_Mannequin/Animations/Ragdoll/M_ragdoll_getup_stand_F.M_ragdoll_getup_stand_F"), 0.f },
 	};
 
 	/** Jump clip timing measured from each clip's root track: takeoff (root starts rising),
@@ -149,6 +168,24 @@ void FCampusAnimInstanceProxy::SamplePose(const FCampusAnimSample& Sample, FPose
 {
 	FAnimationPoseData PoseData(Out);
 	Sample.Sequence->GetAnimationPose(PoseData, FAnimExtractContext(double(Sample.Time), false, FDeltaTimeRecord(), Sample.bLoop));
+
+	if (Sample.bFoldRootIntoPelvis)
+	{
+		// pelvis (component) = pelvis (local) * root; keep that, then give the root its reference pose back
+		const FBoneContainer& Bones = Out.Pose.GetBoneContainer();
+		const int32 MeshIndex = Bones.GetPoseBoneIndexForBoneName(TEXT("pelvis"));
+		const FCompactPoseBoneIndex Root(0);
+		if (MeshIndex != INDEX_NONE)
+		{
+			const FCompactPoseBoneIndex Pelvis = Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(MeshIndex));
+			if (Pelvis.IsValid() && Bones.GetParentBoneIndex(Pelvis) == Root)
+			{
+				const FTransform RootRef = Out.Pose.GetRefPose(Root);
+				Out.Pose[Pelvis] = Out.Pose[Pelvis] * Out.Pose[Root] * RootRef.Inverse();
+				Out.Pose[Root] = RootRef;
+			}
+		}
+	}
 
 	// Remove the clip's travel from the pelvis so the body stays over the capsule.
 	if (!Sample.PelvisDrift.IsZero())
@@ -221,7 +258,21 @@ bool FCampusAnimInstanceProxy::Evaluate(FPoseContext& Output)
 		Output.Pose.NormalizeRotations();
 	}
 
+	ApplyLean(Output);
 	ApplyAimPitch(Output);
+	ApplyRootYaw(Output);
+	ApplyFootIK(Output);
+	ApplyProneYaw(Output);
+
+	if (ProneAlpha > UE_KINDA_SMALL_NUMBER)
+	{
+		// Tip the whole body forward about a point just above the feet, then slide it back so the
+		// hips sit over the capsule. The mesh faces +Y, so a negative turn about X lays +Z along +Y.
+		const FVector Pivot(0.f, 0.f, 20.f);
+		const FQuat Tilt(FVector::XAxisVector, FMath::DegreesToRadians(-82.f * ProneAlpha));
+		const FTransform Lay(Tilt, Pivot - Tilt.RotateVector(Pivot) + FVector(0.f, -55.f * ProneAlpha, 0.f));
+		Output.Pose[Root] = Output.Pose[Root] * Lay;
+	}
 	return true;
 }
 
@@ -265,10 +316,13 @@ void FCampusAnimInstanceProxy::ApplyUpperBody(FPoseContext& Output)
 void FCampusAnimInstanceProxy::ApplyAimPitch(FPoseContext& Output) const
 {
 	const float Pitch = AimPitch * AimPitchAlpha;
-	if (FMath::Abs(Pitch) < 0.1f)
+	if (FMath::Abs(Pitch) < 0.1f && CrouchRunBend < 0.01f)
 	{
 		return;
 	}
+	// Bent-over crouch run: the lower spine leans forward, the chest straightens part of it back, so the body is
+	// low and driven forward while the rifle stays near level (degrees per bone, + = toward the ground).
+	static const float BendDeg[] = { 12.f, 10.f, 8.f, -6.f, -6.f };
 
 	static const FName SpineBones[] = { TEXT("spine_01"), TEXT("spine_02"), TEXT("spine_03"), TEXT("spine_04"), TEXT("spine_05") };
 	const FBoneContainer& Bones = Output.Pose.GetBoneContainer();
@@ -293,8 +347,11 @@ void FCampusAnimInstanceProxy::ApplyAimPitch(FPoseContext& Output) const
 
 	// The mesh faces +Y in component space, so +X is the pitch axis.
 	const float RadiansPerBone = FMath::DegreesToRadians(Pitch / Chain.Num());
-	for (const FCompactPoseBoneIndex& Index : Chain)
+	for (int32 Link = 0; Link < Chain.Num(); ++Link)
 	{
+		const FCompactPoseBoneIndex& Index = Chain[Link];
+		// aim pitch: + looks up; the bend tips the torso down, so it goes in with the opposite sign
+		const float Radians = RadiansPerBone - FMath::DegreesToRadians(BendDeg[FMath::Min(Link, 4)] * CrouchRunBend);
 		FQuat ParentRotation = FQuat::Identity;
 		for (FCompactPoseBoneIndex Parent = Bones.GetParentBoneIndex(Index); Parent.IsValid(); Parent = Bones.GetParentBoneIndex(Parent))
 		{
@@ -302,8 +359,83 @@ void FCampusAnimInstanceProxy::ApplyAimPitch(FPoseContext& Output) const
 		}
 		const FVector LocalAxis = ParentRotation.Inverse().RotateVector(FVector::XAxisVector);
 		FTransform& Bone = Output.Pose[Index];
-		Bone.SetRotation((FQuat(LocalAxis, RadiansPerBone) * Bone.GetRotation()).GetNormalized());
+		Bone.SetRotation((FQuat(LocalAxis, Radians) * Bone.GetRotation()).GetNormalized());
 	}
+}
+
+void FCampusAnimInstanceProxy::ApplyFootIK(FPoseContext& Output) const
+{
+	if (FootIKAlpha < 0.01f)
+	{
+		return;
+	}
+	const FBoneContainer& Bones = Output.Pose.GetBoneContainer();
+	auto Find = [&Bones](const TCHAR* Name)
+	{
+		const int32 MeshIndex = Bones.GetPoseBoneIndexForBoneName(FName(Name));
+		return MeshIndex == INDEX_NONE ? FCompactPoseBoneIndex(INDEX_NONE) : Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(MeshIndex));
+	};
+	const FCompactPoseBoneIndex Pelvis = Find(TEXT("pelvis"));
+	const FCompactPoseBoneIndex Legs[2][3] = {
+		{ Find(TEXT("thigh_l")), Find(TEXT("calf_l")), Find(TEXT("foot_l")) },
+		{ Find(TEXT("thigh_r")), Find(TEXT("calf_r")), Find(TEXT("foot_r")) },
+	};
+	if (!Pelvis.IsValid())
+	{
+		return;
+	}
+
+	FCSPose<FCompactPose> CS;
+	CS.InitPose(Output.Pose);
+	TArray<FBoneTransform> Changed;
+
+	// 1) Hips down so the lower foot can reach its step (the capsule stands on the higher one / the stair ramp).
+	const float Drop = PelvisOffset * FootIKAlpha;
+	if (FMath::Abs(Drop) > 0.05f)
+	{
+		FTransform Hips = CS.GetComponentSpaceTransform(Pelvis);
+		Hips.AddToTranslation(FVector(0.f, 0.f, Drop));
+		Changed.Add(FBoneTransform(Pelvis, Hips));
+		CS.SafeSetCSBoneTransforms(Changed);
+		Changed.Reset();
+	}
+
+	// 2) Each leg: two-bone IK puts the foot on its own step; the knee bends forward (the mesh faces +Y).
+	for (int32 Side = 0; Side < 2; ++Side)
+	{
+		const FCompactPoseBoneIndex Thigh = Legs[Side][0], Calf = Legs[Side][1], Foot = Legs[Side][2];
+		if (!Thigh.IsValid() || !Calf.IsValid() || !Foot.IsValid())
+		{
+			continue;
+		}
+		const float Lift = (FootOffset[Side] - PelvisOffset) * FootIKAlpha;
+		if (FMath::Abs(Lift) < 0.05f)
+		{
+			continue;
+		}
+		FTransform ThighT = CS.GetComponentSpaceTransform(Thigh);
+		FTransform CalfT = CS.GetComponentSpaceTransform(Calf);
+		FTransform FootT = CS.GetComponentSpaceTransform(Foot);
+		const FVector Effector = FootT.GetLocation() + FVector(0.f, 0.f, Lift);
+		const FVector KneeHint = CalfT.GetLocation() + FVector(0.f, 60.f, 0.f);
+		AnimationCore::SolveTwoBoneIK(ThighT, CalfT, FootT, KneeHint, Effector, false, 1.0, 1.0);
+		Changed.Add(FBoneTransform(Thigh, ThighT));
+		Changed.Add(FBoneTransform(Calf, CalfT));
+		Changed.Add(FBoneTransform(Foot, FootT));
+		CS.SafeSetCSBoneTransforms(Changed);
+		Changed.Reset();
+	}
+	FCSPose<FCompactPose>::ConvertComponentPosesToLocalPoses(MoveTemp(CS), Output.Pose);
+}
+
+void FCampusAnimInstanceProxy::ApplyProneYaw(FPoseContext& Output) const
+{
+	if (FMath::Abs(ProneYaw) < 0.1f)
+	{
+		return;
+	}
+	const FCompactPoseBoneIndex Root(0);
+	Output.Pose[Root] = Output.Pose[Root] * FTransform(FQuat(FVector::ZAxisVector, FMath::DegreesToRadians(ProneYaw)));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -316,6 +448,12 @@ UCampusAnimInstance::UCampusAnimInstance()
 	{
 		ConstructorHelpers::FObjectFinder<UAnimSequence> Finder(CampusClips::Defs[Index].Path);
 		Clips[Index] = Finder.Object;
+	}
+	DynClips.SetNum(CampusDyn::Num);
+	for (int32 Index = 0; Index < CampusDyn::Num; ++Index)
+	{
+		ConstructorHelpers::FObjectFinder<UAnimSequence> Finder(CampusDyn::Defs[Index].Path);
+		DynClips[Index] = Finder.Object;
 	}
 }
 
@@ -353,7 +491,16 @@ void UCampusAnimInstance::PlayEquip()
 
 const UAnimSequence* UCampusAnimInstance::GetMantleClip(int32 Kind) const
 {
-	return Clip(CampusClips::MantleStand + FMath::Clamp(Kind, 0, 2));
+	// 0-2: mantle (stand / walk / run), 3-5: climb, 6-8: hurdle, 9-11: vault (hand on top, drop beyond).
+	if (Kind >= 9)
+	{
+		return DynClip(CampusDyn::Vault_Stand + FMath::Clamp(Kind - 9, 0, 2));
+	}
+	if (Kind >= 6)
+	{
+		return DynClip(CampusDyn::Hurdle_Stand + FMath::Clamp(Kind - 6, 0, 2));
+	}
+	return Kind >= 3 ? Clip(CampusClips::ClimbStand + FMath::Clamp(Kind - 3, 0, 2)) : Clip(CampusClips::MantleStand + FMath::Clamp(Kind, 0, 2));
 }
 
 float UCampusAnimInstance::GetReloadDuration() const
@@ -488,7 +635,7 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	const ACampusCharacter* Campus = Cast<ACampusCharacter>(Character);
 	const bool bArmed = Campus && Campus->IsArmed();
-	const bool bInAir = Movement->IsFalling();
+	const bool bInAir = Movement->IsFalling() || (Campus && Campus->IsZipping());
 
 	FVector Velocity = Character->GetVelocity();
 	const float VerticalSpeed = Velocity.Z;
@@ -500,10 +647,21 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	{
 		Value = FMath::FInterpConstantTo(Value, Target, DeltaSeconds, 1.f / BlendTime);
 	};
-	Approach(CrouchWeight, Movement->IsCrouching() ? 1.f : 0.f, 0.2f);
+	// Prone rides on the crouch capsule, which shrinks the instant prone starts: freeze the stand / crouch blend while
+	// prone (and while getting down / up) so a crouch dip never mixes into the get-down clip.
+	if (!(Campus && Campus->IsProne()) && ProneTransElapsed < 0.f)
+	{
+		Approach(CrouchWeight, Movement->IsCrouching() ? 1.f : 0.f, 0.2f);
+	}
+	// bent-over crouch run: grows with speed past the crouch walk (2 m/s) toward the crouch run (3.3 m/s)
+	{
+		const float RunShare = FMath::GetMappedRangeValueClamped(FVector2f(210.f, 300.f), FVector2f(0.f, 1.f), Velocity.Size2D());
+		// (speed tells it apart from the crouch walk, so remote players show it too: bRunHeld is not replicated)
+		Approach(CrouchRunWeight, bArmed && Movement->IsCrouching() && !(Campus && Campus->IsProne()) ? RunShare : 0.f, 0.15f);
+	}
 	Approach(RifleWeight, bArmed ? 1.f : 0.f, 0.2f);
-	Approach(AirWeight, bInAir ? 1.f : 0.f, 0.12f);
-
+	Approach(ProneWeight, Campus && Campus->IsProne() ? 1.f : 0.f, 0.45f);
+	Proxy.ProneAlpha = 0.f; // the old tipped-crouch placeholder; real prone clips below
 	if (bInAir)
 	{
 		if (!bWasInAir)
@@ -514,12 +672,16 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		}
 		AirTime += DeltaSeconds;
 	}
-	else if (bWasInAir && AirTime > 0.3f)
+	else if (bWasInAir && AirTime > 0.3f && AirWeight > 0.5f)
 	{
 		LandWeight = 1.f;
 		LandTime = 0.f;
 		LandKind = CampusClips::JumpKindForSpeed(Speed);
 	}
+	// Stepping on or off a step (plinth / pyramid steps, kerbs) leaves the floor for a few frames: that is not a
+	// fall, so the air pose only shows for a real jump, the zipline, or a drop that lasts or speeds up.
+	const bool bShowAir = bInAir && (bJumped || (Campus && Campus->IsZipping()) || AirTime > 0.2f || VerticalSpeed < -350.f);
+	Approach(AirWeight, bShowAir ? 1.f : 0.f, 0.12f);
 	bWasInAir = bInAir;
 	if (LandWeight > 0.f)
 	{
@@ -537,6 +699,104 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		const float CycleLength = Gait.CycleLength / Gait.Weight;
 		const float PlayRate = FMath::Clamp(Speed / FMath::Max(Gait.RefSpeed / Gait.Weight, 1.f), 0.4f, 1.6f);
 		MovePhase = FMath::Fmod(MovePhase + DeltaSeconds * PlayRate / FMath::Max(CycleLength, 0.1f), 1.f);
+	}
+	UpdateDynamic(DeltaSeconds, Campus, Movement, Speed, Direction, Samples);
+
+	// ---- Prone: lying idle + crawl forward / backward (Mixamo clips retargeted onto the mannequin) and the
+	// sample's face-down get-up (M_ragdoll_getup_stand_F, measured: lying until ~1.0 s, kneeling ~1.9 s,
+	// standing ~2.8 s, stays in place), played backwards to go down and forwards to get up.
+	float ProneShare = 0.f;
+	{
+		// LieTime 0.5: the get-up's frame that matches the Mixamo lying idle (measured: pelvis 11 cm, body flat, facing +Y);
+		// at 1.0 the get-up is already pushing up (pelvis 28 cm), which made the body drop and turn at the crossfade
+		constexpr float LieTime = 0.5f, KneelTime = 1.9f, StandTime = 2.8f, TransRate = 2.0f, BlendOut = 0.3f;
+		const bool bProneNow = Campus && Campus->IsProne();
+		if (bProneNow != bWasProne)
+		{
+			bProneTransDown = bProneNow;
+			// going down from where we were (standing or kneeling); getting up to where we end (crouched or not)
+			ProneTransFrom = bProneNow ? (bWasCrouched ? KneelTime : StandTime) : LieTime;
+			ProneTransTo = bProneNow ? LieTime : (Movement->IsCrouching() ? KneelTime : StandTime);
+			ProneTransDuration = FMath::Abs(ProneTransTo - ProneTransFrom) / TransRate;
+			ProneTransElapsed = 0.f;
+		}
+		bWasProne = bProneNow;
+		bWasCrouched = Movement->IsCrouching() && !bProneNow;
+
+		float TransShare = 0.f;
+		if (ProneTransElapsed >= 0.f)
+		{
+			ProneTransElapsed += DeltaSeconds;
+			if (ProneTransElapsed >= ProneTransDuration)
+			{
+				ProneTransElapsed = -1.f;
+			}
+			else
+			{
+				const float Alpha = ProneTransElapsed / FMath::Max(ProneTransDuration, 0.01f);
+				// quick blend in, then a crossfade into the lying pose (down) or back to locomotion (up)
+				TransShare = FMath::Min(1.f, ProneTransElapsed / 0.1f) * FMath::Min(1.f, (ProneTransDuration - ProneTransElapsed) / BlendOut);
+				if (const UAnimSequence* GetUp = Clip(CampusClips::ProneGetUp))
+				{
+					Samples.Add({ GetUp, FMath::Lerp(ProneTransFrom, ProneTransTo, Alpha), 0.f, false });
+				}
+			}
+		}
+		// the lying / crawling body shows once a down transition has (nearly) finished, until an up starts
+		const bool bDownPlaying = ProneTransElapsed >= 0.f && bProneTransDown;
+		const float LyingShare = bProneNow ? (bDownPlaying ? 1.f - TransShare : 1.f) : 0.f;
+		ProneShare = FMath::Clamp(LyingShare + TransShare, 0.f, 1.f);
+
+		if (ProneShare > 0.f)
+		{
+			// everything else (stand / crouch locomotion, turn in place) gives way
+			const int32 Last = Samples.Num() - (TransShare > 0.f ? 1 : 0);
+			for (int32 Index = 0; Index < Last; ++Index)
+			{
+				Samples[Index].Weight *= 1.f - ProneShare;
+			}
+			if (TransShare > 0.f)
+			{
+				Samples.Last().Weight = TransShare;
+			}
+			Proxy.RootYaw *= 1.f - ProneShare;
+		}
+
+		if (LyingShare > 0.f)
+		{
+			// sideways crawl: turn the whole body toward the movement (up to 90 deg), backward clip for behind
+			const float MoveAlpha = FMath::GetMappedRangeValueClamped(FVector2f(5.f, 25.f), FVector2f(0.f, 1.f), Speed);
+			const bool bBackward = FMath::Abs(Direction) > 100.f;
+			float YawTarget = bBackward ? FRotator::NormalizeAxis(Direction - 180.f) : Direction;
+			YawTarget = FMath::Clamp(YawTarget, -90.f, 90.f) * MoveAlpha;
+			ProneYawState = FMath::FInterpTo(ProneYawState, YawTarget, DeltaSeconds, MoveAlpha > 0.5f ? 6.f : 2.f);
+
+			const UAnimSequence* Idle = Clip(CampusClips::ProneIdle);
+			const UAnimSequence* Fwd = Clip(CampusClips::ProneForward);
+			const UAnimSequence* Back = Clip(CampusClips::ProneBackward);
+			if (Idle)
+			{
+				Samples.Add({ Idle, FMath::Max(0.f, Idle->GetPlayLength() - 0.02f), LyingShare * (1.f - MoveAlpha), false, FVector3f::ZeroVector, true });
+			}
+			// play rate = real speed / the clip's floor-sweep speed, so hands and knees stay planted
+			if (Fwd && !bBackward)
+			{
+				const float Rate = FMath::Clamp(Speed / CampusClips::Defs[CampusClips::ProneForward].RefSpeed, 0.3f, 2.5f);
+				ProneForwardPhase = FMath::Fmod(ProneForwardPhase + DeltaSeconds * Rate / Fwd->GetPlayLength(), 1.f);
+				Samples.Add({ Fwd, ProneForwardPhase * Fwd->GetPlayLength(), LyingShare * MoveAlpha, true, FVector3f::ZeroVector, true });
+			}
+			if (Back && bBackward)
+			{
+				const float Rate = FMath::Clamp(Speed / CampusClips::Defs[CampusClips::ProneBackward].RefSpeed, 0.3f, 2.5f);
+				ProneBackwardPhase = FMath::Fmod(ProneBackwardPhase + DeltaSeconds * Rate / Back->GetPlayLength(), 1.f);
+				Samples.Add({ Back, ProneBackwardPhase * Back->GetPlayLength(), LyingShare * MoveAlpha, true, FVector3f::ZeroVector, true });
+			}
+		}
+		else
+		{
+			ProneYawState = FMath::FInterpTo(ProneYawState, 0.f, DeltaSeconds, 6.f);
+		}
+		Proxy.ProneYaw = ProneYawState * LyingShare;
 	}
 
 	// The landing clip matches the landing speed (it keeps the stride), so it plays at full weight.
@@ -578,7 +838,7 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		{
 			Sample.Weight *= 1.f - TraversalWeight;
 		}
-		if (const UAnimSequence* Mantle = Clip(MantleStand + LastTraversalKind))
+		if (const UAnimSequence* Mantle = GetMantleClip(LastTraversalKind))
 		{
 			Samples.Add({ Mantle, FMath::Min(LastTraversalTime, Mantle->GetPlayLength()), TraversalWeight, false });
 		}
@@ -602,7 +862,7 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		}
 	}
 	// Sets without rifle clips (crouch, air, landing) hold the rifle with the upper body only.
-	const float HoldRifle = RifleWeight * FMath::Max3(CrouchWeight, AirWeight, Land);
+	const float HoldRifle = RifleWeight * FMath::Max3(CrouchWeight, AirWeight, Land) * (1.f - ProneShare);
 	if (UpperBodyClip == INDEX_NONE && HoldRifle > 0.01f)
 	{
 		if (const UAnimSequence* RifleIdle = Clip(CampusClips::Rifle))
@@ -626,5 +886,42 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	}
 
 	Proxy.AimPitch = FMath::Clamp(FRotator::NormalizeAxis(Character->GetBaseAimRotation().Pitch), -70.f, 70.f);
-	Proxy.AimPitchAlpha = RifleWeight * (1.f - UpperAlpha);
+	Proxy.AimPitchAlpha = RifleWeight * (1.f - UpperAlpha) * (1.f - ProneShare);
+	Proxy.CrouchRunBend = CrouchRunWeight * CrouchWeight;
+
+	// Foot IK: trace under each foot onto the real steps. The stair ramps (smooth capsule movement) are on their
+	// own collision that Visibility traces ignore, so these land on the treads; on plinth / pyramid steps the
+	// capsule perches on an edge and the other foot finds the step below.
+	{
+		int32 IKTraversalKind = 0;
+		float IKTraversalTime = 0.f;
+		const bool bIKTraversing = Campus && Campus->GetTraversal(IKTraversalKind, IKTraversalTime);
+		const bool bGrounded = Movement->IsMovingOnGround() && !bIKTraversing && !(Campus && (Campus->IsProne() || Campus->IsSliding() || Campus->IsZipping()));
+		Approach(FootIKWeight, bGrounded ? 1.f : 0.f, 0.12f);
+		const USkeletalMeshComponent* Mesh = GetSkelMeshComponent();
+		const float Scale = Mesh ? FMath::Max(Mesh->GetComponentScale().Z, 0.01f) : 1.f;
+		const float Floor = Character->GetActorLocation().Z - Character->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+		static const FName FootBones[2] = { TEXT("foot_l"), TEXT("foot_r") };
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(CampusFootIK), false, Character);
+		for (int32 Side = 0; Side < 2; ++Side)
+		{
+			float Target = 0.f;
+			if (Mesh && bGrounded)
+			{
+				const FVector At = Mesh->GetSocketLocation(FootBones[Side]);
+				FHitResult Hit;
+				if (GetWorld()->LineTraceSingleByChannel(Hit, FVector(At.X, At.Y, Floor + 50.f), FVector(At.X, At.Y, Floor - 60.f), ECC_Visibility, Params)
+					&& Hit.ImpactNormal.Z > 0.6f)
+				{
+					Target = FMath::Clamp(Hit.ImpactPoint.Z - Floor, -55.f, 45.f) / Scale;
+				}
+			}
+			FootTrace[Side] = FMath::FInterpTo(FootTrace[Side], Target, DeltaSeconds, 18.f);
+		}
+		PelvisTrace = FMath::FInterpTo(PelvisTrace, FMath::Min3(FootTrace[0], FootTrace[1], 0.f), DeltaSeconds, 12.f);
+		Proxy.FootOffset[0] = FootTrace[0];
+		Proxy.FootOffset[1] = FootTrace[1];
+		Proxy.PelvisOffset = PelvisTrace;
+		Proxy.FootIKAlpha = FootIKWeight;
+	}
 }

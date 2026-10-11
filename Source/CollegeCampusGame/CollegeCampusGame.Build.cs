@@ -21,7 +21,8 @@ public class CollegeCampusGame : ModuleRules
 			"Slate",
 			"SlateCore",
 			"HTTP",
-			"Json"
+			"Json",
+			"AnimationCore"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
@@ -30,6 +31,8 @@ public class CollegeCampusGame : ModuleRules
 		{
 			// Plain HTTP to the LAN test server; drop when the API moves behind HTTPS.
 			AdditionalPropertiesForReceipt.Add("AndroidPlugin", System.IO.Path.Combine(ModuleDirectory, "CampusCombat_UPL.xml"));
+			// Android JNI (Razorpay payment sheet bridge, Campus/CampusRazorpay.cpp)
+			PrivateDependencyModuleNames.Add("Launch");
 		}
 
 		PublicIncludePaths.AddRange(new string[] {

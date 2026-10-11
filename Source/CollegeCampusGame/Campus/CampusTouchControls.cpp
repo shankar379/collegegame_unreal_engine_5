@@ -8,6 +8,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
+#include "Engine/Texture2D.h"
 
 namespace TouchStyle
 {
@@ -51,6 +52,54 @@ SCampusTouchControls::SCampusTouchControls()
 {
 }
 
+void SCampusTouchControls::LoadIcons()
+{
+	static const TCHAR* Names[] = { TEXT("fire"), TEXT("scope"), TEXT("jump"), TEXT("crouch"), TEXT("prone"), TEXT("run"),
+		TEXT("reload"), TEXT("eye"), TEXT("joystick"), TEXT("joystick_knob"), TEXT("fist"), TEXT("ak"), TEXT("campusmap") };
+	for (const TCHAR* Name : Names)
+	{
+		const FString Path = FString::Printf(TEXT("/Game/CampusUI/Icons/T_Icon_%s.T_Icon_%s"), Name, Name);
+		if (UTexture2D* Texture = LoadObject<UTexture2D>(nullptr, *Path))
+		{
+			IconTextures.Emplace(Texture);
+			FSlateBrush Brush;
+			Brush.SetResourceObject(Texture);
+			Brush.ImageSize = FVector2D(Texture->GetSizeX(), Texture->GetSizeY());
+			Brush.DrawAs = ESlateBrushDrawType::Image;
+			IconBrushes.Add(FName(Name), Brush);
+		}
+	}
+}
+
+const FSlateBrush* SCampusTouchControls::Icon(FName Name) const
+{
+	return IconBrushes.Find(Name);
+}
+
+void SCampusTouchControls::DrawImage(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FSlateBrush* Brush, const FVector2D& Center,
+	const FVector2D& Size, const FLinearColor& Tint, float Angle) const
+{
+	if (!Brush)
+	{
+		return;
+	}
+	const FPaintGeometry Paint = G.ToPaintGeometry(FVector2f(Size), FSlateLayoutTransform(FVector2f(Center - Size * 0.5f)));
+	if (FMath::IsNearlyZero(Angle))
+	{
+		FSlateDrawElement::MakeBox(Out, Layer, Paint, Brush, ESlateDrawEffect::None, Tint);
+	}
+	else
+	{
+		FSlateDrawElement::MakeRotatedBox(Out, Layer, Paint, Brush, ESlateDrawEffect::None, Angle, TOptional<FVector2f>(), FSlateDrawElement::RelativeToElement, Tint);
+	}
+}
+
+void SCampusTouchControls::DrawGlow(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Center, float Radius) const
+{
+	DrawCircle(Out, Layer, G, Center, Radius * 1.16f, TouchStyle::IconOn.CopyWithNewOpacity(0.18f));
+	DrawCircle(Out, Layer, G, Center, Radius * 1.07f, TouchStyle::IconOn.CopyWithNewOpacity(0.35f));
+}
+
 const FSlateBrush* SCampusTouchControls::RoundBrush(float Radius, float OutlineWidth, const FLinearColor& OutlineColor) const
 {
 	const uint32 R = uint32(FMath::Max(1, FMath::RoundToInt(Radius)));
@@ -78,6 +127,7 @@ void SCampusTouchControls::Construct(const FArguments& InArgs)
 	Controller = InArgs._Controller;
 	bShowButtons = InArgs._ShowButtons;
 	WhiteBrush = FCoreStyle::Get().GetBrush("GenericWhiteBox");
+	LoadIcons();
 	SetVisibility(EVisibility::HitTestInvisible);
 }
 
@@ -157,13 +207,15 @@ SCampusTouchControls::FLayout SCampusTouchControls::MakeLayout(const FVector2D& 
 
 SCampusTouchControls::EControl SCampusTouchControls::HitTest(const FLayout& L, const FVector2D& P, bool bAiming) const
 {
+	const ACampusCharacter* Holder = GetCharacter();
+	const bool bArmed = Holder && Holder->IsArmed();
 	auto In = [&P](const FVector2D& C, float R) { return FVector2D::DistSquared(P, C) <= R * R; };
 	// Slightly generous hit areas for thumbs.
 	const float Pad = 1.15f;
 	if (In(L.Fire, L.FireR * Pad)) return EControl::Fire;
 	if (In(L.FireLeft, L.FireLeftR * 1.6f)) return EControl::FireLeft;
 	if (In(L.Reload, L.ReloadR * Pad)) return EControl::Reload;
-	if (In(L.Scope, L.ScopeR * Pad)) return EControl::Scope;
+	if (bArmed && In(L.Scope, L.ScopeR * Pad)) return EControl::Scope;
 	if (bAiming && FMath::Abs(P.X - L.Zoom.X) <= L.ZoomSize.X * 0.6f && FMath::Abs(P.Y - L.Zoom.Y) <= L.ZoomSize.Y * 0.6f) return EControl::Zoom;
 	if (In(L.Jump, L.JumpR * Pad)) return EControl::Jump;
 	if (In(L.Crouch, L.CrouchR * Pad)) return EControl::Crouch;
@@ -222,8 +274,13 @@ void SCampusTouchControls::PressControl(EControl Control)
 	case EControl::Weapon:
 		Character->ToggleArmed();
 		break;
+	case EControl::Prone:
+		bAutoRun = false;
+		Character->SetSprintHeld(false);
+		Character->ToggleProne();
+		break;
 	default:
-		break; // Prone: no prone animation in the game yet.
+		break;
 	}
 }
 
@@ -276,6 +333,31 @@ FReply SCampusTouchControls::OnTouchStarted(const FGeometry& MyGeometry, const F
 	const ACampusCharacter* Character = GetCharacter();
 	const FLayout& L = CachedLayout;
 
+	// an open full map / scoreboard: any tap closes it
+	if (bBigMap || bScoreboard)
+	{
+		bBigMap = false;
+		bScoreboard = false;
+		return FReply::Handled();
+	}
+	// tap the minimap: full map; tap the timer: scoreboard
+	{
+		const float MapSize = 17.f * L.U;
+		const FVector2D MapMin(L.W * 0.01f, L.W * 0.01f);
+		if (P.X >= MapMin.X && P.Y >= MapMin.Y && P.X <= MapMin.X + MapSize && P.Y <= MapMin.Y + MapSize)
+		{
+			bBigMap = true;
+			return FReply::Handled();
+		}
+		const FVector2D Top(L.W * 0.5f, 32.f + L.U);
+		const FVector2D Box(26.f * L.U, 4.4f * L.U);
+		if (FMath::Abs(P.X - Top.X) <= Box.X * 0.5f && FMath::Abs(P.Y - Top.Y) <= Box.Y * 0.6f)
+		{
+			bScoreboard = true;
+			return FReply::Handled();
+		}
+	}
+
 	FFinger Finger;
 	Finger.Last = P;
 	Finger.Control = HitTest(L, P, Character && Character->IsAiming());
@@ -306,7 +388,8 @@ FReply SCampusTouchControls::OnTouchStarted(const FGeometry& MyGeometry, const F
 		JoyFinger = TouchEvent.GetPointerIndex();
 		JoyCenter = FVector2D(FMath::Clamp(P.X, L.JoyR + 4.f, L.W - L.JoyR - 4.f), FMath::Clamp(P.Y, L.JoyR + 4.f, L.H - L.JoyR - 4.f));
 		JoyKnob = JoyCenter;
-		bAutoRun = false;
+		RunRimTime = 0.f;
+		bAtRunRim = false;
 	}
 	else
 	{
@@ -346,10 +429,16 @@ FReply SCampusTouchControls::OnTouchMoved(const FGeometry& MyGeometry, const FPo
 		}
 		JoyKnob = JoyCenter + Offset;
 		MoveAxis = FVector2D(Offset.X / MaxTravel, -Offset.Y / MaxTravel);
-		// Push to the top edge to sprint (hud.js: move.y > 0.95 and at the rim).
+		// Push to the top edge to sprint, and it locks on (keeps running after release, crouched too).
 		if (ACampusCharacter* Character = GetCharacter())
 		{
-			Character->SetSprintHeld(MoveAxis.Y > 0.95f && Length > MaxTravel * 0.98f);
+			bAtRunRim = MoveAxis.Y > 0.95f && Length > MaxTravel * 0.98f;
+			// Steering away from forward while locked turns the lock off.
+			if (bAutoRun && MoveAxis.Y < 0.5f && Length > MaxTravel * 0.3f)
+			{
+				bAutoRun = false;
+			}
+			Character->SetSprintHeld(bAutoRun || bAtRunRim);
 		}
 		break;
 	}
@@ -391,6 +480,8 @@ FReply SCampusTouchControls::OnTouchEnded(const FGeometry& MyGeometry, const FPo
 	{
 		JoyFinger = INDEX_NONE;
 		MoveAxis = FVector2D::ZeroVector;
+		bAtRunRim = false;
+		RunRimTime = 0.f;
 		if (ACampusCharacter* Character = GetCharacter())
 		{
 			Character->SetSprintHeld(bAutoRun);
@@ -450,6 +541,19 @@ void SCampusTouchControls::Tick(const FGeometry& AllottedGeometry, const double 
 	{
 		JoyCenter = FMath::Vector2DInterpTo(JoyCenter.IsZero() ? CachedLayout.JoyHome : JoyCenter, CachedLayout.JoyHome, InDeltaTime, 1.f / 0.15f);
 		JoyKnob = JoyCenter;
+	}
+	if (JoyFinger != INDEX_NONE && bAtRunRim)
+	{
+		RunRimTime += InDeltaTime;
+		if (RunRimTime >= 2.f && !bAutoRun)
+		{
+			bAutoRun = true;
+			Character->SetSprintHeld(true);
+		}
+	}
+	else
+	{
+		RunRimTime = 0.f;
 	}
 	Character->SetTouchMove(bAutoRun && JoyFinger == INDEX_NONE ? FVector2D(0.f, 1.f) : MoveAxis);
 
@@ -627,9 +731,18 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		return false;
 	};
 
-	// Joystick: grey base, dotted inner ring, four arrows, light knob.
+	// Joystick: the designer base + knob artwork (three.js #joy.img); drawn fallback otherwise.
 	const float R = L.JoyR;
 	const FVector2D JoyC = JoyCenter.IsZero() ? L.JoyHome : JoyCenter;
+	const FVector2D Knob = JoyFinger != INDEX_NONE ? JoyKnob : JoyC;
+	const float KnobR = R * 0.32f;
+	if (Icon(TEXT("joystick")) && Icon(TEXT("joystick_knob")))
+	{
+		DrawImage(Out, Layer, G, Icon(TEXT("joystick")), JoyC, FVector2D(R * 2.f), FLinearColor::White);
+		DrawImage(Out, Layer + 3, G, Icon(TEXT("joystick_knob")), Knob, FVector2D(KnobR * 2.f), FLinearColor::White);
+	}
+	else
+	{
 	DrawCircle(Out, Layer, G, JoyC, R, TouchStyle::JoyBase);
 	for (int32 I = 0; I < 36; I += 2)
 	{
@@ -647,11 +760,34 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		const float S = R * 0.12f;
 		DrawPolyline(Out, Layer + 1, G, { Tip - Dir * S + Side * S, Tip, Tip - Dir * S - Side * S }, FLinearColor::White, 2.f);
 	}
-	const FVector2D Knob = JoyFinger != INDEX_NONE ? JoyKnob : JoyC;
-	const float KnobR = R * 0.32f;
 	DrawCircle(Out, Layer + 2, G, Knob, KnobR + 4.f, FLinearColor(FColor(0x88, 0x88, 0x88)));
 	DrawCircle(Out, Layer + 2, G, Knob, KnobR + 3.f, TouchStyle::JoyKnobBorder);
 	DrawCircle(Out, Layer + 3, G, Knob, KnobR, TouchStyle::JoyKnob);
+	}
+
+	// Run lock: progress arc while holding forward at the rim, then a "RUN LOCK" badge.
+	if (bAutoRun || RunRimTime > 0.f)
+	{
+		const FVector2D Badge = JoyC + FVector2D(0.f, -R * 1.35f);
+		if (bAutoRun)
+		{
+			const FVector2D Size(9.f * L.U, 2.8f * L.U);
+			DrawPill(Out, Layer + 3, G, Badge - Size * 0.5f, Size, TouchStyle::IconOn.CopyWithNewOpacity(0.9f));
+			DrawText(Out, Layer + 4, G, TEXT("RUN LOCK"), Badge, FMath::RoundToInt(L.U * 1.2f), FLinearColor::White);
+		}
+		else
+		{
+			const float Progress = FMath::Clamp(RunRimTime / 2.f, 0.f, 1.f);
+			TArray<FVector2f> Arc;
+			const int32 Steps = FMath::Max(2, int32(32 * Progress));
+			for (int32 I = 0; I <= Steps; ++I)
+			{
+				const float A = -UE_HALF_PI + UE_TWO_PI * Progress * I / Steps;
+				Arc.Add(FVector2f(Badge.X + FMath::Cos(A) * L.U * 1.4f, Badge.Y + FMath::Sin(A) * L.U * 1.4f));
+			}
+			DrawPolyline(Out, Layer + 4, G, Arc, TouchStyle::IconOn, 3.f);
+		}
+	}
 
 	// Fire: grey disc, white inner disc that follows the aiming finger.
 	const float FireAlpha = bScoped ? 0.7f : 1.f;
@@ -673,17 +809,39 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	FireColor.A *= FireAlpha;
 	DrawCircle(Out, Layer, G, L.Fire, L.FireR, FireColor);
 	const float InnerR = L.FireR * 0.48f * (bFireHeld ? 0.94f : 1.f);
-	DrawCircle(Out, Layer + 1, G, Inner, InnerR, TouchStyle::FireDisc.CopyWithNewOpacity(FireAlpha));
-	DrawIcon(Out, Layer + 2, G, EControl::Fire, Inner, InnerR, TouchStyle::FireIcon, 0.f);
+	if (const FSlateBrush* FireIcon = Icon(TEXT("fire")))
+	{
+		DrawImage(Out, Layer + 1, G, FireIcon, Inner, FVector2D(InnerR * 2.f), FLinearColor::White.CopyWithNewOpacity(FireAlpha));
+	}
+	else
+	{
+		DrawCircle(Out, Layer + 1, G, Inner, InnerR, TouchStyle::FireDisc.CopyWithNewOpacity(FireAlpha));
+		DrawIcon(Out, Layer + 2, G, EControl::Fire, Inner, InnerR, TouchStyle::FireIcon, 0.f);
+	}
 
-	// Small left fire button.
-	DrawCircle(Out, Layer, G, L.FireLeft, L.FireLeftR, FireColor);
-	DrawIcon(Out, Layer + 1, G, EControl::FireLeft, L.FireLeft, L.FireLeftR * 1.6f, FLinearColor::White, 0.f);
+	// Small left fire button: the same artwork.
+	if (const FSlateBrush* FireIcon = Icon(TEXT("fire")))
+	{
+		DrawImage(Out, Layer, G, FireIcon, L.FireLeft, FVector2D(L.FireLeftR * 2.f) * (IsHeld(EControl::FireLeft) ? 0.94f : 1.f), FLinearColor::White.CopyWithNewOpacity(FireAlpha));
+	}
+	else
+	{
+		DrawCircle(Out, Layer, G, L.FireLeft, L.FireLeftR, FireColor);
+		DrawIcon(Out, Layer + 1, G, EControl::FireLeft, L.FireLeft, L.FireLeftR * 1.6f, FLinearColor::White, 0.f);
+	}
 
 	// Reload: white disc, spinning icon and a filling ring while reloading.
 	const bool bReloading = Character && Character->IsReloading();
 	DrawCircle(Out, Layer, G, L.Reload, L.ReloadR, TouchStyle::ReloadDisc);
-	DrawIcon(Out, Layer + 1, G, EControl::Reload, L.Reload, L.ReloadR * (IsHeld(EControl::Reload) ? 0.92f : 1.f), FLinearColor(FColor(0x33, 0x33, 0x33)), bReloading ? SpinAngle : 0.f);
+	const float ReloadScale = IsHeld(EControl::Reload) ? 0.92f : 1.f;
+	if (const FSlateBrush* ReloadIcon = Icon(TEXT("reload")))
+	{
+		DrawImage(Out, Layer + 1, G, ReloadIcon, L.Reload, FVector2D(L.ReloadR * 1.25f * ReloadScale), FLinearColor(FColor(0x33, 0x33, 0x33)), bReloading ? SpinAngle : 0.f);
+	}
+	else
+	{
+		DrawIcon(Out, Layer + 1, G, EControl::Reload, L.Reload, L.ReloadR * ReloadScale, FLinearColor(FColor(0x33, 0x33, 0x33)), bReloading ? SpinAngle : 0.f);
+	}
 	if (bReloading)
 	{
 		const float Progress = Character->GetReloadProgress();
@@ -700,14 +858,38 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	// Plain icon buttons on a faint disc; orange when on.
 	auto Plain = [&](EControl Control, const FVector2D& C, float Radius, bool bOn, float Opacity)
 	{
+		const bool bActiveNow = bOn || IsHeld(Control);
+		FName IconName = NAME_None;
+		switch (Control)
+		{
+		case EControl::Scope: IconName = TEXT("scope"); break;
+		case EControl::Jump: IconName = TEXT("jump"); break;
+		case EControl::Crouch: IconName = TEXT("crouch"); break;
+		case EControl::Prone: IconName = TEXT("prone"); break;
+		case EControl::Sprint: IconName = TEXT("run"); break;
+		default: break;
+		}
+		if (const FSlateBrush* Art = Icon(IconName))
+		{
+			if (bActiveNow)
+			{
+				DrawGlow(Out, Layer, G, C, Radius);
+			}
+			const float Press = IsHeld(Control) ? 0.94f : 1.f;
+			DrawImage(Out, Layer + 1, G, Art, C, FVector2D(Radius * 2.f * Press), FLinearColor::White.CopyWithNewOpacity(Opacity));
+			return;
+		}
 		DrawCircle(Out, Layer, G, C, Radius, TouchStyle::ButtonBack.CopyWithNewOpacity(TouchStyle::ButtonBack.A * Opacity));
-		const FLinearColor Ic = (bOn || IsHeld(Control)) ? TouchStyle::IconOn : TouchStyle::Icon;
+		const FLinearColor Ic = bActiveNow ? TouchStyle::IconOn : TouchStyle::Icon;
 		DrawIcon(Out, Layer + 1, G, Control, C, Radius, Ic.CopyWithNewOpacity(Ic.A * Opacity), 0.f);
 	};
-	Plain(EControl::Scope, L.Scope, L.ScopeR, bAiming, bScoped ? 0.7f : 1.f);
+	if (Character && Character->IsArmed())
+	{
+		Plain(EControl::Scope, L.Scope, L.ScopeR, bAiming, bScoped ? 0.7f : 1.f);
+	}
 	Plain(EControl::Jump, L.Jump, L.JumpR, false, 1.f);
-	Plain(EControl::Crouch, L.Crouch, L.CrouchR, Character && Character->bIsCrouched, 1.f);
-	Plain(EControl::Prone, L.Prone, L.ProneR, false, 0.45f);
+	Plain(EControl::Crouch, L.Crouch, L.CrouchR, Character && Character->bIsCrouched && !Character->IsProne(), 1.f);
+	Plain(EControl::Prone, L.Prone, L.ProneR, Character && Character->IsProne(), 1.f);
 	Plain(EControl::Sprint, L.Sprint, L.SprintR, bAutoRun || (Character && Character->IsSprinting()), 1.f);
 
 	{
@@ -728,6 +910,13 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 				EyeKnob = L.Eye + Offset;
 			}
 		}
+		const FLinearColor EyeTint = bEyeHeld ? TouchStyle::IconOn : FLinearColor::White;
+		if (const FSlateBrush* EyeIcon = Icon(TEXT("eye")))
+		{
+			DrawImage(Out, Layer + 2, G, EyeIcon, EyeKnob, FVector2D(L.EyeR * 1.25f), EyeTint);
+		}
+		else
+		{
 		// Eye glyph: almond outline and pupil (three.js btn-eye SVG).
 		const float EyeSize = L.EyeR * 0.55f;
 		TArray<FVector2f> Upper, Lower;
@@ -742,6 +931,7 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		DrawPolyline(Out, Layer + 2, G, Upper, EyeColor, 2.f);
 		DrawPolyline(Out, Layer + 2, G, Lower, EyeColor, 2.f);
 		DrawCircle(Out, Layer + 2, G, EyeKnob, EyeSize * 0.32f, EyeColor);
+		}
 	}
 
 	// Zoom pill, only while aiming.
@@ -773,6 +963,11 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 		DrawText(Out, Layer + 1, G, FString::FromInt(State->BlueScore), Top - FVector2D(BoxSize.X * 0.36f, 0.f), Font, TouchStyle::Blue);
 		DrawText(Out, Layer + 1, G, FString::Printf(TEXT("%02d:%02d"), Seconds / 60, Seconds % 60), Top, Font, Remaining < 30.f ? TouchStyle::Red : FLinearColor::White);
 		DrawText(Out, Layer + 1, G, FString::FromInt(State->RedScore), Top + FVector2D(BoxSize.X * 0.36f, 0.f), Font, TouchStyle::Red);
+		// round wins above, the round under the clock
+		const FString RoundText = State->bDecider ? FString(TEXT("DECIDING ROUND"))
+			: (State->Phase == ECampusPhase::RoundOver ? FString::Printf(TEXT("ROUND %d DONE  ·  NEXT IN A MOMENT"), State->Round)
+			: FString::Printf(TEXT("ROUND %d / %d"), FMath::Max(State->Round, 1), State->Rounds));
+		DrawText(Out, Layer + 1, G, RoundText, Top + FVector2D(0.f, BoxSize.Y * 0.85f), FMath::RoundToInt(U * 1.2f), State->bDecider ? TouchStyle::Red : FLinearColor::White);
 
 		// Alive / kill counter, top right.
 		int32 Alive = 0;
@@ -794,34 +989,8 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 			DrawText(Out, Layer + 1, G, State->Feed[Index], Anchor - FVector2D(U, 0.f), FeedFont, FLinearColor::White, 1.f, 0.5f);
 		}
 
-		// Minimap, top left: self and teammates.
-		const float MapSize = 17.f * U;
-		const FVector2D MapMin(L.W * 0.01f, L.W * 0.01f);
-		DrawRect(Out, Layer, G, MapMin, FVector2D(MapSize), TouchStyle::Minimap);
-		if (Character && Mine)
-		{
-			const FVector2D MapCenter = MapMin + FVector2D(MapSize * 0.5f);
-			const FVector Origin = Character->GetActorLocation();
-			const float Yaw = FMath::DegreesToRadians(PC->GetControlRotation().Yaw);
-			const float WorldToMap = MapSize * 0.5f / 3000.f;
-			for (const APlayerState* Player : State->PlayerArray)
-			{
-				const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
-				const APawn* Pawn = Player ? Player->GetPawn() : nullptr;
-				if (!Campus || !Pawn || Pawn == Character || Campus->Team != Mine->Team)
-				{
-					continue;
-				}
-				// Rotate so "forward" on the map is where the camera looks.
-				const FVector Delta = Pawn->GetActorLocation() - Origin;
-				const float Fwd = Delta.X * FMath::Cos(Yaw) + Delta.Y * FMath::Sin(Yaw);
-				const float Right = -Delta.X * FMath::Sin(Yaw) + Delta.Y * FMath::Cos(Yaw);
-				const FVector2D Dot = MapCenter + FVector2D(FMath::Clamp(Right * WorldToMap, -MapSize * 0.47f, MapSize * 0.47f), FMath::Clamp(-Fwd * WorldToMap, -MapSize * 0.47f, MapSize * 0.47f));
-				DrawCircle(Out, Layer + 1, G, Dot, U * 0.6f, Campus->Team == ECampusTeam::Red ? TouchStyle::Red : TouchStyle::Blue);
-			}
-			const float S = U * 0.9f;
-			DrawPolyline(Out, Layer + 2, G, { FVector2f(MapCenter.X - S * 0.7f, MapCenter.Y + S * 0.7f), FVector2f(MapCenter.X, MapCenter.Y - S), FVector2f(MapCenter.X + S * 0.7f, MapCenter.Y + S * 0.7f) }, FLinearColor::White, 2.f);
-		}
+		// Minimap, top left (tap: full map)
+		DrawMap(Out, Layer, G, FVector2D(L.W * 0.01f, L.W * 0.01f), 17.f * U, false, U);
 	}
 
 	if (!Character)
@@ -833,8 +1002,16 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 	// Weapons panel with ammo: big magazine count / reserve; tap to switch to the rifle or fists.
 	const bool bArmed = Character->IsArmed();
 	DrawPill(Out, Layer, G, L.WeaponMin, L.WeaponSize, TouchStyle::PanelDark.CopyWithNewOpacity(bArmed ? 0.75f : 0.45f));
-	DrawText(Out, Layer + 1, G, bArmed ? TEXT("AK") : TEXT("AK  (tap)"), L.WeaponMin + FVector2D(1.2f * U, 1.4f * U), FMath::RoundToInt(U * 1.3f),
-		bArmed ? TouchStyle::IconOn : FLinearColor(1.f, 1.f, 1.f, 0.7f), 0.f, 0.5f);
+	if (const FSlateBrush* GunArt = Icon(bArmed ? TEXT("ak") : TEXT("fist")))
+	{
+		const FVector2D ArtSize = bArmed ? FVector2D(L.WeaponSize.X * 0.5f, L.WeaponSize.X * 0.25f) : FVector2D(L.WeaponSize.Y * 0.55f);
+		DrawImage(Out, Layer + 1, G, GunArt, L.WeaponMin + FVector2D(ArtSize.X * 0.5f + U, L.WeaponSize.Y * 0.32f), ArtSize, FLinearColor::White);
+	}
+	else
+	{
+		DrawText(Out, Layer + 1, G, bArmed ? TEXT("AK") : TEXT("AK  (tap)"), L.WeaponMin + FVector2D(1.2f * U, 1.4f * U), FMath::RoundToInt(U * 1.3f),
+			bArmed ? TouchStyle::IconOn : FLinearColor(1.f, 1.f, 1.f, 0.7f), 0.f, 0.5f);
+	}
 	const int32 Mag = Character->GetAmmoInMag();
 	const FVector2D AmmoAnchor = L.WeaponMin + FVector2D(L.WeaponSize.X * 0.55f, L.WeaponSize.Y * 0.62f);
 	DrawText(Out, Layer + 1, G, FString::FromInt(Mag), AmmoAnchor, FMath::RoundToInt(U * 2.2f * 1.4f), Mag <= 5 ? TouchStyle::Red : FLinearColor::White, 1.f, 0.5f);
@@ -930,5 +1107,188 @@ int32 SCampusTouchControls::OnPaint(const FPaintArgs& Args, const FGeometry& All
 	{
 		DrawControls(OutDrawElements, LayerId + 5, AllottedGeometry, L);
 	}
-	return LayerId + 10;
+	if (bBigMap)
+	{
+		const float Size = FMath::Min(L.W, L.H) * 0.9f;
+		DrawMap(OutDrawElements, LayerId + 20, AllottedGeometry, FVector2D((L.W - Size) * 0.5f, (L.H - Size) * 0.5f), Size, true, L.U);
+	}
+	if (bScoreboard)
+	{
+		DrawScoreboard(OutDrawElements, LayerId + 20, AllottedGeometry, L);
+	}
+	return LayerId + 30;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Maps and scoreboard
+
+namespace CampusMapArea
+{
+	// The square the map picture covers, in Unreal world cm (tools/export-unreal-map.mjs in the three.js repo: the
+	// college bounds + 15 m, north = -Y up, +X right; the campus sits at (15710, 8222.6) in L_Match).
+	constexpr float MinX = -12210.f + 15710.f;
+	constexpr float MinY = -19549.45f + 8222.6f;
+	constexpr float Span = 22710.f;
+
+	FVector2D ToUV(const FVector& World)
+	{
+		return FVector2D((World.X - MinX) / Span, (World.Y - MinY) / Span);
+	}
+
+	struct FPlace { const TCHAR* Name; float X; float Y; };
+	const FPlace Places[] = {
+		{ TEXT("Front Block"), -2530.f, -11370.f }, { TEXT("Front Block"), 2835.f, -11370.f },
+		{ TEXT("West Wing"), -5022.f, -6160.f }, { TEXT("East Wing"), 5022.f, -6160.f },
+		{ TEXT("Courtyard"), 0.f, -6625.f }, { TEXT("Canteen"), -8870.f, -12152.f },
+	};
+}
+
+void SCampusTouchControls::DrawMap(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size, bool bBig, float U) const
+{
+	DrawRect(Out, Layer, G, Min - FVector2D(2.f), FVector2D(Size + 4.f), FLinearColor(0.f, 0.f, 0.f, 0.6f));
+	if (const FSlateBrush* Picture = Icon(TEXT("campusmap")))
+	{
+		DrawImage(Out, Layer + 1, G, Picture, Min + FVector2D(Size * 0.5f), FVector2D(Size), FLinearColor::White);
+	}
+	else
+	{
+		DrawRect(Out, Layer + 1, G, Min, FVector2D(Size), TouchStyle::Minimap);
+	}
+	auto At = [&Min, Size](const FVector& World)
+	{
+		const FVector2D UV = CampusMapArea::ToUV(World);
+		return Min + FVector2D(FMath::Clamp(UV.X, 0.0, 1.0), FMath::Clamp(UV.Y, 0.0, 1.0)) * Size;
+	};
+	const float Scale = bBig ? Size / 640.f : 1.f;
+	if (bBig)
+	{
+		// grid like the real games: columns A-J, rows 1-10, and the place names
+		const int32 GridFont = FMath::RoundToInt(Size / 45.f);
+		for (int32 K = 0; K <= 10; ++K)
+		{
+			const float T = Min.X + Size * K / 10.f;
+			const float V = Min.Y + Size * K / 10.f;
+			DrawPolyline(Out, Layer + 2, G, { FVector2f(T, Min.Y), FVector2f(T, Min.Y + Size) }, FLinearColor(1.f, 1.f, 1.f, 0.35f), 1.f);
+			DrawPolyline(Out, Layer + 2, G, { FVector2f(Min.X, V), FVector2f(Min.X + Size, V) }, FLinearColor(1.f, 1.f, 1.f, 0.35f), 1.f);
+			if (K < 10)
+			{
+				DrawText(Out, Layer + 3, G, FString::Chr(TEXT('A') + K), FVector2D(Min.X + Size * (K + 0.5f) / 10.f, Min.Y + Size / 40.f), GridFont, FLinearColor::White);
+				DrawText(Out, Layer + 3, G, FString::FromInt(K + 1), FVector2D(Min.X + Size / 40.f, Min.Y + Size * (K + 0.5f) / 10.f), GridFont, FLinearColor::White);
+			}
+		}
+		for (const CampusMapArea::FPlace& Place : CampusMapArea::Places)
+		{
+			DrawText(Out, Layer + 3, G, Place.Name, At(FVector(Place.X + 15710.f, Place.Y + 8222.6f, 0.f)), FMath::RoundToInt(Size / 42.f), FLinearColor::White);
+		}
+		DrawText(Out, Layer + 3, G, TEXT("tap anywhere to close"), FVector2D(Min.X + Size * 0.5f, Min.Y + Size + 2.f * U), FMath::RoundToInt(U * 1.2f), FLinearColor(1.f, 1.f, 1.f, 0.7f));
+	}
+
+	// arrows: you (yellow, bigger) and your teammates (team colour); enemies never show (three.js)
+	auto Arrow = [&](const FVector2D& C, float YawDeg, const FLinearColor& Color, float Len)
+	{
+		const float R = FMath::DegreesToRadians(YawDeg);
+		const FVector2D Dir(FMath::Cos(R), FMath::Sin(R)); // +X right, +Y down on the picture
+		const FVector2D Side(-Dir.Y, Dir.X);
+		const FVector2D Nose = C + Dir * Len;
+		const FVector2D BackL = C - Dir * Len * 0.6f + Side * Len * 0.7f;
+		const FVector2D BackR = C - Dir * Len * 0.6f - Side * Len * 0.7f;
+		DrawCircle(Out, Layer + 4, G, C, Len * 0.45f, Color);
+		DrawPolyline(Out, Layer + 5, G, { FVector2f(BackL), FVector2f(Nose), FVector2f(BackR), FVector2f(C - Dir * Len * 0.25f), FVector2f(BackL) }, Color, FMath::Max(2.f, Len * 0.25f));
+	};
+	const APlayerController* PC = Controller.Get();
+	const UWorld* World = PC ? PC->GetWorld() : nullptr;
+	const ACampusGameState* State = World ? World->GetGameState<ACampusGameState>() : nullptr;
+	const ACampusPlayerState* Mine = PC ? PC->GetPlayerState<ACampusPlayerState>() : nullptr;
+	if (!State || !Mine)
+	{
+		return;
+	}
+	for (const APlayerState* Player : State->PlayerArray)
+	{
+		const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
+		const APawn* Pawn = Player ? Player->GetPawn() : nullptr;
+		if (!Campus || !Pawn || Campus == Mine || Campus->Team != Mine->Team)
+		{
+			continue;
+		}
+		const FVector2D C = At(Pawn->GetActorLocation());
+		Arrow(C, Pawn->GetActorRotation().Yaw, Campus->Team == ECampusTeam::Red ? TouchStyle::Red : TouchStyle::Blue, 6.f * Scale);
+		if (bBig)
+		{
+			DrawText(Out, Layer + 6, G, Campus->GetPlayerName(), C - FVector2D(0.f, 16.f * Scale), FMath::RoundToInt(Size / 55.f), FLinearColor::White);
+		}
+	}
+	if (const APawn* Me = PC->GetPawn())
+	{
+		Arrow(At(Me->GetActorLocation()), PC->GetControlRotation().Yaw, FLinearColor(FColor(0xFF, 0xD2, 0x1F)), 8.f * Scale);
+	}
+}
+
+void SCampusTouchControls::DrawScoreboard(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
+{
+	const APlayerController* PC = Controller.Get();
+	const UWorld* World = PC ? PC->GetWorld() : nullptr;
+	const ACampusGameState* State = World ? World->GetGameState<ACampusGameState>() : nullptr;
+	const ACampusPlayerState* Mine = PC ? PC->GetPlayerState<ACampusPlayerState>() : nullptr;
+	if (!State)
+	{
+		return;
+	}
+	const float U = L.U;
+	DrawRect(Out, Layer, G, FVector2D::ZeroVector, FVector2D(L.W, L.H), FLinearColor(0.f, 0.f, 0.f, 0.55f));
+	const FString Title = State->bDecider ? FString::Printf(TEXT("DECIDING ROUND  ·  RED %d - %d BLUE"), State->RedScore, State->BlueScore)
+		: FString::Printf(TEXT("ROUND %d / %d  ·  RED %d - %d BLUE"), FMath::Max(State->Round, 1), State->Rounds, State->RedScore, State->BlueScore);
+	DrawText(Out, Layer + 2, G, Title, FVector2D(L.W * 0.5f, L.H * 0.1f), FMath::RoundToInt(U * 2.f), FLinearColor::White);
+
+	const float BoxW = L.W * 0.44f;
+	const float BoxH = L.H * 0.7f;
+	const float Top = L.H * 0.17f;
+	const int32 Font = FMath::RoundToInt(U * 1.25f);
+	const float Row = U * 2.3f;
+	for (int32 Side = 0; Side < 2; ++Side)
+	{
+		const ECampusTeam Team = Side == 0 ? ECampusTeam::Red : ECampusTeam::Blue;
+		const FLinearColor TeamColor = Side == 0 ? TouchStyle::Red : TouchStyle::Blue;
+		const float X0 = Side == 0 ? L.W * 0.04f : L.W * 0.52f;
+		DrawPill(Out, Layer + 1, G, FVector2D(X0, Top), FVector2D(BoxW, BoxH), TouchStyle::PanelDark.CopyWithNewOpacity(0.92f));
+		DrawRect(Out, Layer + 2, G, FVector2D(X0, Top), FVector2D(BoxW, U * 0.4f), TeamColor);
+		DrawText(Out, Layer + 2, G, FString::Printf(TEXT("%s  ·  %d rounds won"), Side == 0 ? TEXT("RED") : TEXT("BLUE"), Side == 0 ? State->RedScore : State->BlueScore),
+			FVector2D(X0 + U, Top + Row * 0.8f), FMath::RoundToInt(U * 1.6f), TeamColor, 0.f, 0.5f);
+		// columns: name | K | D | damage dealt | damage taken (this room, all rounds so far)
+		const float CK = X0 + BoxW * 0.52f;
+		const float CD = X0 + BoxW * 0.62f;
+		const float CDealt = X0 + BoxW * 0.77f;
+		const float CTaken = X0 + BoxW * 0.92f;
+		float Y = Top + Row * 1.9f;
+		const FLinearColor Head(1.f, 1.f, 1.f, 0.6f);
+		DrawText(Out, Layer + 2, G, TEXT("PLAYER"), FVector2D(X0 + U, Y), Font, Head, 0.f, 0.5f);
+		DrawText(Out, Layer + 2, G, TEXT("K"), FVector2D(CK, Y), Font, Head);
+		DrawText(Out, Layer + 2, G, TEXT("D"), FVector2D(CD, Y), Font, Head);
+		DrawText(Out, Layer + 2, G, TEXT("DMG"), FVector2D(CDealt, Y), Font, Head);
+		DrawText(Out, Layer + 2, G, TEXT("TAKEN"), FVector2D(CTaken, Y), Font, Head);
+		TArray<const ACampusPlayerState*> Players;
+		for (const APlayerState* Player : State->PlayerArray)
+		{
+			if (const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player); Campus && Campus->Team == Team)
+			{
+				Players.Add(Campus);
+			}
+		}
+		Players.Sort([](const ACampusPlayerState& A, const ACampusPlayerState& B) { return A.Kills != B.Kills ? A.Kills > B.Kills : A.DamageDealt > B.DamageDealt; });
+		for (const ACampusPlayerState* Campus : Players)
+		{
+			Y += Row;
+			if (Campus == Mine)
+			{
+				DrawRect(Out, Layer + 2, G, FVector2D(X0 + U * 0.4f, Y - Row * 0.45f), FVector2D(BoxW - U * 0.8f, Row * 0.9f), FLinearColor(1.f, 0.82f, 0.12f, 0.18f));
+			}
+			const FLinearColor Text = Campus->GetPawn() ? FLinearColor::White : FLinearColor(1.f, 1.f, 1.f, 0.45f); // dimmed = out this round
+			DrawText(Out, Layer + 3, G, Campus->GetPlayerName() + (Campus->bIsHost ? TEXT("  (host)") : TEXT("")), FVector2D(X0 + U, Y), Font, Text, 0.f, 0.5f);
+			DrawText(Out, Layer + 3, G, FString::FromInt(Campus->Kills), FVector2D(CK, Y), Font, Text);
+			DrawText(Out, Layer + 3, G, FString::FromInt(Campus->Deaths), FVector2D(CD, Y), Font, Text);
+			DrawText(Out, Layer + 3, G, FString::FromInt(FMath::RoundToInt(Campus->DamageDealt)), FVector2D(CDealt, Y), Font, Text);
+			DrawText(Out, Layer + 3, G, FString::FromInt(FMath::RoundToInt(Campus->DamageTaken)), FVector2D(CTaken, Y), Font, Text);
+		}
+	}
+	DrawText(Out, Layer + 2, G, TEXT("tap anywhere to close"), FVector2D(L.W * 0.5f, Top + BoxH + U * 2.f), FMath::RoundToInt(U * 1.2f), FLinearColor(1.f, 1.f, 1.f, 0.7f));
 }

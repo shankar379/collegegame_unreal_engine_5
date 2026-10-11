@@ -4,6 +4,7 @@
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Campus/CampusAnimInstance.h"
+#include "Campus/CampusBackend.h"
 #include "Campus/CampusGameInstance.h"
 #include "Campus/CampusGameMode.h"
 #include "Campus/CampusMatchState.h"
@@ -78,6 +79,12 @@ void ACampusLobbyPlayerController::BeginPlay()
 		SetViewTarget(PodiumCamera);
 	}
 
+	// back in the lobby after hosting: that room is over (an unplayed one refunds its Room Card)
+	if (UCampusBackend* Backend = GetBackend())
+	{
+		Backend->CloseHostedRoom();
+	}
+
 	Widget = SNew(SCampusLobbyWidget).Controller(this);
 	if (GEngine && GEngine->GameViewport)
 	{
@@ -106,9 +113,64 @@ void ACampusLobbyPlayerController::RotateDisplay(float DeltaYaw)
 	}
 }
 
-void ACampusLobbyPlayerController::HostRoom()
+UCampusBackend* ACampusLobbyPlayerController::GetBackend() const
 {
-	UGameplayStatics::OpenLevel(this, FName(UCampusGameInstance::MatchMap), true, TEXT("listen"));
+	return GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBackend>() : nullptr;
+}
+
+void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)> OnFailed)
+{
+	const UCampusSave* Profile = GetProfile();
+	UCampusBackend* Backend = GetBackend();
+	if (!Profile || !Backend)
+	{
+		OnFailed(TEXT("Not ready yet."));
+		return;
+	}
+	const FString Map = Profile->MatchMap.ToString();
+	const int32 Team = Profile->TeamSize;
+	const int32 Rounds = FMath::Clamp(Profile->MatchRounds, 4, 7);
+	const int32 Minutes = FMath::Clamp(Profile->RoundMinutes, 3, 10);
+	// the API issues the code (and takes the Room Card) first; then this phone opens the match and hosts it
+	TWeakObjectPtr<ACampusLobbyPlayerController> WeakThis(this);
+	Backend->CreateRoom(Map, Team, Rounds, Minutes, [WeakThis, Map, Team, Rounds, Minutes, OnFailed](bool bOk, const FString& Error, const FCampusRoom& Room)
+	{
+		ACampusLobbyPlayerController* Self = WeakThis.Get();
+		if (!Self)
+		{
+			return;
+		}
+		if (!bOk)
+		{
+			OnFailed(Error);
+			return;
+		}
+		const FString Options = FString::Printf(TEXT("listen?Map=%s?Team=%d?Room=%s?Rounds=%d?Minutes=%d"), *Map, Team, *Room.Code, Rounds, Minutes);
+		UGameplayStatics::OpenLevel(Self, FName(UCampusGameInstance::MatchMap), true, Options);
+	});
+}
+
+void ACampusLobbyPlayerController::JoinRoomByCode(const FString& Code, TFunction<void(const FString& Error)> OnFailed)
+{
+	UCampusBackend* Backend = GetBackend();
+	if (!Backend)
+	{
+		OnFailed(TEXT("Not ready yet."));
+		return;
+	}
+	TWeakObjectPtr<ACampusLobbyPlayerController> WeakThis(this);
+	Backend->JoinRoom(Code, [WeakThis, OnFailed](bool bOk, const FString& Error, const FCampusRoom& Room)
+	{
+		if (ACampusLobbyPlayerController* Self = WeakThis.Get())
+		{
+			if (!bOk)
+			{
+				OnFailed(Error);
+				return;
+			}
+			Self->ClientTravel(FString::Printf(TEXT("%s:%d"), *Room.Address, Room.Port), TRAVEL_Absolute);
+		}
+	});
 }
 
 void ACampusLobbyPlayerController::JoinRoom()
@@ -174,6 +236,10 @@ void ACampusMatchPlayerController::PlayerTick(float DeltaTime)
 	}
 	const ACampusGameState* State = GetWorld()->GetGameState<ACampusGameState>();
 	ApplyInputMode(State && State->Phase == ECampusPhase::Playing);
+	if (State && State->Phase == ECampusPhase::Ended)
+	{
+		RecordResult();
+	}
 }
 
 void ACampusMatchPlayerController::ApplyInputMode(bool bGameplay)
@@ -251,6 +317,19 @@ int32 ACampusMatchPlayerController::ComputeReward() const
 
 void ACampusMatchPlayerController::ClaimAndLeave()
 {
+	RecordResult();
+	LeaveToLobby();
+}
+
+void ACampusMatchPlayerController::RecordResult()
+{
+	// once per match, and as soon as the match ends (PlayerTick): if the host leaves first, everyone else is
+	// dropped back to the lobby, and their result must already be saved by then
+	if (bResultRecorded)
+	{
+		return;
+	}
+	bResultRecorded = true;
 	if (UCampusSave* Profile = GetProfile())
 	{
 		const ACampusGameState* State = GetWorld()->GetGameState<ACampusGameState>();
@@ -262,7 +341,6 @@ void ACampusMatchPlayerController::ClaimAndLeave()
 		Profile->Kills += Mine ? Mine->Kills : 0;
 		Profile->Persist();
 	}
-	LeaveToLobby();
 }
 
 void ACampusMatchPlayerController::LeaveToLobby()

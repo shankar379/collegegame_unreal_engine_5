@@ -15,6 +15,8 @@ class UInputAction;
 class UInputMappingContext;
 class USpringArmComponent;
 class UStaticMeshComponent;
+class USoundBase;
+class USoundAttenuation;
 struct FInputActionValue;
 
 UCLASS()
@@ -23,13 +25,20 @@ class ACampusCharacter : public ACharacter
 	GENERATED_BODY()
 
 public:
-	ACampusCharacter();
+	ACampusCharacter(const FObjectInitializer& ObjectInitializer);
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	bool IsArmed() const { return bArmed; }
 	bool IsAiming() const { return bAiming; }
 	bool IsSprinting() const { return bSprinting; }
+	/** Armed, crouched and running: the bent-over run (CrouchSprintSpeed, crouch clips sped up + torso bend). */
+	bool IsCrouchRunning() const { return bRunHeld && bArmed && bIsCrouched && !bAiming && !bProne && !bSliding; }
+	bool IsProne() const { return bProne; }
+	bool IsSliding() const { return bSliding; }
+	bool IsZipping() const { return Zip != nullptr; }
+	/** Standing at a zipline tower: the Jump button rides it. */
+	bool CanUseZipline() const;
 	float GetHealth() const { return Health; }
 	float GetMaxHealth() const { return MaxHealth; }
 	int32 GetAmmoInMag() const { return AmmoInMag; }
@@ -40,9 +49,9 @@ public:
 	/** Current scope zoom (1x, 2x, 4x), used while aiming. */
 	float GetZoom() const { return ZoomLevels[ZoomIndex]; }
 	/** 0 hip .. 1 fully aimed (eases in over the ADS time). */
-	float GetAimBlend() const { return AimBlend; }
+	float GetAimBlend() const { return CameraAimBlend; }
 	/** Look speed multiplier while zoomed: 1 / (1 + (zoom - 1) * aim). */
-	float GetLookScale() const { return 1.f / (1.f + (GetZoom() - 1.f) * AimBlend); }
+	float GetLookScale() const { return 1.f / (1.f + (GetZoom() - 1.f) * CameraAimBlend); }
 	void CycleZoom() { ZoomIndex = (ZoomIndex + 1) % UE_ARRAY_COUNT(ZoomLevels); }
 	void SetSprintHeld(bool bHeld);
 
@@ -58,6 +67,8 @@ public:
 	bool IsFreeLooking() const { return bFreeLookHeld || !FreeLook.IsNearlyZero(0.1f); }
 	void ToggleSprint();
 	void ToggleCrouch();
+	/** Lie down / get up. Prone rides on the crouch capsule; only speed, camera and pose differ. */
+	void ToggleProne();
 	void ToggleArmed();
 	void Reload();
 
@@ -106,6 +117,34 @@ private:
 	void ServerSetArmed(bool bNewArmed);
 
 	UFUNCTION(Server, Reliable)
+	void ServerSetProne(bool bNewProne);
+
+	UFUNCTION(Server, Reliable)
+	void ServerSetSliding(bool bNewSliding);
+
+	UFUNCTION(Server, Reliable)
+	void ServerStartZip(class ACampusZipline* Line, int32 FromEnd);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastStartZip(class ACampusZipline* Line, int32 FromEnd);
+
+	/** The server refused a zip / traversal the owner already started locally: undo it there (else the owner keeps
+	 *  flying along the cable / up the wall while the server corrects it every frame). */
+	UFUNCTION(Client, Reliable)
+	void ClientCancelZip();
+
+	UFUNCTION(Client, Reliable)
+	void ClientCancelTraversal();
+
+	class ACampusZipline* FindZipline(int32& OutEnd) const;
+	void StartZip(class ACampusZipline* Line, int32 FromEnd);
+	void TickZip(float DeltaSeconds);
+	/** Sprint + crouch: knee slide that bleeds speed, then crouch (or stand up if still sprinting). */
+	void SetSliding(bool bNewSliding);
+	void ApplySliding(bool bNewSliding);
+	void SetProne(bool bNewProne);
+
+	UFUNCTION(Server, Reliable)
 	void ServerSetAiming(bool bNewAiming);
 
 	UFUNCTION(Server, Reliable)
@@ -125,7 +164,7 @@ private:
 	void ClientConfirmHit(bool bKill);
 
 	bool TryStartTraversal();
-	void StartTraversal(const FVector& StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind);
+	void StartTraversal(const FVector& StartFeet, float Yaw, float Height, float WallDistance, float LandingDistance, uint8 Kind);
 	void TickTraversal(float DeltaSeconds);
 	void EndTraversal();
 	/** Mantle clip timing: when the root has finished rising, plus a short settle. */
@@ -141,10 +180,10 @@ private:
 	void SpawnShotFx(const FVector& End, const FVector& Normal, bool bMark) const;
 
 	UFUNCTION(Server, Reliable)
-	void ServerStartTraversal(FVector_NetQuantize StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind);
+	void ServerStartTraversal(FVector_NetQuantize StartFeet, float Yaw, float Height, float WallDistance, float LandingDistance, uint8 Kind);
 
 	UFUNCTION(NetMulticast, Reliable)
-	void MulticastStartTraversal(FVector_NetQuantize StartFeet, float Yaw, float ScaleZ, float ScaleForward, float OverTop, uint8 Kind);
+	void MulticastStartTraversal(FVector_NetQuantize StartFeet, float Yaw, float Height, float WallDistance, float LandingDistance, uint8 Kind);
 
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastUpperBody(bool bReload);
@@ -208,6 +247,13 @@ private:
 	UPROPERTY(EditAnywhere, Category="Movement")
 	float CrouchSpeed = 200.f;
 
+	/** Crouch + run button: stays crouched, moves faster (the crouch clips speed up to match). */
+	UPROPERTY(EditAnywhere, Category="Movement")
+	float CrouchSprintSpeed = 330.f;
+
+	UPROPERTY(EditAnywhere, Category="Movement")
+	float ProneSpeed = 45.f; // the crawl clip sweeps the floor at 25 cm/s: 1.8x, hands and knees stay planted
+
 	/** Degrees per second at full right-stick deflection. */
 	UPROPERTY(EditAnywhere, Category="Camera")
 	float GamepadLookRate = 150.f;
@@ -235,6 +281,9 @@ private:
 
 	UPROPERTY(EditAnywhere, Category="Camera")
 	float CrouchPivotHeight = 75.f;
+
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float PronePivotHeight = 15.f;
 
 	/** three.js BASE_FOV: vertical degrees. */
 	UPROPERTY(EditAnywhere, Category="Camera")
@@ -283,9 +332,40 @@ private:
 	bool bAiming = false;
 
 	UPROPERTY(Replicated)
+	bool bProne = false;
+
+	/** Below this world height (cm) the player is killed: an invisible floor under the whole map. */
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float KillHeight = -1500.f;
+
+	UPROPERTY(Replicated)
+	bool bSliding = false;
+
+	// Zipline ride (three.js zipline.js), run on every machine from the start event.
+	UPROPERTY(Transient)
+	TObjectPtr<class ACampusZipline> Zip;
+	int32 ZipDir = 1;
+	float ZipS = 0.f;
+	float ZipV = 0.f;
+	float SlideTime = 0.f;
+
+	/** Slide: no ground friction, only this deceleration (sprint 660 -> 280 cm/s in about a second). */
+	UPROPERTY(EditAnywhere, Category="Movement")
+	float SlideBraking = 380.f;
+
+	/** Stopping without input: linear braking, so the stop clips can be distance matched. */
+	UPROPERTY(EditAnywhere, Category="Movement")
+	float StopBraking = 1400.f;
+
+	UPROPERTY(Replicated)
 	float Health = 100.f;
 
 	bool bSprinting = false;
+	/** Run input held (stick at the rim / sprint button), whatever we carry. Unarmed it sprints; armed and
+	 *  crouched it is the bent-over crouch run (the rifle never sprints standing). */
+	bool bRunHeld = false;
+	/** Moving forward enough to run (with a margin, see CanSprintNow). */
+	mutable bool bSprintHeading = false;
 
 	// Traversal (mantle) state, identical on every machine that runs it.
 	bool bTraversing = false;
@@ -299,6 +379,9 @@ private:
 	float TraversalOverTop = 0.f;
 	FVector TraversalStartFeet = FVector::ZeroVector;
 	FVector TraversalRootStart = FVector::ZeroVector;
+	/** Hurdle: when the root is highest (over the obstacle) and the speed to keep running at afterwards. */
+	float TraversalApexTime = 0.f;
+	float TraversalExitSpeed = 0.f;
 
 	/** Gun rotation relative to the right hand, captured while both hands hold it (used during reload). */
 	FQuat GunInHand = FQuat::Identity;
@@ -308,6 +391,26 @@ private:
 	FVector2D FreeLook = FVector2D::ZeroVector;
 	bool bFreeLookHeld = false;
 
+	// Weapon sounds rendered from the three.js recipes (sounds.js): own shot in-head, others' in 3D.
+	UPROPERTY(Transient)
+	TObjectPtr<USoundBase> ShotSound;
+
+	UPROPERTY(Transient)
+	TObjectPtr<USoundBase> RemoteShotSound;
+
+	UPROPERTY(Transient)
+	TObjectPtr<USoundBase> ReloadSound;
+
+	UPROPERTY(Transient)
+	TObjectPtr<USoundBase> DryFireSound;
+
+	UPROPERTY(Transient)
+	TObjectPtr<USoundBase> HitSound;
+
+	UPROPERTY(Transient)
+	TObjectPtr<USoundAttenuation> ShotAttenuation;
+
+	float NextDryFireTime = 0.f;
 	float LastHitConfirmTime = -100.f;
 	bool bLastHitKill = false;
 	bool bFireHeld = false;
@@ -320,7 +423,21 @@ private:
 	float RecoilToRecover = 0.f;
 	float AimLinear = 0.f;
 	float AimBlend = 0.f;
+	/** 0..1 eased: free look has pulled the camera out of the sight (aim pose kept). */
+	float FreeLookCamera = 0.f;
+	/** AimBlend as the camera sees it (0 while free looking). */
+	float CameraAimBlend = 0.f;
+	/** Camera pivot height above the feet, eased toward the stance's (cm); < 0 until the first frame. */
+	float CameraAboveFeet = -1.f;
 	static constexpr float ZoomLevels[3] = { 1.f, 2.f, 4.f };
 	int32 ZoomIndex = 1;
 	float NextFireTime = 0.f;
+
+	// Server's own count of this player's gun (never trusts the phone): ammo, a fire-rate budget that refills at the
+	// gun's rate (a few shots of slack for Wi-Fi bunching), and the reload window.
+	int32 ServerAmmoInMag = 30;
+	int32 ServerAmmoReserve = 120;
+	float ServerShotCredit = 3.f;
+	float ServerCreditTime = 0.f;
+	float ServerReloadEndTime = 0.f;
 };

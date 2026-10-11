@@ -1,7 +1,99 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Allows plain HTTP to the LAN test server (192.168.x.x). Remove once the API is behind HTTPS on AWS. -->
+<!--
+  Android additions for Campus Combat.
+  - Plain HTTP to the LAN test server (192.168.x.x). Remove once the API is behind HTTPS on AWS.
+  - Razorpay Android Checkout (in-app payment sheet: UPI apps, cards, netbanking). The game calls
+    AndroidThunkJava_RazorpayOpen(...) through JNI (Campus/CampusRazorpay.cpp); the result comes back through
+    nativeRazorpayResult(...). The order is created by OUR server at its own price; the signature is verified by
+    the server (POST /v1/payments/verify) before anything is credited.
+-->
 <root xmlns:android="http://schemas.android.com/apk/res/android">
 	<androidManifestUpdates>
 		<addAttribute tag="application" name="android:usesCleartextTraffic" value="true"/>
 	</androidManifestUpdates>
+
+	<buildGradleAdditions>
+		<insert>
+dependencies {
+	implementation 'com.razorpay:checkout:1.6.+'
+}
+		</insert>
+	</buildGradleAdditions>
+
+	<!-- Razorpay's SDK needs internet; R8 must keep its classes and the callback methods -->
+	<proguardAdditions>
+		<insert>
+-keepclassmembers class * { @android.webkit.JavascriptInterface &lt;methods&gt;; }
+-keepattributes JavascriptInterface
+-keepattributes *Annotation*
+-dontwarn com.razorpay.**
+-keep class com.razorpay.** { *; }
+-optimizations !method/inlining/*
+-keepclasseswithmembers class * { public void onPayment*(...); }
+		</insert>
+	</proguardAdditions>
+
+	<gameActivityImportAdditions>
+		<insert>
+import com.razorpay.Checkout;
+import com.razorpay.PaymentData;
+import com.razorpay.PaymentResultWithDataListener;
+import org.json.JSONObject;
+		</insert>
+	</gameActivityImportAdditions>
+
+	<gameActivityImplementsAdditions>
+		<insert>PaymentResultWithDataListener, </insert>
+	</gameActivityImplementsAdditions>
+
+	<gameActivityClassAdditions>
+		<insert>
+	/** C++ receives every outcome: code 1000 = success (with ids + signature), otherwise Razorpay's error code. */
+	public native void nativeRazorpayResult(int code, String orderId, String paymentId, String signature, String message);
+
+	/** Opens Razorpay's payment sheet inside the app for an order our server created. */
+	public void AndroidThunkJava_RazorpayOpen(final String keyId, final String orderId, final int amountPaise,
+		final String title, final String description, final String email)
+	{
+		runOnUiThread(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					Checkout.preload(getApplicationContext());
+					Checkout checkout = new Checkout();
+					checkout.setKeyID(keyId);
+					JSONObject options = new JSONObject();
+					options.put("name", title);
+					options.put("description", description);
+					options.put("order_id", orderId);
+					options.put("currency", "INR");
+					options.put("amount", amountPaise);
+					options.put("theme.color", "#F08A24");
+					JSONObject retry = new JSONObject();
+					retry.put("enabled", true);
+					retry.put("max_count", 2);
+					options.put("retry", retry);
+					JSONObject prefill = new JSONObject();
+					if (email != null &amp;&amp; email.length() > 0) prefill.put("email", email);
+					options.put("prefill", prefill);
+					checkout.open(GameActivity.this, options);
+				} catch (Exception e) {
+					nativeRazorpayResult(-1, orderId, "", "", "Could not open the payment sheet: " + e.getMessage());
+				}
+			}
+		});
+	}
+
+	@Override
+	public void onPaymentSuccess(String razorpayPaymentId, PaymentData data) {
+		nativeRazorpayResult(1000, data != null ? data.getOrderId() : "", razorpayPaymentId,
+			data != null ? data.getSignature() : "", "");
+	}
+
+	@Override
+	public void onPaymentError(int code, String response, PaymentData data) {
+		nativeRazorpayResult(code, data != null ? data.getOrderId() : "", data != null ? data.getPaymentId() : "", "", response);
+	}
+		</insert>
+	</gameActivityClassAdditions>
 </root>

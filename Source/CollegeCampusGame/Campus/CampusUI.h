@@ -9,6 +9,9 @@
 #include "Widgets/SLeafWidget.h"
 
 class ACampusLobbyPlayerController;
+class UCampusBackend;
+class UCampusSave;
+struct FCampusOffer;
 class ACampusMatchPlayerController;
 class SBox;
 
@@ -75,32 +78,69 @@ public:
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
 private:
-	enum class EScreen : uint8 { Splash, SignIn, Event, Lobby, Panel, Rooms };
-	enum class EPanel : uint8 { Wardrobe, Upgrade, Loadout, Store, GunShop, Daily, Stats };
+	// Free Fire / PUBG style flow: Splash -> (first time) Agreement -> Login choice -> Email login / Register ->
+	// (first time) Nickname -> Lobby. The lobby opens the Store, Rooms (quick / create / join by code), Account.
+	enum class EScreen : uint8 { Splash, Agreement, LoginChoice, EmailLogin, Register, Nickname, Lobby, Store, Rooms, Account, Event, Daily };
+	enum class EStoreTab : uint8 { Guns, Offers, Packs };
 
 	void Show(EScreen Screen);
-	void OpenPanel(EPanel Panel);
 	void Refresh();
 	void Toast(const FString& Message);
+	/** Runs an API call with a "please wait" overlay; the reply re-enables the screen. */
+	void Busy(const FString& What);
+	void Done(bool bOk, const FString& Error, TFunction<void()> OnOk = nullptr);
+	/** Where to go once signed in: the nickname screen the first time, else the lobby. */
+	void AfterSignIn();
+	void SaveMatchChoice();
+
+	UCampusBackend* Backend() const;
+	UCampusSave* Profile() const;
+
+	TSharedRef<SWidget> Backdrop(float Alpha) const;
+	TSharedRef<SWidget> Dialog(const FText& Title, TSharedRef<SWidget> Body, float Width, bool bClose, EScreen CloseTo);
+	TSharedRef<SWidget> Field(const FText& Hint, FString& Target, bool bPassword = false);
 
 	TSharedRef<SWidget> BuildSplash();
-	TSharedRef<SWidget> BuildSignIn();
-	TSharedRef<SWidget> BuildEvent();
+	TSharedRef<SWidget> BuildAgreement();
+	TSharedRef<SWidget> BuildLoginChoice();
+	TSharedRef<SWidget> BuildEmailLogin();
+	TSharedRef<SWidget> BuildRegister();
+	TSharedRef<SWidget> BuildNickname();
 	TSharedRef<SWidget> BuildLobby();
-	TSharedRef<SWidget> BuildPanel();
-	TSharedRef<SWidget> BuildRooms();
 	TSharedRef<SWidget> BuildTopBar();
-	TSharedRef<SWidget> BuildMapCard(int32 Index);
-	TSharedRef<SWidget> ItemRow(const FString& Title, const FString& Detail, const FString& Action, bool bEnabled, TFunction<void()> OnAction);
+	TSharedRef<SWidget> BuildModeSelect();
+	TSharedRef<SWidget> BuildStore();
+	TSharedRef<SWidget> BuildGunCard(int32 Index);
+	TSharedRef<SWidget> BuildOfferCard(const FCampusOffer& Offer);
+	TSharedRef<SWidget> BuildRooms();
+	TSharedRef<SWidget> BuildAccount();
+	TSharedRef<SWidget> BuildDaily();
+	TSharedRef<SWidget> BuildEvent();
 
 	TWeakObjectPtr<ACampusLobbyPlayerController> Controller;
 	TSharedPtr<SBox> Content;
 	EScreen Current = EScreen::Splash;
-	EPanel CurrentPanel = EPanel::Wardrobe;
+	EStoreTab StoreTab = EStoreTab::Guns;
 	int32 SelectedMap = 0;
+	int32 SelectedTeamSize = 4;
 	float SplashTime = 0.f;
+	int32 SplashTip = 0;
+	bool bSplashReady = false;
+	bool bResuming = false;
+	bool bAgreeTicked = false;
 	float ToastTime = 0.f;
 	FString ToastText;
+	bool bBusy = false;
+	FString BusyText;
+
+	// form fields
+	FString EmailText;
+	FString PasswordText;
+	FString NameText;
+	FString RollText;
+	FString BranchText;
+	FString CollegeText;
+	FString CodeText;
 };
 
 class SCampusMatchWidget : public SCompoundWidget

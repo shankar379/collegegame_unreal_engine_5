@@ -58,4 +58,39 @@ public:
 
 	UPROPERTY()
 	FString LastDailyClaim;
+
+	/** Lobby choice: "Classic" (college, 4 rounds) or "RealMap" (up to 50 players). */
+	UPROPERTY()
+	FName MatchMap = TEXT("Classic");
+
+	/** Lobby choice: 1 solo, 2 duo, 4 squad. */
+	UPROPERTY()
+	int32 TeamSize = 4;
+
+	/** Custom Room choices (remembered): rounds per match (4-7, all played) and minutes per round. */
+	UPROPERTY()
+	int32 MatchRounds = 5;
+
+	UPROPERTY()
+	int32 RoundMinutes = 5;
+
+	// ---- backend session (UCampusBackend). The device id + secret ARE the guest account: lose them and the
+	// guest is gone, which is why the lobby keeps suggesting "Register to keep your progress".
+	UPROPERTY()
+	FString DeviceId;
+
+	UPROPERTY()
+	FString DeviceSecret;
+
+	/** Opaque, single-use, rotated on every refresh. Empty = signed out. */
+	UPROPERTY()
+	FString RefreshToken;
+
+	/** Terms + privacy notice accepted (shown once, before any account exists). */
+	UPROPERTY()
+	bool bAgreedTerms = false;
+
+	/** First-time nickname chosen (guests get one generated until then). */
+	UPROPERTY()
+	bool bNicknameChosen = false;
 };

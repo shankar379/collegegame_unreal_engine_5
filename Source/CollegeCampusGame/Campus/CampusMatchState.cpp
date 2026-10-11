@@ -8,6 +8,8 @@ void ACampusPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
 	DOREPLIFETIME(ACampusPlayerState, Team);
 	DOREPLIFETIME(ACampusPlayerState, Kills);
 	DOREPLIFETIME(ACampusPlayerState, Deaths);
+	DOREPLIFETIME(ACampusPlayerState, DamageDealt);
+	DOREPLIFETIME(ACampusPlayerState, DamageTaken);
 	DOREPLIFETIME(ACampusPlayerState, bIsHost);
 }
 
@@ -18,9 +20,17 @@ void ACampusGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME(ACampusGameState, EndTime);
 	DOREPLIFETIME(ACampusGameState, RedScore);
 	DOREPLIFETIME(ACampusGameState, BlueScore);
+	DOREPLIFETIME(ACampusGameState, Round);
+	DOREPLIFETIME(ACampusGameState, Rounds);
+	DOREPLIFETIME(ACampusGameState, RoundMinutes);
+	DOREPLIFETIME(ACampusGameState, bDecider);
+	DOREPLIFETIME(ACampusGameState, LastRoundWinner);
 	DOREPLIFETIME(ACampusGameState, KillsToWin);
 	DOREPLIFETIME(ACampusGameState, Winner);
 	DOREPLIFETIME(ACampusGameState, RoomCode);
+	DOREPLIFETIME(ACampusGameState, MatchMap);
+	DOREPLIFETIME(ACampusGameState, TeamSize);
+	DOREPLIFETIME(ACampusGameState, MaxPlayers);
 }
 
 void ACampusGameState::MulticastFeed_Implementation(const FString& Line)

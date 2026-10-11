@@ -1,0 +1,15 @@
+== A_Prone_Prone_Forward_Stop  (1.37s, root motion False, force root lock False)
+  t=0.00 pelvis (   -0     2    12) head (   10    57    32) feet_z  15/ 14  body axis (+0.17 +0.93 +0.34)  root loc (-0 2 19) rot <Struct 'Rotator' (0x00000224AEC1DE10) {pitch: -12.725802, yaw: 13.751937, roll: 73.702408}>
+  t=1.35 pelvis (   12     2    13) head (   12    58    30) feet_z  14/ 14  body axis (+0.00 +0.96 +0.29)  root loc (12 3 20) rot <Struct 'Rotator' (0x00000224AEBF95A0) {pitch: -4.433899, yaw: -0.226504, roll: 82.246269}>
+== A_Prone_Prone_Forward  (2.33s, root motion False, force root lock False)
+  t=0.00 pelvis (    0     2    12) head (   14    56    32) feet_z  15/ 14  body axis (+0.23 +0.91 +0.34)  root loc (-0 2 19) rot <Struct 'Rotator' (0x00000224AEC1DE60) {pitch: -12.725796, yaw: 10.204674, roll: 73.702408}>
+  t=1.00 pelvis (   11   -14    14) head (    9    43    26) feet_z  19/ 13  body axis (-0.04 +0.98 +0.21)  root loc (13 -14 21) rot <Struct 'Rotator' (0x00000224AEC1DEB0) {pitch: -30.066969, yaw: -3.015094, roll: 79.551056}>
+== A_Prone_Crawl_Backwards_In_Prone  (0.97s, root motion False, force root lock False)
+  t=0.00 pelvis (    0     1    19) head (    5    58    35) feet_z  17/ 18  body axis (+0.09 +0.96 +0.27)  root loc (0 2 26) rot <Struct 'Rotator' (0x00000224AEC1DE10) {pitch: 12.227630, yaw: 1.152407, roll: 78.911476}>
+  t=0.50 pelvis (   22     1    27) head (    2    56    31) feet_z  15/  9  body axis (-0.35 +0.93 +0.07)  root loc (22 2 33) rot <Struct 'Rotator' (0x00000224AEC1DD70) {pitch: -31.710640, yaw: 17.396940, roll: 84.750656}>
+== M_ragdoll_getup_stand_F  (5.00s, root motion True, force root lock True)
+  t=0.00 pelvis (    3    -1    12) head (    8    57    10) feet_z   7/  6  body axis (+0.09 +0.99 -0.04)  root loc (0 10 0) rot <Struct 'Rotator' (0x00000224AEC1DE60) {pitch: 0.000000, yaw: 0.000000, roll: -0.000000}>
+  t=0.50 pelvis (    1    -0    11) head (    6    58     9) feet_z  10/ 14  body axis (+0.08 +1.00 -0.04)  root loc (0 8 0) rot <Struct 'Rotator' (0x00000224AEC1DEB0) {pitch: 0.000000, yaw: 0.000000, roll: -0.000000}>
+  t=1.00 pelvis (  -14    -3    28) head (    9    49    33) feet_z  16/ 19  body axis (+0.40 +0.91 +0.07)  root loc (0 5 0) rot <Struct 'Rotator' (0x00000224AEC1DE10) {pitch: 0.000000, yaw: 0.000000, roll: -0.000000}>
+  t=1.90 pelvis (   -1    -9    65) head (  -13    16   116) feet_z   9/ 10  body axis (-0.20 +0.43 +0.88)  root loc (0 0 0) rot <Struct 'Rotator' (0x00000224AEC1DD70) {pitch: 0.000000, yaw: 0.000000, roll: -0.000000}>
+  t=2.80 pelvis (   -1    -1    92) head (   -1     1   150) feet_z  10/  9  body axis (+0.00 +0.05 +1.00)  root loc (0 0 0) rot <Struct 'Rotator' (0x00000224AEC1DE60) {pitch: 0.000000, yaw: 0.000000, roll: -0.000000}>

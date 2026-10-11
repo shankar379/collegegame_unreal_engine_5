@@ -1,0 +1,25 @@
+Y Bot: /Game/CampusAnims/Prone/Mixamo/SK_YBot.SK_YBot, skeleton SK_YBot_Skeleton
+imported Prone Forward                        -> ['M_Prone_Forward']
+imported Prone Forward Stop                   -> ['M_Prone_Forward_Stop']
+imported Crawl Forward                        -> ['M_Crawl_Forward']
+imported Crawl Backwards In Prone             -> ['M_Crawl_Backwards_In_Prone']
+imported Moving Backward In Crawl Position    -> ['M_Moving_Backward_In_Crawl_Position']
+ik rig IK_YBot: auto retarget definition True, auto FBIK True
+ik rig IK_CampusMannequin: auto retarget definition True, auto FBIK True
+retargeter saved: /Game/CampusAnims/Prone/RTG_YBot_To_Campus
+retargeted 5 clips
+
+clip                                          len s   travel     speed   seam cm  pelvis z  contact slide cm/s (hands, knees)
+A_Prone_Prone_Forward                          2.33      1 forw      0 cm/s     1.2     15.0   hand_l 26.1, hand_r 25.4, calf_l 20.6, calf_r 29.3
+A_Prone_Prone_Forward_Stop                     1.37     12 forw      9 cm/s    63.1     14.1   hand_l 4.8, hand_r 28.4, calf_l 16.8, calf_r 34.1
+A_Prone_Crawl_Forward                          2.60      0 forw      0 cm/s     1.7     39.0   hand_l 41.7, hand_r 11.7, calf_l 35.7, calf_r 27.7
+A_Prone_Crawl_Backwards_In_Prone               0.97      1 forw      1 cm/s     1.7     23.1   hand_l 53.4, hand_r 18.6, calf_l 49.6, calf_r 41.3
+A_Prone_Moving_Backward_In_Crawl_Position      1.70      0 forw      0 cm/s     2.4     36.4   hand_l 20.3, hand_r 36.6, calf_l 8.6, calf_r 46.0
+
+kept in /Game/CampusAnims/Prone (Y Bot removed): ['A_Prone_Crawl_Backwards_In_Prone', 'A_Prone_Crawl_Forward', 'A_Prone_Moving_Backward_In_Crawl_Position', 'A_Prone_Prone_Forward', 'A_Prone_Prone_Forward_Stop', 'IK_CampusMannequin']
+  A_Prone_Crawl_Backwards_In_Prone skeleton: /Game/Characters/UEFN_Mannequin/Meshes/SK_UEFN_Mannequin.SK_UEFN_Mannequin
+  A_Prone_Crawl_Forward skeleton: /Game/Characters/UEFN_Mannequin/Meshes/SK_UEFN_Mannequin.SK_UEFN_Mannequin
+  A_Prone_Moving_Backward_In_Crawl_Position skeleton: /Game/Characters/UEFN_Mannequin/Meshes/SK_UEFN_Mannequin.SK_UEFN_Mannequin
+  A_Prone_Prone_Forward skeleton: /Game/Characters/UEFN_Mannequin/Meshes/SK_UEFN_Mannequin.SK_UEFN_Mannequin
+  A_Prone_Prone_Forward_Stop skeleton: /Game/Characters/UEFN_Mannequin/Meshes/SK_UEFN_Mannequin.SK_UEFN_Mannequin
+DONE
