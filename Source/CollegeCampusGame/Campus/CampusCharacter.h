@@ -84,6 +84,9 @@ public:
 	/** World time of the last hit the server confirmed for this shooter (HUD hit-marker). */
 	float GetLastHitConfirmTime() const { return LastHitConfirmTime; }
 	bool WasLastHitAKill() const { return bLastHitKill; }
+	bool WasLastHitAHeadshot() const { return bLastHitHead; }
+	int32 GetLastHitDamage() const { return LastHitDamage; }
+	virtual void Landed(const FHitResult& Hit) override;
 
 protected:
 	virtual void BeginPlay() override;
@@ -161,7 +164,7 @@ private:
 	void MulticastFire(FVector_NetQuantize End, FVector_NetQuantizeNormal Normal, bool bMark);
 
 	UFUNCTION(Client, Unreliable)
-	void ClientConfirmHit(bool bKill);
+	void ClientConfirmHit(bool bKill, bool bHead, int16 Amount);
 
 	bool TryStartTraversal();
 	void StartTraversal(const FVector& StartFeet, float Yaw, float Height, float WallDistance, float LandingDistance, uint8 Kind);
@@ -316,6 +319,30 @@ private:
 	UPROPERTY(EditAnywhere, Category="Combat")
 	float Damage = 25.f;
 
+	/** Hit zones (from where the shot meets the body): head counts more, arms and legs less. */
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float HeadMultiplier = 2.f;
+
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float LimbMultiplier = 0.75f;
+
+	/** Rifle falloff (PUBG / Valorant pattern): full damage to 30 m, down to 70% at 60 m. */
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float FalloffStart = 3000.f;
+
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float FalloffEnd = 6000.f;
+
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float FalloffMinShare = 0.7f;
+
+	/** Falls shorter than this are free; DeadlyFall and more kill. */
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float SafeFall = 400.f;
+
+	UPROPERTY(EditAnywhere, Category="Combat")
+	float DeadlyFall = 1550.f;
+
 	UPROPERTY(EditAnywhere, Category="Combat")
 	float Range = 10000.f;
 
@@ -413,6 +440,11 @@ private:
 	float NextDryFireTime = 0.f;
 	float LastHitConfirmTime = -100.f;
 	bool bLastHitKill = false;
+	bool bLastHitHead = false;
+	int32 LastHitDamage = 0;
+	/** Server: highest point of the current fall (fall damage on landing). */
+	float FallTopZ = 0.f;
+	bool bTrackingFall = false;
 	bool bFireHeld = false;
 	bool bDead = false;
 	FVector2D TouchMove = FVector2D::ZeroVector;
@@ -453,6 +485,6 @@ private:
 	/** The capsule as it was at Time (interpolated between recorded frames). */
 	FHitboxFrame HitboxAt(double Time) const;
 	/** The enemy this shot hit as the shooter saw the world (rewound by its ping), nearer than BlockDistance. */
-	ACampusCharacter* RewoundVictim(const FVector& Start, const FVector& Direction, float BlockDistance, FVector& OutPoint) const;
+	ACampusCharacter* RewoundVictim(const FVector& Start, const FVector& Direction, float BlockDistance, FVector& OutPoint, uint8& OutZone) const;
 	float ServerReloadEndTime = 0.f;
 };

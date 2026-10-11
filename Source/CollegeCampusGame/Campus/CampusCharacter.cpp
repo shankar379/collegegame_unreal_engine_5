@@ -161,6 +161,17 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	if (HasAuthority())
 	{
 		RecordHitbox();
+		// fall damage: remember the top of every fall (zipline / vault moves are not falls)
+		const bool bFalling = GetCharacterMovement()->IsFalling() && !bTraversing && !Zip;
+		if (bFalling)
+		{
+			FallTopZ = bTrackingFall ? FMath::Max(FallTopZ, GetActorLocation().Z) : GetActorLocation().Z;
+			bTrackingFall = true;
+		}
+		else if (!GetCharacterMovement()->IsFalling())
+		{
+			bTrackingFall = false;
+		}
 	}
 	if (bTraversing)
 	{
@@ -913,7 +924,8 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	const FVector End = FVector(Start) + FVector(Direction) * Range;
 	const bool bWall = GetWorld()->LineTraceSingleByObjectType(Hit, Start, End, Objects, Params);
 	FVector VictimPoint;
-	ACampusCharacter* Victim = RewoundVictim(Start, Direction, bWall ? Hit.Distance : Range, VictimPoint);
+	uint8 Zone = 0;
+	ACampusCharacter* Victim = RewoundVictim(Start, Direction, bWall ? Hit.Distance : Range, VictimPoint, Zone);
 	if (Victim)
 	{
 		MulticastFire(VictimPoint, -FVector(Direction), false);
@@ -929,9 +941,16 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	{
 		return;
 	}
+	// zone (1 head, 2 arms / legs) and distance falloff
+	const float ZoneScale = Zone == 1 ? HeadMultiplier : (Zone == 2 ? LimbMultiplier : 1.f);
+	const float Distance = FVector::Dist(FVector(Start), VictimPoint);
+	const float Falloff = FMath::GetMappedRangeValueClamped(FVector2D(FalloffStart, FMath::Max(FalloffEnd, FalloffStart + 1.f)),
+		FVector2D(1.f, FalloffMinShare), Distance);
+	const float Dealt = Damage * ZoneScale * Falloff;
 	const bool bWasAlive = Victim->GetHealth() > 0.f;
-	Victim->ApplyHit(Damage, GetController());
-	ClientConfirmHit(bWasAlive && Victim->GetHealth() <= 0.f);
+	const float Before = Victim->GetHealth();
+	Victim->ApplyHit(Dealt, GetController());
+	ClientConfirmHit(bWasAlive && Victim->GetHealth() <= 0.f, Zone == 1, int16(FMath::RoundToInt(Before - Victim->GetHealth())));
 }
 
 namespace CampusLagComp
@@ -995,8 +1014,10 @@ ACampusCharacter::FHitboxFrame ACampusCharacter::HitboxAt(double Time) const
 	return HitboxHistory.Last();
 }
 
-ACampusCharacter* ACampusCharacter::RewoundVictim(const FVector& Start, const FVector& Direction, float BlockDistance, FVector& OutPoint) const
+ACampusCharacter* ACampusCharacter::RewoundVictim(const FVector& Start, const FVector& Direction, float BlockDistance, FVector& OutPoint, uint8& OutZone) const
 {
+	OutZone = 0;
+	FHitboxFrame BestBox;
 	// The shot left the phone half a ping ago, and what it aimed at was already half a ping old there.
 	double Rewind = CampusLagComp::ViewDelay;
 	if (const APlayerState* State = GetPlayerState())
@@ -1034,9 +1055,18 @@ ACampusCharacter* ACampusCharacter::RewoundVictim(const FVector& Start, const FV
 		{
 			BestDistance = Along;
 			Best = Other;
+			BestBox = Box;
 		}
 	}
 	OutPoint = Start + Direction * BestDistance;
+	if (Best && !Best->bProne && BestBox.HalfHeight > 0.f)
+	{
+		// height on the body: the top ~13% of a standing capsule is the head (a crouched one is shorter, its head
+		// a larger share); below the hips are the legs
+		const float Height = (OutPoint.Z - (BestBox.Center.Z - BestBox.HalfHeight)) / (2.f * BestBox.HalfHeight);
+		const float HeadLine = Best->bIsCrouched ? 0.8f : 0.87f;
+		OutZone = Height >= HeadLine ? 1 : (Height < 0.42f && !Best->bIsCrouched ? 2 : 0);
+	}
 	return Best;
 }
 
@@ -1058,13 +1088,33 @@ void ACampusCharacter::MulticastFire_Implementation(FVector_NetQuantize End, FVe
 	SpawnShotFx(End, Normal, bMark);
 }
 
-void ACampusCharacter::ClientConfirmHit_Implementation(bool bKill)
+void ACampusCharacter::ClientConfirmHit_Implementation(bool bKill, bool bHead, int16 Amount)
 {
 	LastHitConfirmTime = GetWorld()->GetTimeSeconds();
 	bLastHitKill = bKill;
+	bLastHitHead = bHead;
+	LastHitDamage = Amount;
 	if (HitSound)
 	{
-		UGameplayStatics::PlaySound2D(this, HitSound);
+		// a headshot rings higher, like the "ding" players listen for
+		UGameplayStatics::PlaySound2D(this, HitSound, 1.f, bHead ? 1.6f : 1.f);
+	}
+}
+
+void ACampusCharacter::Landed(const FHitResult& Hit)
+{
+	Super::Landed(Hit);
+	if (!HasAuthority() || !bTrackingFall)
+	{
+		return;
+	}
+	bTrackingFall = false;
+	const float Drop = FallTopZ - GetActorLocation().Z;
+	if (Drop > SafeFall && !bDead)
+	{
+		// 0 at SafeFall (4 m), rising evenly to everything at DeadlyFall (15.5 m)
+		const float Share = FMath::Clamp((Drop - SafeFall) / FMath::Max(DeadlyFall - SafeFall, 1.f), 0.f, 1.f);
+		ApplyHit(MaxHealth * Share, nullptr);
 	}
 }
 

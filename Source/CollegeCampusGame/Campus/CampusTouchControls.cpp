@@ -1087,6 +1087,14 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 			Stroke(1.f, -1.f);
 			Stroke(-1.f, -1.f);
 		}
+		// damage number floating up from the crosshair (yellow on a headshot), 0.6 s
+		if (Since >= 0.f && Since < 0.6f && Character->GetLastHitDamage() > 0)
+		{
+			const float Alpha = 1.f - Since / 0.6f;
+			const FLinearColor NumberColor = (Character->WasLastHitAHeadshot() ? FLinearColor(1.f, 0.85f, 0.1f) : FLinearColor::White).CopyWithNewOpacity(Alpha);
+			DrawText(Out, Layer + 4, G, FString::FromInt(Character->GetLastHitDamage()),
+				FVector2D(Center.X + 3.f * L.U, Center.Y - 2.f * L.U - Since * 6.f * L.U), FMath::RoundToInt(L.U * (Character->WasLastHitAHeadshot() ? 2.f : 1.6f)), NumberColor);
+		}
 	}
 
 	// Damage vignette.
