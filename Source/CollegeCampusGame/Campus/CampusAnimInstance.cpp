@@ -896,7 +896,21 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		}
 	}
 
-	Proxy.AimPitch = FMath::Clamp(FRotator::NormalizeAxis(Character->GetBaseAimRotation().Pitch), -70.f, 70.f);
+	// Own aim must never lag the crosshair. A remote player's pitch, though, only changes when their ServerMove
+	// arrives (on the host, via the server-side ControlRotation) or their RemoteViewPitch replicates (on a client) -
+	// and recoil sweeps it ~0.9 deg per shot at ten shots a second. Applied raw it stair-stepped the whole spine
+	// chain, which is the "enemy jerks while shooting" everyone was seeing. Ease it over ~50 ms instead.
+	// (Not the Approach lambda above: that is a constant degrees/second rate, wrong for a +-70 deg axis.)
+	const float TargetAimPitch = FMath::Clamp(FRotator::NormalizeAxis(Character->GetBaseAimRotation().Pitch), -70.f, 70.f);
+	if (Character->IsLocallyControlled() || FMath::Abs(TargetAimPitch - AimPitchSmoothed) > 45.f)
+	{
+		AimPitchSmoothed = TargetAimPitch; // ours, or a respawn / possession jump: take it, do not sweep through it
+	}
+	else
+	{
+		AimPitchSmoothed += (TargetAimPitch - AimPitchSmoothed) * (1.f - FMath::Exp(-DeltaSeconds / 0.05f));
+	}
+	Proxy.AimPitch = AimPitchSmoothed;
 	Proxy.AimPitchAlpha = RifleWeight * (1.f - UpperAlpha) * (1.f - ProneShare);
 	Proxy.CrouchRunBend = CrouchRunWeight * CrouchWeight;
 

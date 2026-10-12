@@ -188,7 +188,9 @@ private:
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastStartTraversal(FVector_NetQuantize StartFeet, float Yaw, float Height, float WallDistance, float LandingDistance, uint8 Kind);
 
-	UFUNCTION(NetMulticast, Reliable)
+	/** Unreliable on purpose: a cosmetic reload / equip animation is not worth a reliable bunch out of a phone
+	 *  host during a firefight, and a dropped one costs nothing (the ammo itself is server state). */
+	UFUNCTION(NetMulticast, Unreliable)
 	void MulticastUpperBody(bool bReload);
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
@@ -463,6 +465,9 @@ private:
 	float CameraAboveFeet = -1.f;
 	/** Speed of the stance height glide (critically damped spring: starts and ends gently). */
 	float CameraAboveFeetSpeed = 0.f;
+	/** Whether this character's camera rig is being ticked (only the locally controlled one needs it).
+	 *  Starts true: the constructor leaves the boom and camera ticking. */
+	bool bCameraRigActive = true;
 
 	/** The capsule changes size inside the movement tick, after Tick placed the boom: keep the boom where it was
 	 *  in the world for that frame (else it pops by the height change for one frame). */

@@ -244,7 +244,8 @@ SCampusTouchControls::FLayout SCampusTouchControls::MakeLayout(const FVector2D& 
 	L.TeamMin = FVector2D(L.W * 0.012f, L.W * 0.012f);
 	L.TeamSize = FVector2D(FMath::Clamp(L.W * 0.19f, 150.f, 26.f * U), 2.6f * U + 4.f * 3.1f * U);
 	L.MapSize = 17.f * U;
-	L.MapMin = FVector2D(L.TeamMin.X, L.TeamMin.Y + L.TeamSize.Y + 1.2f * U);
+	// the team roster now lives in the scoreboard (tap the timer), so the minimap takes its corner
+	L.MapMin = L.TeamMin;
 
 	// Weapons panel, top right, pushed below the gear row.
 	L.WeaponSize = FVector2D(L.W * 0.17f, L.H * 0.13f);
@@ -1204,8 +1205,7 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 			DrawText(Out, Layer + 2, G, State->Feed[Index], Anchor - FVector2D(1.3f * U, 0.f), FeedFont, FLinearColor::White, 1.f, 0.5f);
 		}
 
-		// Team roster top-left, then the minimap under it (tap the map: full screen).
-		DrawTeamList(Out, Layer, G, L);
+		// Minimap top-left (tap the map: full screen). Match info - teams, kills, health - opens from the timer.
 		if (bShowMinimap)
 		{
 			DrawMap(Out, Layer, G, L.MapMin, L.MapSize, false, U);

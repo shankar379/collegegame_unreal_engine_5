@@ -25,6 +25,7 @@
 #include "InputModifiers.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Net/UnrealNetwork.h"
+#include "GameFramework/GameStateBase.h"
 #include "GameFramework/PlayerState.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
@@ -80,6 +81,25 @@ ACampusCharacter::ACampusCharacter(const FObjectInitializer& ObjectInitializer)
 	// (floors up to ~53 degrees, the stair ramps).
 	Movement->MaxStepHeight = 85.f;
 	Movement->SetWalkableFloorAngle(53.f);
+
+	// Listen-server host: a remote player's pawn is authority-role, and the engine only advances it when that
+	// player's ServerMove lands (CharacterMovementComponent.cpp:1767) - the capsule jumps, and with
+	// bUseControllerRotationYaw the body yaw snaps to the just-arrived control yaw in the same instant. The engine
+	// hides that by holding the mesh back and decaying the offset, but its listen-server windows are 40 ms / 33 ms,
+	// SHORTER than a phone host's own frame time, so SmoothClientPosition_Interpolate takes its "else" branch and
+	// wipes the whole offset in one frame. At 30 fps rotation smoothing never ran at all: the enemy's body snapped
+	// on every packet, worst while they swing their aim - i.e. while shooting. Over the EOS relay arrivals also
+	// bunch, so one snap carries several packets of motion.
+	Movement->NetworkSmoothingMode = ENetworkSmoothingMode::Exponential;
+	Movement->ListenServerNetworkSimulatedSmoothLocationTime = 0.12f;
+	Movement->ListenServerNetworkSimulatedSmoothRotationTime = 0.12f;
+	// Clients watching other clients: relay jitter is far worse than the LAN these defaults assume.
+	Movement->NetworkSimulatedSmoothLocationTime = 0.15f;
+	Movement->NetworkSimulatedSmoothRotationTime = 0.12f;
+	// A relayed phone can stall ~0.5 s; at sprint speed that is past the 384 cm the engine treats as
+	// unsmoothable (it teleports instead). Give it room to ease.
+	Movement->NetworkMaxSmoothUpdateDistance = 400.f;
+	Movement->NetworkNoSmoothUpdateDistance = 900.f;
 
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(RootComponent);
@@ -226,6 +246,18 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	{
 		UpdateMovementSettings();
 	}
+	// Only the pawn we look through needs its rig alive. The spring arm's 320 cm collision sweep, once per
+	// character per frame, was the most expensive thing the host did for pawns with no camera - and it is the
+	// host's frame time that decides whether the smoothing windows set in the constructor have any time to work.
+	// Checked every frame (cheaply) because possession changes after spawn.
+	const bool bNeedsCameraRig = IsLocallyControlled();
+	if (bCameraRigActive != bNeedsCameraRig)
+	{
+		bCameraRigActive = bNeedsCameraRig;
+		CameraBoom->bDoCollisionTest = bNeedsCameraRig;
+		CameraBoom->SetComponentTickEnabled(bNeedsCameraRig);
+		FollowCamera->SetComponentTickEnabled(bNeedsCameraRig);
+	}
 
 	// ADS moves linearly over 0.18 s; one smoothstep value drives camera, FOV and look speed together
 	// so none of them lags a frame behind (three.js updateAds).
@@ -265,6 +297,14 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 		const float Step = RecoilToRecover * (1.f - FMath::Exp(-DeltaSeconds / RecoilRecoverTau));
 		RecoilToRecover -= Step;
 		ApplyLook(0.f, -Step);
+	}
+
+	// Everything below drives the camera rig, so it is for the local pawn only. On a phone host this ran for every
+	// replicated character: a head socket query, two boom transform writes and the spring arm's sweep, per
+	// character per frame, for a camera nobody will ever look through.
+	if (!IsLocallyControlled())
+	{
+		return;
 	}
 
 	// Camera rig: CAMERA -> AIM_CAMERA lerped by the eased ADS value (dist 0 = at the sight).
@@ -1003,8 +1043,10 @@ namespace CampusLagComp
 	/** History kept per player, and the most a shot may be rewound (higher pings get less help, not more). */
 	constexpr double KeepSeconds = 0.5;
 	constexpr double MaxRewind = 0.3;
-	/** Remote players are drawn a little behind their newest update (movement smoothing). */
-	constexpr double ViewDelay = 0.03;
+	/** Remote players are drawn a little behind their newest update (movement smoothing). Matches the ~0.12 s
+	 *  smoothing windows set on the movement component: the mesh the shooter aimed at trails its capsule by
+	 *  roughly this much, so the rewind has to account for it or close-range shots would miss high. */
+	constexpr double ViewDelay = 0.08;
 }
 
 void ACampusCharacter::RecordHitbox()
@@ -1078,10 +1120,14 @@ ACampusCharacter* ACampusCharacter::RewoundVictim(const FVector& Start, const FV
 
 	ACampusCharacter* Best = nullptr;
 	float BestDistance = BlockDistance;
-	for (TActorIterator<ACampusCharacter> It(GetWorld()); It; ++It)
+	// Players only: TActorIterator walks the whole level's actor array, and this runs ten times a second per
+	// shooter. If AI characters are ever added they need their own registry - they have no PlayerState.
+	static const TArray<TObjectPtr<APlayerState>> NoPlayers;
+	const AGameStateBase* GameState = GetWorld()->GetGameState();
+	for (const TObjectPtr<APlayerState>& State : GameState ? GameState->PlayerArray : NoPlayers)
 	{
-		ACampusCharacter* Other = *It;
-		if (Other == this || Other->bDead)
+		ACampusCharacter* Other = State ? Cast<ACampusCharacter>(State->GetPawn()) : nullptr;
+		if (!Other || Other == this || Other->bDead)
 		{
 			continue;
 		}

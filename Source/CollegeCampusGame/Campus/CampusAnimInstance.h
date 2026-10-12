@@ -203,4 +203,7 @@ private:
 	int32 UpperBodyClip = INDEX_NONE;
 	float UpperBodyTime = 0.f;
 	float FireTime = -1.f;
+
+	/** Aim pitch eased over ~50 ms for remote players: the raw value only moves when their move update lands. */
+	float AimPitchSmoothed = 0.f;
 };
