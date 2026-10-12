@@ -31,6 +31,14 @@ import traceback
 
 import unreal
 
+def _sp(obj, prop, value):
+    """set_editor_property that survives engine-version property renames (logs and continues)."""
+    try:
+        obj.set_editor_property(prop, value)
+    except Exception as exc:
+        unreal.log_warning("VV skip property %s: %s" % (prop, exc))
+
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import varsity_layout as L  # noqa: E402  (needs the path above)
 
@@ -86,6 +94,12 @@ class Art(object):
         self.instances = {}
 
     def _collection(self):
+        # DISABLED: UE 5.8 Python cannot set a CollectionVectorParameter's Id (protected), and a node bound to
+        # an unset id reads zero -> the whole map renders black. Night comes from lights/fog/lamps until the
+        # collection is authored once in the editor.
+        if True:
+            log("MPC_VarsityTime skipped (protected Id); night = lights + fog + lamps only")
+            return None
         path = ROOT + "/MPC_VarsityTime"
         if EAL.does_asset_exist(path):
             EAL.delete_asset(path)
@@ -93,12 +107,12 @@ class Art(object):
             asset = AT.create_asset("MPC_VarsityTime", ROOT, unreal.MaterialParameterCollection,
                                     unreal.MaterialParameterCollectionFactoryNew())
             tint = unreal.CollectionVectorParameter()
-            tint.set_editor_property("parameter_name", "DayNightTint")
-            tint.set_editor_property("default_value", unreal.LinearColor(1.0, 1.0, 1.0, 1.0))
+            _sp(tint, "parameter_name", "DayNightTint")
+            _sp(tint, "default_value", unreal.LinearColor(1.0, 1.0, 1.0, 1.0))
             # A collection parameter is bound by GUID, not by name: give it one and hand the SAME guid to
             # the material node below, or the node reads zero and the whole map renders black.
-            tint.set_editor_property("id", unreal.GuidLibrary.new_guid())
-            asset.set_editor_property("vector_parameters", [tint])
+            _sp(tint, "id", unreal.GuidLibrary.new_guid())
+            _sp(asset, "vector_parameters", [tint])
             EAL.save_loaded_asset(asset)
             stored = list(asset.get_editor_property("vector_parameters"))
             self.tint_id = stored[0].get_editor_property("id") if stored else None
@@ -114,11 +128,11 @@ class Art(object):
         if EAL.does_asset_exist(path):
             EAL.delete_asset(path)
         mat = AT.create_asset(name, ROOT + "/Materials", unreal.Material, unreal.MaterialFactoryNew())
-        mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
-        mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_OPAQUE)
+        _sp(mat, "shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+        _sp(mat, "blend_mode", unreal.BlendMode.BLEND_OPAQUE)
         colour = MEL.create_material_expression(mat, unreal.MaterialExpressionVectorParameter, -900, -200)
-        colour.set_editor_property("parameter_name", "Color")
-        colour.set_editor_property("default_value", unreal.LinearColor(1.0, 1.0, 1.0, 1.0))
+        _sp(colour, "parameter_name", "Color")
+        _sp(colour, "default_value", unreal.LinearColor(1.0, 1.0, 1.0, 1.0))
         vertex = MEL.create_material_expression(mat, unreal.MaterialExpressionVertexColor, -900, 60)
         base = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -650, -80)
         MEL.connect_material_expressions(colour, "", base, "A")
@@ -127,10 +141,10 @@ class Art(object):
         if self.collection:
             try:
                 tint = MEL.create_material_expression(mat, unreal.MaterialExpressionCollectionParameter, -900, 300)
-                tint.set_editor_property("collection", self.collection)
-                tint.set_editor_property("parameter_name", "DayNightTint")
+                _sp(tint, "collection", self.collection)
+                _sp(tint, "parameter_name", "DayNightTint")
                 if self.tint_id:
-                    tint.set_editor_property("parameter_id", self.tint_id)
+                    _sp(tint, "parameter_id", self.tint_id)
                 timed = MEL.create_material_expression(mat, unreal.MaterialExpressionMultiply, -420, 0)
                 MEL.connect_material_expressions(base, "", timed, "A")
                 MEL.connect_material_expressions(tint, "", timed, "B")
@@ -366,8 +380,8 @@ def write_mesh(zone, path):
         slots.append(unreal.StaticMaterial())
     for index, material in enumerate(materials):
         slots[index] = unreal.StaticMaterial(material_interface=material, material_slot_name="S%d" % index)
-    static.set_editor_property("static_materials", slots)
-    static.set_editor_property("light_map_resolution", 4)   # unlit: no lightmap is ever built
+    _sp(static, "static_materials", slots)
+    _sp(static, "light_map_resolution", 4)   # unlit: no lightmap is ever built
     EAL.save_loaded_asset(static)
     return static
 
@@ -383,18 +397,18 @@ def collision_mesh(name, boxes):
     elements = []
     for centre, size, yaw in boxes:
         element = unreal.KBoxElem()
-        element.set_editor_property("center", unreal.Vector(*centre))
-        element.set_editor_property("rotation", unreal.Rotator(0.0, 0.0, yaw))
-        element.set_editor_property("x", max(size[0], 1.0))
-        element.set_editor_property("y", max(size[1], 1.0))
-        element.set_editor_property("z", max(size[2], 1.0))
+        _sp(element, "center", unreal.Vector(*centre))
+        _sp(element, "rotation", unreal.Rotator(0.0, 0.0, yaw))
+        _sp(element, "x", max(size[0], 1.0))
+        _sp(element, "y", max(size[1], 1.0))
+        _sp(element, "z", max(size[2], 1.0))
         elements.append(element)
-    agg.set_editor_property("box_elems", elements)
-    agg.set_editor_property("sphere_elems", [])
-    agg.set_editor_property("sphyl_elems", [])
-    agg.set_editor_property("convex_elems", [])
-    body.set_editor_property("agg_geom", agg)
-    body.set_editor_property("collision_trace_flag", unreal.CollisionTraceFlag.CTF_USE_SIMPLE_AS_COMPLEX)
+    _sp(agg, "box_elems", elements)
+    _sp(agg, "sphere_elems", [])
+    _sp(agg, "sphyl_elems", [])
+    _sp(agg, "convex_elems", [])
+    _sp(body, "agg_geom", agg)
+    _sp(body, "collision_trace_flag", unreal.CollisionTraceFlag.CTF_USE_SIMPLE_AS_COMPLEX)
     EAL.save_loaded_asset(mesh)
     return mesh
 
@@ -408,17 +422,17 @@ def place_mesh(eas, mesh, label, folder, location=None, collide=False, cull=0.0,
     component = actor.static_mesh_component
     component.set_static_mesh(mesh)
     component.set_mobility(unreal.ComponentMobility.STATIC)
-    component.set_editor_property("cast_shadow", False)
+    _sp(component, "cast_shadow", False)
     if collide:
         component.set_collision_profile_name("BlockAll")
     else:
         component.set_collision_enabled(unreal.CollisionEnabled.NO_COLLISION)
-        component.set_editor_property("can_character_step_up_on", unreal.CanBeCharacterBase.ECB_NO)
+        _sp(component, "can_character_step_up_on", unreal.CanBeCharacterBase.ECB_NO)
     if not visible:
-        component.set_editor_property("visible", False)
-        component.set_editor_property("hidden_in_game", True)
+        _sp(component, "visible", False)
+        _sp(component, "hidden_in_game", True)
     if cull > 0.0:
-        component.set_editor_property("ld_max_draw_distance", cull)
+        _sp(component, "ld_max_draw_distance", cull)
     return actor
 
 
@@ -461,21 +475,21 @@ def spawn_lighting(eas, builder):
     sun.set_actor_label("VV_Sun")
     sun.set_folder_path(FOLDER + "/Lighting")
     sun.tags = ["VVSun"]
-    component = sun.directional_light_component
+    component = sun.get_editor_property('light_component')
     component.set_mobility(unreal.ComponentMobility.MOVABLE)
     component.set_intensity(3.2)
-    component.set_light_color(unreal.Color(255, 246, 224))
-    component.set_editor_property("cast_shadows", False)   # phones: the world is unlit anyway
+    component.set_light_color(unreal.LinearColor(1.0000, 0.9647, 0.8784, 1.0))
+    _sp(component, "cast_shadows", False)   # phones: the world is unlit anyway
 
     sky = eas.spawn_actor_from_class(unreal.SkyLight, unreal.Vector(0.0, 0.0, 15000.0), unreal.Rotator(0, 0, 0))
     sky.set_actor_label("VV_SkyLight")
     sky.set_folder_path(FOLDER + "/Lighting")
     sky.tags = ["VVSky"]
-    sky_component = sky.sky_light_component
+    sky_component = sky.get_editor_property('light_component')
     sky_component.set_mobility(unreal.ComponentMobility.MOVABLE)
     sky_component.set_intensity(1.6)
-    sky_component.set_light_color(unreal.Color(216, 207, 180))
-    sky_component.set_editor_property("cast_shadows", False)   # captured scene: the unlit dome IS the sky
+    sky_component.set_light_color(unreal.LinearColor(0.8471, 0.8118, 0.7059, 1.0))
+    _sp(sky_component, "cast_shadows", False)   # captured scene: the unlit dome IS the sky
 
     fog = eas.spawn_actor_from_class(unreal.ExponentialHeightFog, unreal.Vector(0.0, 0.0, 400.0),
                                      unreal.Rotator(0, 0, 0))
@@ -483,10 +497,15 @@ def spawn_lighting(eas, builder):
     fog.set_folder_path(FOLDER + "/Lighting")
     fog.tags = ["VVFog"]
     fog_component = fog.component
-    fog_component.set_editor_property("fog_density", 0.012)
-    fog_component.set_editor_property("fog_height_falloff", 0.12)
-    fog_component.set_editor_property("fog_inscattering_color", unreal.LinearColor(0.62, 0.74, 0.88, 1.0))
-    fog_component.set_editor_property("volumetric_fog", False)
+    _sp(fog_component, "fog_density", 0.012)
+    _sp(fog_component, "fog_height_falloff", 0.12)
+    for _prop in ("fog_inscattering_luminance", "fog_inscattering_color"):
+        try:
+            _sp(fog_component, _prop, unreal.LinearColor(0.62, 0.74, 0.88, 1.0))
+            break
+        except Exception:
+            pass
+    _sp(fog_component, "volumetric_fog", False)
 
     lamps = 0
     for x, y, z in builder.lamps:
@@ -494,14 +513,14 @@ def spawn_lighting(eas, builder):
         light.set_actor_label("VV_Lamp_%02d" % lamps)
         light.set_folder_path(FOLDER + "/Lighting/Lamps")
         light.tags = ["VVLamp"]
-        lamp = light.point_light_component
+        lamp = light.get_editor_property('light_component')
         lamp.set_mobility(unreal.ComponentMobility.MOVABLE)
         lamp.set_intensity(4500.0)
-        lamp.set_light_color(unreal.Color(255, 214, 150))
+        lamp.set_light_color(unreal.LinearColor(1.0000, 0.8392, 0.5882, 1.0))
         lamp.set_attenuation_radius(1600.0)
-        lamp.set_editor_property("cast_shadows", False)
-        lamp.set_editor_property("visible", False)        # day is the default preset
-        lamp.set_editor_property("max_draw_distance", 9000.0)
+        _sp(lamp, "cast_shadows", False)
+        _sp(lamp, "visible", False)        # day is the default preset
+        _sp(lamp, "max_draw_distance", 9000.0)
         lamps += 1
     log("lighting: sun + sky + fog + %d street lamps (off by day)" % lamps)
     return lamps
@@ -526,7 +545,7 @@ def spawn_starts(eas, builder):
         counts[kind] = counts.get(kind, 0) + 1
         start.set_actor_label("VV_Start_%s_%02d" % (kind, counts[kind]))
         start.set_folder_path(FOLDER + "/Starts")
-        start.set_editor_property("player_start_tag", kind)
+        _sp(start, "player_start_tag", kind)
     log("player starts %s" % counts)
     return counts
 

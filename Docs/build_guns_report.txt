@@ -1,2 +1,20 @@
-preview C:\UE\Projects\CampusCombat\CollegeCampusGame\Docs\guns_preview.png (614 x 2642)  red ring = Muzzle, blue ring = Grip
+SM_Rifle  X -3.7..2.9  Y -27.1..51.5  Z -11.5..17.8  (7 x 79 x 29 cm)
+  material MI_Gun_3f4348
+  material MI_Gun_5a5e66
+  material MI_Gun_26282b
+SM_Gun_m4a1    164 tris  3 slots  length 78 cm (Y -26..52)  muzzle +Y 51
+  material MI_Gun_7a4a22
+SM_Gun_ak47    164 tris  3 slots  length 79 cm (Y -28..50)  muzzle +Y 51
+SM_Gun_m416    148 tris  2 slots  length 75 cm (Y -24..50)  muzzle +Y 51
+  material MI_Gun_9a8257
+SM_Gun_scar    136 tris  3 slots  length 76 cm (Y -25..50)  muzzle +Y 51
+SM_Gun_an94    168 tris  3 slots  length 83 cm (Y -25..58)  muzzle +Y 57
+  material MI_Gun_b9b2a0
+SM_Gun_xm8     156 tris  3 slots  length 76 cm (Y -25..52)  muzzle +Y 51
+SM_Gun_mp40    156 tris  3 slots  length 62 cm (Y -21..41)  muzzle +Y 40
+SM_Gun_m249    216 tris  3 slots  length 84 cm (Y -24..60)  muzzle +Y 60
+  material MI_Gun_8d9199
+SM_Gun_deagle  112 tris  3 slots  length 33 cm (Y -6..26)  muzzle +Y 26
+9 guns, 1420 triangles total, in /Game/Weapons/Guns
+preview skipped: PIL is not available in this interpreter (run `python Scripts/build_guns.py --preview` with the system python)
 DONE

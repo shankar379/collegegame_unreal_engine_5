@@ -2417,14 +2417,14 @@ void ACampusCharacter::ApplyWeapon()
 	// The per-gun low-poly mesh when it is cooked, else the shared rifle at this gun's scale and tint.
 	if (Gun)
 	{
-		UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *CampusWeapons::MeshPathFor(CurrentDef.Id), nullptr, LOAD_NoWarn | LOAD_Quiet);
-		if (!Mesh)
+		UStaticMesh* GunMesh = LoadObject<UStaticMesh>(nullptr, *CampusWeapons::MeshPathFor(CurrentDef.Id), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (!GunMesh)
 		{
-			Mesh = LoadObject<UStaticMesh>(nullptr, CampusWeapons::RifleMeshPath());
+			GunMesh = LoadObject<UStaticMesh>(nullptr, CampusWeapons::RifleMeshPath());
 		}
-		if (Mesh && Gun->GetStaticMesh() != Mesh)
+		if (GunMesh && Gun->GetStaticMesh() != GunMesh)
 		{
-			Gun->SetStaticMesh(Mesh);
+			Gun->SetStaticMesh(GunMesh);
 		}
 		Gun->SetRelativeScale3D(FVector(CurrentDef.MeshScale));
 		// A no-op on materials without the parameter; the tint is how the guns read apart until then.

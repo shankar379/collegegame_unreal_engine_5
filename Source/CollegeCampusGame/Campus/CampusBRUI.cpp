@@ -37,7 +37,7 @@ using namespace CampusStyle;
 namespace
 {
 	/** Unity-safe local names (CampusMapSelect.cpp has its own SelectTitle / SelectShadow). */
-	const FLinearColor BrShadow(0.f, 0.f, 0.f, 0.85f);
+	const FLinearColor BrUiShadow(0.f, 0.f, 0.f, 0.85f);
 
 	/** "0:14" - minutes and seconds, so a long queue does not read as a four-digit number. */
 	FString BrClock(float Seconds)
@@ -53,7 +53,7 @@ namespace
 			.Font(bBold ? CampusAngular::Display(Size) : CampusAngular::Body(Size))
 			.ColorAndOpacity(Color)
 			.ShadowOffset(FVector2D(2.f, 2.f))
-			.ShadowColorAndOpacity(BrShadow)
+			.ShadowColorAndOpacity(BrUiShadow)
 			.Justification(ETextJustify::Center);
 	}
 }
@@ -215,7 +215,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMatchmaking()
 					.Font(CampusAngular::Numeric(76))
 					.ColorAndOpacity(FLinearColor::White)
 					.ShadowOffset(FVector2D(3.f, 3.f))
-					.ShadowColorAndOpacity(BrShadow)
+					.ShadowColorAndOpacity(BrUiShadow)
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 4.f, 0.f, 0.f)
 				[

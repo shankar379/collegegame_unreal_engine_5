@@ -331,8 +331,8 @@ FCampusWeaponMods FCampusWeaponMods::Clamped() const
 		}
 	}
 	// Keep the strongest allowed ones; the rest go to zero. Biggest first.
-	Positive.Sort([](float* A, float* B) { return *A > *B; });
-	Negative.Sort([](float* A, float* B) { return *A < *B; });
+	Positive.Sort([](const float& A, const float& B) { return A > B; }); // TArray<T*>::Sort hands the predicate references
+	Negative.Sort([](const float& A, const float& B) { return A < B; });
 	for (int32 Index = MaxPositiveMods; Index < Positive.Num(); ++Index)
 	{
 		*Positive[Index] = 0.f;
