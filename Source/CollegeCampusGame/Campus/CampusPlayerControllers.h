@@ -70,6 +70,9 @@ private:
 	/** Index 0 is the local player; up to UCampusParty::MaxMembers. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<ASkeletalMeshActor>> Squad;
+	/** Lobby floor height under the line-up, measured once (traces never see the squad). */
+	float FloorZ = 0.f;
+	bool bFloorZKnown = false;
 
 	UPROPERTY(Transient)
 	TObjectPtr<ACameraActor> PodiumCamera;

@@ -122,6 +122,14 @@ float ACampusLobbyPlayerController::GroundAt(const FVector& Where) const
 	const FVector Start(Where.X, Where.Y, 400.f);
 	const FVector End(Where.X, Where.Y, -400.f);
 	FCollisionQueryParams Params(TEXT("CampusLobbyFloor"), false);
+	// never land on a squad member (a hidden one still had collision: the line-up stood on invisible teammates)
+	for (const TObjectPtr<ASkeletalMeshActor>& Member : Squad)
+	{
+		if (Member)
+		{
+			Params.AddIgnoredActor(Member);
+		}
+	}
 	if (World->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic, Params))
 	{
 		return Hit.ImpactPoint.Z;
@@ -172,6 +180,9 @@ void ACampusLobbyPlayerController::RebuildSquad()
 				continue;
 			}
 			USkeletalMeshComponent* Component = Actor->GetSkeletalMeshComponent();
+			// display only: no collision, so nothing (floor traces, each other) can stack them up
+			Actor->SetActorEnableCollision(false);
+			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			Component->SetMobility(EComponentMobility::Movable);
 			Component->SetSkeletalMeshAsset(Mesh);
 			// The mesh faces +X in its own space; the camera looks back along -X.
@@ -182,9 +193,14 @@ void ACampusLobbyPlayerController::RebuildSquad()
 		}
 		const int32 Slot = Order.IsValidIndex(Index) ? Order[Index] : Index;
 		const float Y = -UCampusParty::SlotStep(Slot, Capacity) * CampusLobbyScene::SlotSpacing;
-		const FVector Where(0.f, Y, 0.f);
+		// one floor height for the whole line-up, measured at the centre once
+		if (!bFloorZKnown)
+		{
+			FloorZ = GroundAt(FVector::ZeroVector);
+			bFloorZKnown = true;
+		}
 		Actor->SetActorHiddenInGame(false);
-		Actor->SetActorLocation(FVector(0.f, Y, GroundAt(Where)));
+		Actor->SetActorLocation(FVector(0.f, Y, FloorZ), false, nullptr, ETeleportType::TeleportPhysics);
 		// Everyone keeps the yaw the player dragged to, so the line-up turns as one.
 		Actor->SetActorRotation(FRotator(0.f, DisplayYaw, 0.f));
 	}

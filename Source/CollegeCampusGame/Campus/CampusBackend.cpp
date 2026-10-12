@@ -489,6 +489,7 @@ void UCampusBackend::SignInGuest(FDone Done)
 	Body->SetStringField(TEXT("device_id"), Profile->DeviceId);
 	Body->SetStringField(TEXT("device_secret"), Profile->DeviceSecret);
 	Body->SetStringField(TEXT("platform"), PlatformName());
+	AddAdultTick(Body); // guest sign-in creates an account too: it needs the 18+ tick like register/login
 	Request(TEXT("POST"), TEXT("/auth/device"), Body, false, false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
 	{
 		if (Status != 200 && Status != 201)
