@@ -1710,8 +1710,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMissions()
 		MissionTab == EMissionTab::Daily ? Feed.Daily :
 		MissionTab == EMissionTab::Weekly ? Feed.Weekly : Feed.WeekendMissions;
 
-	// Tabs, each carrying its own claimable count as a numeric dot.
-	TSharedRef<SHorizontalBox> Tabs = SNew(SHorizontalBox);
+	// MissionTabs, each carrying its own claimable count as a numeric dot.
+	TSharedRef<SHorizontalBox> MissionTabs = SNew(SHorizontalBox);
 	struct FTabInfo { EMissionTab Tab; const TCHAR* Label; };
 	static const FTabInfo TabList[] = {
 		{ EMissionTab::Daily, TEXT("DAILY") }, { EMissionTab::Weekly, TEXT("WEEKLY") }, { EMissionTab::Weekend, TEXT("WEEKEND") },
@@ -1722,7 +1722,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMissions()
 			Info.Tab == EMissionTab::Daily ? Feed.Daily : Info.Tab == EMissionTab::Weekly ? Feed.Weekly : Feed.WeekendMissions;
 		const int32 Ready = Which.ClaimableCount();
 		const EMissionTab Target = Info.Tab;
-		Tabs->AddSlot().AutoWidth().Padding(4.f, 0.f)
+		MissionTabs->AddSlot().AutoWidth().Padding(4.f, 0.f)
 		[
 			SNew(SOverlay)
 			+ SOverlay::Slot()
@@ -1808,7 +1808,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMissions()
 		+ SVerticalBox::Slot().AutoHeight()
 		[
 			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth()[Tabs]
+			+ SHorizontalBox::Slot().AutoWidth()[MissionTabs]
 			+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer)]
 			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 			[
