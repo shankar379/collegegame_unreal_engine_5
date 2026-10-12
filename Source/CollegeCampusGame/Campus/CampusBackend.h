@@ -56,7 +56,14 @@ struct FCampusRoom
 	int32 MaxPlayers = 8;
 	/** Join only: proof for the match server that the API let this player in (short-lived). */
 	FString Ticket;
+	/** How to reach the host, from the API's "connect" object: "eos" (P2P, works over the internet)
+	 *  or empty / anything else (the Address:Port LAN form). Old responses have no connect object. */
+	FString ConnectType;
+	/** The host phone's EOS ProductUserId, when ConnectType is "eos". */
+	FString HostPuid;
 	bool IsValid() const { return !Code.IsEmpty(); }
+	/** Travel to this room over EOS P2P rather than ip:port. */
+	bool IsEos() const { return ConnectType == TEXT("eos") && !HostPuid.IsEmpty(); }
 };
 
 /** One player's final line, reported by the match server (never by the player's own phone). */
@@ -291,8 +298,10 @@ public:
 	void VerifyGooglePurchase(const FString& ProductId, const FString& PurchaseToken, FJsonDone Done);
 
 	// ---- rooms
-	/** Spends 1 Room Card; this phone becomes the host (listen server) of the returned room. */
-	void CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds, int32 Minutes, FRoomDone Done);
+	/** Spends 1 Room Card; this phone becomes the host (listen server) of the returned room.
+	 *  EosPuid is this phone's EOS ProductUserId when it can host over EOS P2P (internet play), so
+	 *  the API can hand it to joiners; pass it empty to be listed as a LAN room (ip:port). */
+	void CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds, int32 Minutes, const FString& EosPuid, FRoomDone Done);
 	void JoinRoom(const FString& Code, FRoomDone Done);
 	/** Called by the host's match: keeps the room listed and marks it playing once the match starts. */
 	void SetHostedRoomState(bool bPlaying, int32 PlayerCount);
@@ -376,6 +385,8 @@ private:
 
 	FString AccessToken;
 	FCampusRoom HostedRoom;
+	/** This phone's EOS ProductUserId while it is hosting; repeated on every heartbeat. */
+	FString HostedEosPuid;
 	bool bHostedPlaying = false;
 	int32 HostedPlayers = 1;
 	FTSTicker::FDelegateHandle HeartbeatHandle;

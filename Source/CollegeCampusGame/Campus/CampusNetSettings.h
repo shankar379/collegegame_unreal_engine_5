@@ -25,6 +25,13 @@ public:
 	UPROPERTY(Config)
 	int32 GamePort = 7777;
 
-	FString ApiBaseUrl() const { return FString::Printf(TEXT("http://%s:%d/v1"), *ServerHost, ApiPort); }
+	/** Full API base (e.g. an https tunnel / cloud host, ending in /v1). Empty = http://ServerHost:ApiPort/v1 on the LAN. */
+	UPROPERTY(Config)
+	FString ApiBaseOverride;
+
+	FString ApiBaseUrl() const
+	{
+		return ApiBaseOverride.IsEmpty() ? FString::Printf(TEXT("http://%s:%d/v1"), *ServerHost, ApiPort) : ApiBaseOverride;
+	}
 	FString GameAddress() const { return FString::Printf(TEXT("%s:%d"), *ServerHost, GamePort); }
 };

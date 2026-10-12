@@ -27,6 +27,14 @@ public class CollegeCampusGame : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "OnlineSubsystem", "OnlineSubsystemUtils" });
 
+		// Internet play (Campus/CampusEOS.cpp): EOS Connect device-id login, so a match hosted on a
+		// phone can be reached over EOS P2P instead of a LAN address. OnlineServicesInterface is the
+		// v2 online stack (it owns the device-id login AND registers the EOS socket subsystem that
+		// NetDriverEOS needs); EOSShared + EOSSDK are only for EOS_Connect_CreateDeviceId and for
+		// reading this phone's ProductUserId back out. OnlineSubsystemNull stays the default platform
+		// service - voice and Google Play billing are untouched by any of this.
+		PrivateDependencyModuleNames.AddRange(new string[] { "OnlineServicesInterface", "EOSShared", "EOSSDK" });
+
 		if (Target.Platform == UnrealTargetPlatform.Android)
 		{
 			// Plain HTTP to the LAN test server; drop when the API moves behind HTTPS.

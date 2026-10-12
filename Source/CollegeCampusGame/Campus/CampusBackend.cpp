@@ -128,7 +128,26 @@ namespace
 		FCampusRoom Out;
 		Out.Code = Str(Room, TEXT("code"));
 		Out.Address = Str(Room, TEXT("address"));
-		Out.Port = int32(Num(Room, TEXT("port")));
+		// Keep the struct's 7777 when the API omits the port (an EOS room has no port at all).
+		if (const int32 ReadPort = int32(Num(Room, TEXT("port"))); ReadPort > 0)
+		{
+			Out.Port = ReadPort;
+		}
+		// Newer API: one "connect" object says how to reach the host. type "eos" = P2P over the
+		// internet (puid), anything else = the LAN form, which may repeat address/port in here.
+		if (const TSharedPtr<FJsonObject> Connect = Obj(Room, TEXT("connect")))
+		{
+			Out.ConnectType = Str(Connect, TEXT("type")).ToLower();
+			Out.HostPuid = Str(Connect, TEXT("puid"));
+			if (const FString ConnectAddress = Str(Connect, TEXT("address")); !ConnectAddress.IsEmpty())
+			{
+				Out.Address = ConnectAddress;
+			}
+			if (const int32 ConnectPort = int32(Num(Connect, TEXT("port"))); ConnectPort > 0)
+			{
+				Out.Port = ConnectPort;
+			}
+		}
 		Out.Map = Str(Room, TEXT("map"));
 		Out.TeamSize = int32(Num(Room, TEXT("team_size")));
 		Out.MaxPlayers = int32(Num(Room, TEXT("max_players")));
@@ -256,6 +275,7 @@ void UCampusBackend::Send(const FString& Verb, const FString& Path, const FStrin
 	Http->SetVerb(Verb);
 	Http->SetTimeout(10.f);
 	Http->SetHeader(TEXT("Accept"), TEXT("application/json"));
+	Http->SetHeader(TEXT("ngrok-skip-browser-warning"), TEXT("1")); // tunnel interstitial off for API calls
 	// Mutations always carry a JSON body ("{}" when there is nothing to send): without one, Android's HTTP stack
 	// labels the empty POST as a form and the API refuses it ("Unsupported Media Type").
 	if (Verb != TEXT("GET"))
@@ -1319,14 +1339,20 @@ void UCampusBackend::FinishPendingOrder(bool bOk, const FString& Error)
 // ---------------------------------------------------------------------------------------------
 // Rooms
 
-void UCampusBackend::CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds, int32 Minutes, FRoomDone Done)
+void UCampusBackend::CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds, int32 Minutes, const FString& EosPuid, FRoomDone Done)
 {
 	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
 	Body->SetNumberField(TEXT("rounds"), Rounds);
 	Body->SetNumberField(TEXT("round_minutes"), Minutes);
 	Body->SetStringField(TEXT("map"), Map == TEXT("RealMap") ? TEXT("real") : TEXT("classic"));
 	Body->SetNumberField(TEXT("team_size"), TeamSize == 1 || TeamSize == 2 ? TeamSize : 4);
-	Request(TEXT("POST"), TEXT("/rooms"), Body, true, true, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	// Sent only when this phone really is EOS-logged-in: the API hands it to joiners as
+	// connect:{type:"eos",puid}. Leaving it out keeps the room on the LAN form.
+	if (!EosPuid.IsEmpty())
+	{
+		Body->SetStringField(TEXT("eos_puid"), EosPuid);
+	}
+	Request(TEXT("POST"), TEXT("/rooms"), Body, true, true, [this, Done, EosPuid](int32 Status, TSharedPtr<FJsonObject> Json)
 	{
 		if (Status != 201)
 		{
@@ -1337,6 +1363,9 @@ void UCampusBackend::CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds
 		HostedRoom = ReadRoom(Obj(Json, TEXT("room")));
 		bHostedPlaying = false;
 		HostedPlayers = 1;
+		// Remembered so every heartbeat re-states it: if the room was created before this phone
+		// finished its EOS login, the first heartbeat registers the puid and joiners get the EOS form.
+		HostedEosPuid = EosPuid;
 		Done(true, FString(), HostedRoom);
 	});
 }
@@ -1394,11 +1423,15 @@ void UCampusBackend::ReportMatchResult(const TArray<FCampusMatchResult>& Players
 	}
 	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
 	Body->SetArrayField(TEXT("players"), Lines);
-	Request(TEXT("POST"), FString::Printf(TEXT("/rooms/%s/result"), *HostedRoom.Code), Body, true, false, [](int32 Status, TSharedPtr<FJsonObject>)
+	// The API requires an Idempotency-Key on the result: one key per match, reused by Send() on every
+	// retry (token refresh, 18+ confirm), so a replayed report can never pay the match out twice.
+	// This runs once per match - the hosted room is cleared below - so the key is minted once.
+	Request(TEXT("POST"), FString::Printf(TEXT("/rooms/%s/result"), *HostedRoom.Code), Body, true, true, [](int32 Status, TSharedPtr<FJsonObject>)
 	{
 		UE_LOG(LogTemp, Log, TEXT("Campus: match result reported (%d)"), Status);
 	});
 	HostedRoom = FCampusRoom(); // the server closed it; no more heartbeats
+	HostedEosPuid.Reset();
 }
 
 void UCampusBackend::SetHostedRoomState(bool bPlaying, int32 PlayerCount)
@@ -1423,6 +1456,7 @@ void UCampusBackend::CloseHostedRoom()
 		LoadMe([](bool, const FString&) {}); // an unplayed room gives its card back
 	});
 	HostedRoom = FCampusRoom();
+	HostedEosPuid.Reset();
 }
 
 bool UCampusBackend::HeartbeatTick(float)
@@ -1432,6 +1466,11 @@ bool UCampusBackend::HeartbeatTick(float)
 		TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
 		Body->SetStringField(TEXT("status"), bHostedPlaying ? TEXT("playing") : TEXT("open"));
 		Body->SetNumberField(TEXT("player_count"), HostedPlayers);
+		// Re-states (or registers) how to reach this host over EOS. Harmless when it never changes.
+		if (!HostedEosPuid.IsEmpty())
+		{
+			Body->SetStringField(TEXT("eos_puid"), HostedEosPuid);
+		}
 		Request(TEXT("POST"), FString::Printf(TEXT("/rooms/%s/heartbeat"), *HostedRoom.Code), Body, true, false, [this](int32 Status, TSharedPtr<FJsonObject>)
 		{
 			if (Status == 404)

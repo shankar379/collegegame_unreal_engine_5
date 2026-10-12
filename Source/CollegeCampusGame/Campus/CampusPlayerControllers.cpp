@@ -5,6 +5,7 @@
 #include "Camera/CameraComponent.h"
 #include "Campus/CampusAnimInstance.h"
 #include "Campus/CampusBackend.h"
+#include "Campus/CampusEOS.h"
 #include "Campus/CampusGameInstance.h"
 #include "Campus/CampusGameMode.h"
 #include "Campus/CampusMatchState.h"
@@ -222,6 +223,13 @@ void ACampusLobbyPlayerController::BeginPlay()
 		Backend->CloseHostedRoom();
 	}
 
+	// Warm the EOS login up while the player is reading the lobby, so CREATE and JOIN do not wait on
+	// it. Does nothing at all when internet play is not configured, and never blocks or shows an error.
+	if (UCampusEOS* Eos = GetEos(); Eos && Eos->IsConfigured())
+	{
+		Eos->EnsureLogin(nullptr);
+	}
+
 	Widget = SNew(SCampusLobbyWidget).Controller(this);
 	if (GEngine && GEngine->GameViewport)
 	{
@@ -268,6 +276,11 @@ UCampusBackend* ACampusLobbyPlayerController::GetBackend() const
 	return GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBackend>() : nullptr;
 }
 
+UCampusEOS* ACampusLobbyPlayerController::GetEos() const
+{
+	return GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusEOS>() : nullptr;
+}
+
 void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)> OnFailed)
 {
 	const UCampusSave* Profile = GetProfile();
@@ -281,22 +294,56 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 	const int32 Team = Profile->TeamSize;
 	const int32 Rounds = FMath::Clamp(Profile->MatchRounds, 4, 7);
 	const int32 Minutes = FMath::Clamp(Profile->RoundMinutes, 3, 10);
-	// the API issues the code (and takes the Room Card) first; then this phone opens the match and hosts it
 	TWeakObjectPtr<ACampusLobbyPlayerController> WeakThis(this);
-	Backend->CreateRoom(Map, Team, Rounds, Minutes, [WeakThis, Map, Team, Rounds, Minutes, OnFailed](bool bOk, const FString& Error, const FCampusRoom& Room)
+
+	// EosPuid empty = host on the LAN exactly as before. Non-empty = this phone is EOS-logged-in, the
+	// API lists the room as an EOS room, and the match listens on the EOS net driver instead.
+	auto Create = [WeakThis, Map, Team, Rounds, Minutes, OnFailed](const FString& EosPuid)
 	{
 		ACampusLobbyPlayerController* Self = WeakThis.Get();
 		if (!Self)
 		{
 			return;
 		}
-		if (!bOk)
+		UCampusBackend* Api = Self->GetBackend();
+		if (!Api)
 		{
-			OnFailed(Error);
+			OnFailed(TEXT("Not ready yet."));
 			return;
 		}
-		const FString Options = FString::Printf(TEXT("listen?Map=%s?Team=%d?Room=%s?Rounds=%d?Minutes=%d"), *Map, Team, *Room.Code, Rounds, Minutes);
-		UGameplayStatics::OpenLevel(Self, FName(UCampusGameInstance::MatchMap), true, Options);
+		// the API issues the code (and takes the Room Card) first; then this phone opens the match and hosts it
+		Api->CreateRoom(Map, Team, Rounds, Minutes, EosPuid, [WeakThis, Map, Team, Rounds, Minutes, EosPuid, OnFailed](bool bOk, const FString& Error, const FCampusRoom& Room)
+		{
+			ACampusLobbyPlayerController* Me = WeakThis.Get();
+			if (!Me)
+			{
+				return;
+			}
+			if (!bOk)
+			{
+				OnFailed(Error);
+				return;
+			}
+			// With no puid we tell the net driver to use plain IP sockets, so a LAN room is hosted on
+			// 7777 as it always was even when EOS is configured but this phone could not log in.
+			const TCHAR* Transport = EosPuid.IsEmpty() ? TEXT("?bUseIPSockets") : TEXT("");
+			const FString Options = FString::Printf(TEXT("listen%s?Map=%s?Team=%d?Room=%s?Rounds=%d?Minutes=%d"), Transport, *Map, Team, *Room.Code, Rounds, Minutes);
+			UGameplayStatics::OpenLevel(Me, FName(UCampusGameInstance::MatchMap), true, Options);
+		});
+	};
+
+	UCampusEOS* Eos = GetEos();
+	if (!Eos || !Eos->IsConfigured())
+	{
+		Create(FString());
+		return;
+	}
+	// Log in first: the room has to carry the puid the joiners will dial, and the listen server needs
+	// that same login to bind its P2P socket. A failure here is not fatal - we host on the LAN.
+	TWeakObjectPtr<UCampusEOS> WeakEos(Eos);
+	Eos->EnsureLogin([Create, WeakEos](bool bOk)
+	{
+		Create(bOk && WeakEos.IsValid() ? WeakEos->GetLocalPuid() : FString());
 	});
 }
 
@@ -311,16 +358,46 @@ void ACampusLobbyPlayerController::JoinRoomByCode(const FString& Code, TFunction
 	TWeakObjectPtr<ACampusLobbyPlayerController> WeakThis(this);
 	Backend->JoinRoom(Code, [WeakThis, OnFailed](bool bOk, const FString& Error, const FCampusRoom& Room)
 	{
-		if (ACampusLobbyPlayerController* Self = WeakThis.Get())
+		ACampusLobbyPlayerController* Self = WeakThis.Get();
+		if (!Self)
 		{
-			if (!bOk)
+			return;
+		}
+		if (!bOk)
+		{
+			OnFailed(Error);
+			return;
+		}
+		// the ticket rides along as a URL option either way; the host checks it with the API
+		// (ACampusMatchGameMode::AdmitWithTicket)
+		const FString Ticket = Room.Ticket;
+		if (!Room.IsEos())
+		{
+			Self->ClientTravel(FString::Printf(TEXT("%s:%d?Ticket=%s"), *Room.Address, Room.Port, *Ticket), TRAVEL_Absolute);
+			return;
+		}
+		// An EOS room: we must be logged in ourselves before we can open a P2P socket to the host.
+		UCampusEOS* Eos = Self->GetEos();
+		if (!Eos || !Eos->IsConfigured())
+		{
+			OnFailed(TEXT("That room is an internet room; this build can only join rooms on your Wi-Fi."));
+			return;
+		}
+		const FString HostPuid = Room.HostPuid;
+		Eos->EnsureLogin([WeakThis, HostPuid, Ticket, OnFailed](bool bLoggedIn)
+		{
+			ACampusLobbyPlayerController* Me = WeakThis.Get();
+			if (!Me)
 			{
-				OnFailed(Error);
 				return;
 			}
-			// the ticket rides along as a URL option; the host checks it with the API (ACampusMatchGameMode::AdmitWithTicket)
-			Self->ClientTravel(FString::Printf(TEXT("%s:%d?Ticket=%s"), *Room.Address, Room.Port, *Room.Ticket), TRAVEL_Absolute);
-		}
+			if (!bLoggedIn)
+			{
+				OnFailed(TEXT("Could not reach the match network. Check your connection and try again."));
+				return;
+			}
+			Me->ClientTravel(FString::Printf(TEXT("%s?Ticket=%s"), *UCampusEOS::ConnectUrlFor(HostPuid), *Ticket), TRAVEL_Absolute);
+		});
 	});
 }
 

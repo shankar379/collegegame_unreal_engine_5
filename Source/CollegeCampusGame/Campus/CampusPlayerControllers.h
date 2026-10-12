@@ -17,6 +17,7 @@ class SCampusTouchControls;
 class UCampusParty;
 class UCampusSave;
 class UCampusBackend;
+class UCampusEOS;
 class UCampusGameInstance;
 
 UCLASS()
@@ -35,6 +36,9 @@ public:
 	void RotateDisplay(float DeltaYaw);
 
 	UCampusBackend* GetBackend() const;
+
+	/** Internet play (EOS P2P). Null-safe: when it is not configured the room stays on the LAN. */
+	UCampusEOS* GetEos() const;
 
 	/** Custom Room: the API issues a code (1 Room Card), then this phone hosts the match (listen server). */
 	void HostRoom(TFunction<void(const FString& Error)> OnFailed);
