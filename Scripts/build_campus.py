@@ -34,7 +34,7 @@ FOLDER = "Campus"
 # where the College collision sits (see /Game/College/BoxCollision): three.js world origin in Unreal
 SHIFT = unreal.Vector(15710.0, 8222.599670410156, -2.9251937866210938)
 SKIP_GROUPS = {"Doors"}  # CampusDoor actors draw (and swing) the door leaves
-INK = True
+INK = False  # pencil outlines removed (draw calls + size on phones)
 INK_WIDTH = 2.0  # cm, each ribbon of an outline segment
 INK_CULL = 9000.0  # cm: outlines fade out of the draw list beyond this (phones)
 # Geometry Script's DynamicMesh treats (b - a) x (c - a) as pointing INTO the surface (checked with append_box)
