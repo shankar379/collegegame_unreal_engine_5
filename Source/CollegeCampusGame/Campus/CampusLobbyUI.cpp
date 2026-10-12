@@ -1754,7 +1754,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 				// above the mode chips. Anchored to the BOTTOM rather than the top on purpose - the
 				// notice stack owns the top-right corner, and a permanent list under transient cards
 				// is the one arrangement that would annoy twice.
-				+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 190.f)
+				+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 276.f) // clears START + mode plate + SOLO/DUO/SQUAD pills
 				[
 					BuildLobbyFriends()
 				]
