@@ -1691,7 +1691,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSummary()
 		: SNullWidget::NullWidget;
 
 	// Teams side by side, each in the server's row order - the client never re-sorts a scoreboard.
-	TSharedRef<SHorizontalBox> Teams = SNew(SHorizontalBox);
+	TSharedRef<SHorizontalBox> TeamColumns = SNew(SHorizontalBox);
 	TArray<int32> Order;
 	for (const FCampusSummaryRow& Row : Summary.Players)
 	{
@@ -1761,7 +1761,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSummary()
 			}
 			Column->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)[BuildSummaryRow(Row)];
 		}
-		Teams->AddSlot().FillWidth(1.f).Padding(Team == Order[0] ? FMargin(0.f, 0.f, 10.f, 0.f) : FMargin(10.f, 0.f, 0.f, 0.f))
+		TeamColumns->AddSlot().FillWidth(1.f).Padding(Team == Order[0] ? FMargin(0.f, 0.f, 10.f, 0.f) : FMargin(10.f, 0.f, 0.f, 0.f))
 		[
 			Column
 		];
@@ -1771,7 +1771,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSummary()
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 16.f)[MvpBlock]
 		+ SVerticalBox::Slot().FillHeight(1.f)
 		[
-			SNew(SScrollBox) + SScrollBox::Slot()[Teams]
+			SNew(SScrollBox) + SScrollBox::Slot()[TeamColumns]
 		];
 
 	if (!Summary.bRated)
