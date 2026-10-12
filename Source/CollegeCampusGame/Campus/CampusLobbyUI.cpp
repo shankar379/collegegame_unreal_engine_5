@@ -9,6 +9,7 @@
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusGameInstance.h"
 #include "Campus/CampusParty.h"
+#include "Campus/CampusPlayBilling.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "Campus/CampusSave.h"
 #include "Brushes/SlateNoResource.h"
@@ -75,7 +76,7 @@ namespace
 	constexpr float SquadSlotFraction = 0.16f;
 
 	/** The left-hand menu. Every tab lands on a screen that exists. */
-	enum class ELobbyTab : uint8 { Store, Character, Vault, Weapons, Events };
+	enum class ELobbyTab : uint8 { Store, Missions, Character, Vault, Weapons, Events };
 	struct FTabDef
 	{
 		ELobbyTab Tab;
@@ -84,6 +85,7 @@ namespace
 	};
 	const FTabDef Tabs[] = {
 		{ ELobbyTab::Store,     TEXT("STORE"),     CampusAngular::EGlyph::Coin },
+		{ ELobbyTab::Missions,  TEXT("MISSIONS"),  CampusAngular::EGlyph::Chevron },
 		{ ELobbyTab::Character, TEXT("CHARACTER"), CampusAngular::EGlyph::Friends },
 		{ ELobbyTab::Vault,     TEXT("VAULT"),     CampusAngular::EGlyph::Gem },
 		{ ELobbyTab::Weapons,   TEXT("WEAPONS"),   CampusAngular::EGlyph::Rank },
@@ -271,6 +273,30 @@ void SCampusLobbyWidget::Tick(const FGeometry& AllottedGeometry, const double In
 			Instance->PendingMessage.Reset();
 		}
 	}
+
+	// An account from before the 18+ rule: ask once, then carry on. Only over the lobby, never over
+	// a dialog the player opened themselves.
+	UCampusBackend* Api = Backend();
+	if (Api && Api->NeedsAdultConfirm() && Current == EScreen::Lobby)
+	{
+		Show(EScreen::AdultConfirm);
+		return;
+	}
+
+	// The login streak popup: once per game day, and only on the lobby itself, so it can never land
+	// on top of Create / Join Room.
+	if (Api && Current == EScreen::Lobby && !bStreakOffered && Api->Engagement.bLoaded && Api->Engagement.Streak.bClaimable)
+	{
+		UCampusSave* Save = Profile();
+		const FString Today = ServerGameDay();
+		if (Save && !Today.IsEmpty() && Save->StreakPopupDay != Today)
+		{
+			bStreakOffered = true;
+			Save->StreakPopupDay = Today;
+			Save->Persist();
+			Show(EScreen::Streak);
+		}
+	}
 }
 
 void SCampusLobbyWidget::Toast(const FString& Message)
@@ -319,6 +345,10 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	case EScreen::Event: Body = BuildEvent(); break;
 	case EScreen::Daily: Body = BuildDaily(); break;
 	case EScreen::Settings: Body = BuildSettings(); break;
+	case EScreen::Missions: Body = BuildMissions(); break;
+	case EScreen::Streak: Body = BuildStreak(); break;
+	case EScreen::AdultConfirm: Body = BuildAdultConfirm(); break;
+	case EScreen::CollegePick: Body = BuildCollegePick(); break;
 	}
 	Content->SetContent(Body);
 }
@@ -328,10 +358,80 @@ void SCampusLobbyWidget::Refresh()
 	Show(Current);
 }
 
+void SCampusLobbyWidget::RefreshEngagement()
+{
+	UCampusBackend* Api = Backend();
+	if (!Api || !Api->IsSignedIn())
+	{
+		return;
+	}
+	// Paint from the cached copy first so the lobby is never empty while this is in the air.
+	Api->LoadEngagementFromCache();
+	Api->LoadEngagementHome([this](bool bOk, const FString& Error)
+	{
+		if (!bOk)
+		{
+			// A missing engagement feed must never block the lobby: the panels show their empty
+			// state and the rest of the screen works. Only a real error is worth a toast.
+			if (!Error.IsEmpty() && Backend() && Backend()->NeedsAdultConfirm())
+			{
+				Show(EScreen::AdultConfirm);
+			}
+			return;
+		}
+		if (Current == EScreen::Lobby || Current == EScreen::Missions)
+		{
+			Refresh();
+		}
+	});
+}
+
+void SCampusLobbyWidget::AfterClaim(bool bOk, const FString& Error, const FString& OkText)
+{
+	bClaiming = false;
+	bBusy = false;
+	const UCampusBackend* Api = Backend();
+	if (bOk)
+	{
+		Toast(OkText);
+		// The wallet already came back on the claim response; the panels need the new states.
+		RefreshEngagement();
+	}
+	else if (Api && Api->bRewardCapReached)
+	{
+		Toast(TEXT("You have hit today's reward limit. This is waiting for you tomorrow."));
+	}
+	else
+	{
+		Toast(Error);
+	}
+	Refresh();
+}
+
+FString SCampusLobbyWidget::ServerGameDay() const
+{
+	const UCampusBackend* Api = Backend();
+	if (!Api || !Api->Engagement.bLoaded)
+	{
+		return FString();
+	}
+	// The API's game day is IST (UTC+5:30) shifted back 5 hours, so a day rolls over at 5 AM IST.
+	const FDateTime Ist = Api->Engagement.Now() + FTimespan::FromMinutes(330) - FTimespan::FromHours(5);
+	return Ist.ToString(TEXT("%Y%m%d"));
+}
+
 void SCampusLobbyWidget::AfterSignIn()
 {
 	UCampusSave* Save = Profile();
 	const UCampusBackend* Api = Backend();
+	// One round trip for streak + missions + the weekend board, and any Play purchase that was
+	// paid but never credited (an app killed mid-purchase) is pushed to the server now.
+	RefreshEngagement();
+	if (UCampusPlayBilling* Billing = Controller.IsValid() && Controller->GetGameInstance()
+		? Controller->GetGameInstance()->GetSubsystem<UCampusPlayBilling>() : nullptr)
+	{
+		Billing->RestoreUnfinished();
+	}
 	if (Save && !Save->bNicknameChosen)
 	{
 		NameText = Api ? Api->PlayerName : FString();
@@ -561,10 +661,19 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildAgreement()
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildLoginChoice()
 {
+	// 18+ only (migration 009). Nothing on this screen works until the box is ticked, and the tick
+	// rides along with every sign-in body. We never ask for or store a date of birth.
+	if (const UCampusBackend* Known = Backend(); Known && Known->HasAdultTick())
+	{
+		bAdultTicked = true;
+	}
+	const bool bMayProceed = bAdultTicked;
+
 	auto Guest = [this]()
 	{
 		if (UCampusBackend* Api = Backend())
 		{
+			Api->SetAdultTick(true);
 			Busy(TEXT("Signing in..."));
 			Api->SignInGuest([this](bool bOk, const FString& Error)
 			{
@@ -582,13 +691,71 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLoginChoice()
 			CampusStyle::Panel(
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)[CampusAngular::Logo(50)]
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 12.f, 0.f, 26.f)
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 12.f, 0.f, 18.f)
 				[
 					Label(LOCTEXT("ChooseLogin", "CHOOSE HOW TO SIGN IN"), 18, Muted)
 				]
+				// The 18+ gate. A plain, legible tick with a 60px target - not a tiny checkbox.
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 0.f, 0.f, 20.f)
+				[
+					SNew(SCampusAngularButton)
+					.Shape(FCampusShape::Notched(14.f))
+					.Fill(bAdultTicked ? FLinearColor(0.08f, 0.26f, 0.14f, 0.92f) : FLinearColor(0.f, 0.f, 0.f, 0.45f))
+					.Border(bAdultTicked ? CampusAngular::Go : CampusAngular::Accent)
+					.BorderWidth(2.f)
+					.ContentPadding(FMargin(18.f, 12.f))
+					.OnClicked(FOnClicked::CreateLambda([this]()
+					{
+						bAdultTicked = !bAdultTicked;
+						if (UCampusBackend* Api = Backend())
+						{
+							Api->SetAdultTick(bAdultTicked);
+						}
+						Refresh();
+						return FReply::Handled();
+					}))
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 14.f, 0.f)
+						[
+							// Box + tick: the state is a shape, not only a colour.
+							SNew(SBox).WidthOverride(28.f).HeightOverride(28.f)
+							[
+								SNew(SCampusAngularPanel)
+								.Shape(FCampusShape::Notched(7.f))
+								.Fill(bAdultTicked ? CampusAngular::Go : FLinearColor(0.f, 0.f, 0.f, 0.5f))
+								.Border(FLinearColor(1.f, 1.f, 1.f, 0.5f))
+								.BorderWidth(1.f)
+								[
+									SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
+									[
+										bAdultTicked
+											? StaticCastSharedRef<SWidget>(SNew(STextBlock).Text(FText::FromString(TEXT("X")))
+												.Font(CampusAngular::Display(18)).ColorAndOpacity(FLinearColor::White))
+											: SNullWidget::NullWidget
+									]
+								]
+							]
+						]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT("Adult18", "I AM 18 OR OLDER"))
+							.Font(CampusAngular::Display(20))
+							.ColorAndOpacity(bAdultTicked ? FLinearColor::White : Accent)
+						]
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 0.f, 0.f, 16.f)
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT("Adult18Hint", "This game is for players aged 18 and over. We do not store your date of birth."))
+					.Font(CampusAngular::Body(14))
+					.ColorAndOpacity(Muted)
+				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 				[
-					Button(LOCTEXT("Guest", "PLAY AS GUEST"), FOnClicked::CreateLambda(Guest), EButton::Go, 26, FVector2D(460.f, 84.f))
+					Button(LOCTEXT("Guest", "PLAY AS GUEST"), FOnClicked::CreateLambda(Guest), EButton::Go, 26, FVector2D(460.f, 84.f), bMayProceed)
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 6.f, 0.f, 18.f)
 				[
@@ -599,11 +766,11 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLoginChoice()
 					SNew(SHorizontalBox)
 					+ SHorizontalBox::Slot().AutoWidth().Padding(6.f, 0.f)
 					[
-						Button(LOCTEXT("Login", "LOGIN"), FOnClicked::CreateLambda([this]() { Show(EScreen::EmailLogin); return FReply::Handled(); }), EButton::Accent, 22, FVector2D(220.f, 68.f))
+						Button(LOCTEXT("Login", "LOGIN"), FOnClicked::CreateLambda([this]() { Show(EScreen::EmailLogin); return FReply::Handled(); }), EButton::Accent, 22, FVector2D(220.f, 68.f), bMayProceed)
 					]
 					+ SHorizontalBox::Slot().AutoWidth().Padding(6.f, 0.f)
 					[
-						Button(LOCTEXT("Register", "REGISTER"), FOnClicked::CreateLambda([this]() { Show(EScreen::Register); return FReply::Handled(); }), EButton::Dark, 22, FVector2D(220.f, 68.f))
+						Button(LOCTEXT("Register", "REGISTER"), FOnClicked::CreateLambda([this]() { Show(EScreen::Register); return FReply::Handled(); }), EButton::Dark, 22, FVector2D(220.f, 68.f), bMayProceed)
 					]
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 14.f, 0.f, 0.f)
@@ -882,11 +1049,14 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMenuColumn()
 		return FOnClicked::CreateLambda([this, Screen]() { Show(Screen); return FReply::Handled(); });
 	};
 
+	const int32 MissionsReady = Api ? Api->Engagement.TotalClaimable() : 0;
+
 	TSharedRef<SVerticalBox> Column = SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible);
 	for (const FTabDef& Def : Tabs)
 	{
 		FOnClicked Action;
 		bool bHighlighted = false;
+		int32 Badge = 0;
 		switch (Def.Tab)
 		{
 		case ELobbyTab::Store:     Action = OpenStore(EStoreTab::Offers); break;
@@ -894,10 +1064,37 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMenuColumn()
 		case ELobbyTab::Character: Action = OpenScreen(EScreen::Account); break;
 		case ELobbyTab::Vault:     Action = OpenScreen(EScreen::Daily); bHighlighted = bDailyReady; break;
 		case ELobbyTab::Events:    Action = OpenScreen(EScreen::Event); break;
+		case ELobbyTab::Missions:
+			Action = OpenScreen(EScreen::Missions);
+			Badge = MissionsReady;
+			bHighlighted = MissionsReady > 0;
+			break;
 		}
 		Column->AddSlot().AutoHeight().Padding(0.f, 5.f)
 		[
-			CampusStyle::MenuTab(FText::FromString(Def.Label), Def.Glyph, Action, bHighlighted)
+			SNew(SOverlay)
+			+ SOverlay::Slot()[CampusStyle::MenuTab(FText::FromString(Def.Label), Def.Glyph, Action, bHighlighted)]
+			// A count, not a bare dot: "3 waiting" is actionable, "something is here" is not.
+			+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(0.f, -7.f, -7.f, 0.f)
+			[
+				Badge > 0
+					? StaticCastSharedRef<SWidget>(SNew(SBox).WidthOverride(28.f).HeightOverride(28.f)
+						[
+							SNew(SCampusAngularPanel)
+							.Shape(FCampusShape::Notched(7.f))
+							.Fill(CampusAngular::Go)
+							.Border(FLinearColor(1.f, 1.f, 1.f, 0.4f))
+							.BorderWidth(1.f)
+							[
+								SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
+								[
+									SNew(STextBlock).Text(FText::AsNumber(Badge))
+									.Font(CampusAngular::Numeric(16)).ColorAndOpacity(FLinearColor::White)
+								]
+							]
+						])
+					: SNullWidget::NullWidget
+			]
 		];
 	}
 	return Column;
@@ -1117,10 +1314,17 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 				[
 					SNew(SBox).Visibility(EVisibility::HitTestInvisible)[CampusAngular::Logo(40)]
 				]
-				// Slanted menu tabs down the left.
-				+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(0.f, 30.f, 0.f, 0.f)
+				// Slanted menu tabs down the left, with the weekend board under them.
+				+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(0.f, 20.f, 0.f, 0.f)
 				[
-					BuildMenuColumn()
+					SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
+					+ SVerticalBox::Slot().AutoHeight()[BuildMenuColumn()]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 14.f, 0.f, 0.f)[BuildWeekendPanel()]
+				]
+				// A settled weekend's unclaimed reward: top-centre, under the top bar, impossible to miss.
+				+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(0.f, 96.f, 0.f, 0.f)
+				[
+					BuildClaimBanner()
 				]
 				// Squad name plates, under the characters.
 				+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 108.f)
@@ -1194,7 +1398,757 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildEvent()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Store: text cards until there are icons
+// Engagement: weekend board, missions, login streak, 18+ confirm, college picker.
+// Every countdown runs off the server clock (UCampusBackend::Engagement::Now), never the phone's,
+// and is drawn through a text lambda so a ticking clock never rebuilds the screen.
+
+TSharedRef<SWidget> SCampusLobbyWidget::Countdown(const FDateTime& Until, const FText& Prefix, int32 Size, FLinearColor Color) const
+{
+	TWeakObjectPtr<ACampusLobbyPlayerController> Weak = Controller;
+
+	// Slate evaluates a text attribute on every paint. A clock only changes once a second, so the
+	// formatted FText is built once per tick of the clock and simply handed back in between -
+	// otherwise a visible countdown would allocate a string 60 times a second, forever.
+	struct FClockState
+	{
+		FDateTime Until;
+		FText Caption;
+		FText Cached;
+		int32 LastSeconds = -1;
+	};
+	TSharedRef<FClockState> State = MakeShared<FClockState>();
+	State->Until = Until;
+	State->Caption = Prefix;
+	State->Cached = Prefix;
+
+	return SNew(STextBlock)
+		.Font(CampusAngular::Display(Size))
+		.ColorAndOpacity(Color)
+		.Text_Lambda([Weak, State]()
+		{
+			const UCampusBackend* Api = Weak.IsValid() ? Weak->GetBackend() : nullptr;
+			if (!Api || !Api->Engagement.bLoaded)
+			{
+				return State->Caption;
+			}
+			const int32 Seconds = Api->Engagement.SecondsUntil(State->Until);
+			if (Seconds == State->LastSeconds)
+			{
+				return State->Cached;
+			}
+			State->LastSeconds = Seconds;
+			const int32 Days = Seconds / 86400;
+			const int32 Hours = (Seconds % 86400) / 3600;
+			const int32 Minutes = (Seconds % 3600) / 60;
+			const FString Clock = Days > 0
+				? FString::Printf(TEXT("%dD %02dH %02dM"), Days, Hours, Minutes)
+				: FString::Printf(TEXT("%02d:%02d:%02d"), Hours, Minutes, Seconds % 60);
+			State->Cached = FText::Format(FTextFormat::FromString(TEXT("{0} {1}")), State->Caption, FText::FromString(Clock));
+			return State->Cached;
+		});
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildWeekendPanel()
+{
+	const UCampusBackend* Api = Backend();
+	if (!Api || !Api->Engagement.bLoaded || !Api->Engagement.Board.bValid)
+	{
+		// No weekend configured, or the feed has not landed: render nothing rather than a hole.
+		return SNullWidget::NullWidget;
+	}
+	const FCampusWeekend& Board = Api->Engagement.Board;
+	const bool bUpcoming = Board.IsUpcoming();
+
+	TSharedRef<SVerticalBox> Body = SNew(SVerticalBox);
+
+	// Header: title + the countdown to whichever edge matters.
+	Body->AddSlot().AutoHeight()
+	[
+		SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[
+			Label(LOCTEXT("WeekendTop", "WEEKEND TOP PLAYERS"), 20, Accent)
+		]
+		+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer)]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[
+			// A provisional board says so, plainly: it is the honest face of the anti-cheat hold.
+			Board.bProvisional
+				? StaticCastSharedRef<SWidget>(SNew(SCampusAngularPanel)
+					.Shape(FCampusShape::Slanted(8.f))
+					.Fill(FLinearColor(0.35f, 0.26f, 0.02f, 0.9f))
+					.ContentPadding(FMargin(9.f, 2.f))
+					[
+						SNew(STextBlock).Text(LOCTEXT("Provisional", "PROVISIONAL"))
+						.Font(CampusAngular::Display(12)).ColorAndOpacity(CardGold)
+					])
+				: SNullWidget::NullWidget
+		]
+	];
+	Body->AddSlot().AutoHeight().Padding(0.f, 2.f, 0.f, 8.f)
+	[
+		Countdown(bUpcoming ? Board.StartsAt : Board.EndsAt,
+			bUpcoming ? LOCTEXT("StartsIn", "STARTS IN") : LOCTEXT("EndsIn", "ENDS IN"), 16, FLinearColor::White)
+	];
+
+	if (Board.bDegraded)
+	{
+		Body->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
+		[
+			SNew(STextBlock).Text(LOCTEXT("BoardDegraded", "Ranks are catching up."))
+			.Font(CampusAngular::Body(13)).ColorAndOpacity(Muted)
+		];
+	}
+
+	// Top 3.
+	for (const FCampusBoardEntry& Entry : Board.Top)
+	{
+		Body->AddSlot().AutoHeight().Padding(0.f, 2.f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 10.f, 0.f)
+			[
+				SNew(SBox).WidthOverride(30.f)
+				[
+					SNew(STextBlock).Text(FText::AsNumber(Entry.Rank))
+					.Font(CampusAngular::Numeric(18)).ColorAndOpacity(Entry.Rank == 1 ? Accent : Muted)
+				]
+			]
+			+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+			[
+				SNew(STextBlock).Text(FText::FromString(Entry.Name.ToUpper()))
+				.Font(CampusAngular::Display(17)).ColorAndOpacity(Entry.bMe ? Accent : FLinearColor::White)
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				SNew(STextBlock).Text(FText::AsNumber(Entry.Points))
+				.Font(CampusAngular::Numeric(17)).ColorAndOpacity(FLinearColor::White)
+			]
+		];
+	}
+
+	// My row: always present, either my standing or the way in.
+	Body->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+	[
+		SNew(SCampusAngularPanel)
+		.Shape(FCampusShape::Slanted(12.f))
+		.Fill(Board.bHasMe ? FLinearColor(0.12f, 0.10f, 0.03f, 0.92f) : FLinearColor(0.f, 0.f, 0.f, 0.35f))
+		.Border(Board.bHasMe ? Accent : FLinearColor(1.f, 1.f, 1.f, 0.18f))
+		.BorderWidth(1.f)
+		.ContentPadding(FMargin(14.f, 7.f))
+		[
+			Board.bHasMe
+				? StaticCastSharedRef<SWidget>(SNew(STextBlock)
+					.Text(Board.bHasNextRank
+						? FText::Format(LOCTEXT("MyRowGap", "#{0}  ·  {1} PTS BEHIND #{2}"),
+							FText::AsNumber(Board.MyRank), FText::AsNumber(Board.NextGap), FText::AsNumber(Board.NextRank))
+						: FText::Format(LOCTEXT("MyRowTop", "#{0}  ·  {1} PTS  ·  LEADING"),
+							FText::AsNumber(Board.MyRank), FText::AsNumber(Board.MyPoints)))
+					.Font(CampusAngular::Display(16))
+					.ColorAndOpacity(FLinearColor::White))
+				// The empty state names the exact thing that gets you on the board.
+				: StaticCastSharedRef<SWidget>(SNew(STextBlock)
+					.Text(LOCTEXT("BoardEmpty", "Play a match with 4+ players this weekend to enter the board."))
+					.Font(CampusAngular::Body(14))
+					.ColorAndOpacity(Muted)
+					.AutoWrapText(true))
+		]
+	];
+
+	return SNew(SBox).WidthOverride(320.f)
+		[
+			SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Notched(18.f))
+			.Fill(FLinearColor(0.015f, 0.02f, 0.03f, 0.84f))
+			.Border(CampusAngular::Hairline)
+			.BorderWidth(1.f)
+			.AccentEdge(Accent)
+			.AccentEdgeWidth(4.f)
+			.ContentPadding(FMargin(22.f, 14.f, 16.f, 14.f))
+			[
+				Body
+			]
+		];
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildClaimBanner()
+{
+	const UCampusBackend* Api = Backend();
+	if (!Api || !Api->Engagement.bLoaded || !Api->Engagement.LastWeekend.bUnclaimed)
+	{
+		return SNullWidget::NullWidget;   // zero footprint when there is nothing to claim
+	}
+	const FCampusLastWeekend& Last = Api->Engagement.LastWeekend;
+	const FString PeriodId = Last.PeriodId;
+	const FString Rewards = Last.Reward.Describe();
+
+	return SNew(SCampusAngularButton)
+		.Shape(FCampusShape::Wedge(18.f, 12.f))
+		.Fill(CampusAngular::Accent)
+		.Border(FLinearColor(1.f, 1.f, 1.f, 0.35f))
+		.BorderWidth(2.f)
+		.ContentPadding(FMargin(22.f, 10.f))
+		.OnClicked(FOnClicked::CreateLambda([this, PeriodId]()
+		{
+			if (UCampusBackend* Api2 = Backend(); Api2 && !bClaiming)
+			{
+				bClaiming = true;
+				Busy(TEXT("Claiming your reward..."));
+				Api2->ClaimPeriodReward(PeriodId, [this](bool bOk, const FString& Error)
+				{
+					AfterClaim(bOk, Error, TEXT("Weekend reward claimed!"));
+				});
+			}
+			return FReply::Handled();
+		}))
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 12.f, 0.f)
+			[
+				SNew(SBox).WidthOverride(22.f).HeightOverride(22.f)
+				[
+					SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Crown).Size(22.f).Color(FLinearColor(0.06f, 0.05f, 0.02f, 1.f))
+				]
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock)
+					.Text(Last.MyRank > 0
+						? FText::Format(LOCTEXT("LastRank", "LAST WEEKEND: YOU FINISHED #{0}"), FText::AsNumber(Last.MyRank))
+						: LOCTEXT("LastReward", "LAST WEEKEND'S REWARD IS WAITING"))
+					.Font(CampusAngular::Display(17)).ColorAndOpacity(FLinearColor(0.06f, 0.05f, 0.02f, 1.f))
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("TAP TO CLAIM  %s"), *Rewards)))
+					.Font(CampusAngular::Display(13)).ColorAndOpacity(FLinearColor(0.2f, 0.16f, 0.04f, 1.f))
+				]
+			]
+		];
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildMissionCard(const FCampusMission& Mission, const FString& PeriodId)
+{
+	const bool bClaimable = Mission.IsClaimable();
+	const bool bClaimed = Mission.State == TEXT("claimed");
+	const bool bExpired = Mission.State == TEXT("expired");
+	const FString MissionId = Mission.Id;
+	const float Fraction = Mission.Fraction();
+
+	TSharedRef<SWidget> Action = bClaimed
+		? StaticCastSharedRef<SWidget>(Label(LOCTEXT("MissionClaimed", "CLAIMED"), 16, CampusAngular::Go))
+		: bExpired
+			? StaticCastSharedRef<SWidget>(Label(LOCTEXT("MissionExpired", "EXPIRED"), 16, Muted))
+			: bClaimable
+				? CampusStyle::Button(LOCTEXT("MissionClaim", "CLAIM"), FOnClicked::CreateLambda([this, PeriodId, MissionId]()
+					{
+						if (UCampusBackend* Api = Backend(); Api && !bClaiming)
+						{
+							bClaiming = true;
+							Busy(TEXT("Claiming..."));
+							Api->ClaimMission(PeriodId, MissionId, [this](bool bOk, const FString& Error)
+							{
+								AfterClaim(bOk, Error, TEXT("Mission reward claimed!"));
+							});
+						}
+						return FReply::Handled();
+					}), EButton::Accent, 17, FVector2D(150.f, 52.f), !bClaiming)
+				: StaticCastSharedRef<SWidget>(Label(
+					FText::FromString(FString::Printf(TEXT("%d / %d"), Mission.Progress, Mission.Target)), 18, FLinearColor::White));
+
+	return CampusStyle::Card(
+		SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center).Padding(0.f, 0.f, 16.f, 0.f)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(STextBlock).Text(FText::FromString(Mission.Title.ToUpper()))
+				.Font(CampusAngular::Display(20)).ColorAndOpacity(bClaimed || bExpired ? Muted : FLinearColor::White)
+			]
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(STextBlock).Text(FText::FromString(Mission.Subtitle))
+				.Font(CampusAngular::Body(13)).ColorAndOpacity(Muted).AutoWrapText(true)
+			]
+			// Flat progress bar with the fill leaning like everything else.
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+			[
+				SNew(SBox).HeightOverride(8.f)
+				[
+					SNew(SOverlay)
+					+ SOverlay::Slot()[SNew(SCampusAngularPanel).Fill(FLinearColor(1.f, 1.f, 1.f, 0.12f))]
+					+ SOverlay::Slot().HAlign(HAlign_Left)
+					[
+						SNew(SBox).WidthOverride(FMath::Max(2.f, 380.f * Fraction))
+						[
+							SNew(SCampusAngularPanel).Fill(bClaimable ? CampusAngular::Go : Accent)
+						]
+					]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
+			[
+				SNew(STextBlock).Text(FText::FromString(Mission.Reward.Describe()))
+				.Font(CampusAngular::Display(14)).ColorAndOpacity(CardGold)
+			]
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[Action],
+		bClaimable, FMargin(22.f, 14.f, 18.f, 14.f));
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildMissions()
+{
+	const UCampusBackend* Api = Backend();
+	// A reference needs something that outlives this call: never bind one to a temporary.
+	static const FCampusEngagement Empty;
+	const FCampusEngagement& Feed = Api ? Api->Engagement : Empty;
+	const FCampusMissionPanel& Panel =
+		MissionTab == EMissionTab::Daily ? Feed.Daily :
+		MissionTab == EMissionTab::Weekly ? Feed.Weekly : Feed.WeekendMissions;
+
+	// Tabs, each carrying its own claimable count as a numeric dot.
+	TSharedRef<SHorizontalBox> Tabs = SNew(SHorizontalBox);
+	struct FTabInfo { EMissionTab Tab; const TCHAR* Label; };
+	static const FTabInfo TabList[] = {
+		{ EMissionTab::Daily, TEXT("DAILY") }, { EMissionTab::Weekly, TEXT("WEEKLY") }, { EMissionTab::Weekend, TEXT("WEEKEND") },
+	};
+	for (const FTabInfo& Info : TabList)
+	{
+		const FCampusMissionPanel& Which =
+			Info.Tab == EMissionTab::Daily ? Feed.Daily : Info.Tab == EMissionTab::Weekly ? Feed.Weekly : Feed.WeekendMissions;
+		const int32 Ready = Which.ClaimableCount();
+		const EMissionTab Target = Info.Tab;
+		Tabs->AddSlot().AutoWidth().Padding(4.f, 0.f)
+		[
+			SNew(SOverlay)
+			+ SOverlay::Slot()
+			[
+				CampusStyle::Pill(FText::FromString(Info.Label), MissionTab == Target,
+					FOnClicked::CreateLambda([this, Target]() { MissionTab = Target; Refresh(); return FReply::Handled(); }),
+					FVector2D(168.f, 52.f))
+			]
+			// The dot carries the number, so it is never "there is something" with no idea how much.
+			+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(0.f, -6.f, -6.f, 0.f)
+			[
+				Ready > 0
+					? StaticCastSharedRef<SWidget>(SNew(SBox).WidthOverride(26.f).HeightOverride(26.f)
+						[
+							SNew(SCampusAngularPanel)
+							.Shape(FCampusShape::Notched(7.f))
+							.Fill(CampusAngular::Go)
+							[
+								SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
+								[
+									SNew(STextBlock).Text(FText::AsNumber(Ready))
+									.Font(CampusAngular::Numeric(15)).ColorAndOpacity(FLinearColor::White)
+								]
+							]
+						])
+					: SNullWidget::NullWidget
+			]
+		];
+	}
+
+	TSharedRef<SVerticalBox> List = SNew(SVerticalBox);
+	if (!Panel.bValid || Panel.Items.Num() == 0)
+	{
+		List->AddSlot().AutoHeight().Padding(0.f, 20.f)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("NoMissions", "No missions in this period yet. Check back after the next reset."))
+			.Font(CampusAngular::Body(16)).ColorAndOpacity(Muted).AutoWrapText(true)
+		];
+	}
+	else
+	{
+		// The API already sorts claimable first; keep its order.
+		for (const FCampusMission& Mission : Panel.Items)
+		{
+			List->AddSlot().AutoHeight().Padding(0.f, 4.f)[BuildMissionCard(Mission, Panel.PeriodId)];
+		}
+		if (Panel.bHasBonus)
+		{
+			const bool bBonusReady = Panel.BonusState == TEXT("claimable");
+			const bool bBonusDone = Panel.BonusState == TEXT("claimed");
+			List->AddSlot().AutoHeight().Padding(0.f, 10.f, 0.f, 0.f)
+			[
+				CampusStyle::Card(
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+					[
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							Label(FText::Format(LOCTEXT("SetBonus", "SET BONUS  ·  {0} OF {1} DONE"),
+								FText::AsNumber(Panel.BonusDone), FText::AsNumber(Panel.BonusNeed)), 19,
+								bBonusDone ? Muted : FLinearColor::White)
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SNew(STextBlock).Text(FText::FromString(Panel.BonusReward.Describe()))
+							.Font(CampusAngular::Display(14)).ColorAndOpacity(CardGold)
+						]
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						// The bonus pays itself out with the claim that earns it, so this is a status, not a button.
+						Label(bBonusDone ? LOCTEXT("BonusPaid", "PAID") : bBonusReady ? LOCTEXT("BonusReady", "READY") : LOCTEXT("BonusLocked", "LOCKED"),
+							16, bBonusDone ? CampusAngular::Go : bBonusReady ? Accent : Muted)
+					],
+					bBonusReady)
+			];
+		}
+	}
+
+	TSharedRef<SWidget> Body = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth()[Tabs]
+			+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer)]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				Panel.bValid && Panel.EndsAt != FDateTime()
+					? Countdown(Panel.EndsAt, LOCTEXT("ResetsIn", "RESETS IN"), 15, Muted)
+					: SNullWidget::NullWidget
+			]
+		]
+		+ SVerticalBox::Slot().FillHeight(1.f).Padding(0.f, 14.f, 0.f, 0.f)
+		[
+			SNew(SScrollBox) + SScrollBox::Slot()[List]
+		];
+
+	return Dialog(LOCTEXT("MissionsTitle", "MISSIONS"), Body, 940.f, true, EScreen::Lobby);
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildStreak()
+{
+	const UCampusBackend* Api = Backend();
+	const FCampusStreak Streak = Api ? Api->Engagement.Streak : FCampusStreak();
+
+	// The 7-day ladder: past ticked, today lit, future dimmed but legible.
+	TSharedRef<SHorizontalBox> Ladder = SNew(SHorizontalBox);
+	for (const FCampusStreakStep& Step : Streak.Ladder)
+	{
+		const bool bDone = Step.State == TEXT("claimed");
+		const bool bToday = Step.State == TEXT("claimable");
+		Ladder->AddSlot().AutoWidth().Padding(4.f, 0.f)
+		[
+			SNew(SBox).WidthOverride(104.f)
+			[
+				SNew(SCampusAngularPanel)
+				.Shape(FCampusShape::Notched(12.f))
+				.Fill(bToday ? FLinearColor(0.14f, 0.11f, 0.02f, 0.95f)
+					: bDone ? FLinearColor(0.05f, 0.14f, 0.08f, 0.9f) : FLinearColor(0.f, 0.f, 0.f, 0.4f))
+				.Border(bToday ? Accent : bDone ? CampusAngular::Go : FLinearColor(1.f, 1.f, 1.f, 0.16f))
+				.BorderWidth(bToday ? 2.f : 1.f)
+				.ContentPadding(FMargin(8.f, 12.f))
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+					[
+						SNew(STextBlock).Text(FText::Format(LOCTEXT("StreakDay", "DAY {0}"), FText::AsNumber(Step.Day)))
+						.Font(CampusAngular::Display(14)).ColorAndOpacity(bToday ? Accent : Muted)
+					]
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 4.f, 0.f, 0.f)
+					[
+						SNew(STextBlock).Text(FText::FromString(Step.Reward.Describe()))
+						.Font(CampusAngular::Display(13))
+						.ColorAndOpacity(bDone ? CampusAngular::Go : bToday ? FLinearColor::White : FLinearColor(1.f, 1.f, 1.f, 0.55f))
+						.AutoWrapText(true)
+						.Justification(ETextJustify::Center)
+					]
+				]
+			]
+		];
+	}
+
+	TSharedRef<SWidget> Body = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			Label(FText::Format(LOCTEXT("StreakLen", "{0} DAY STREAK  ·  BEST {1}"),
+				FText::AsNumber(Streak.CurrentLen), FText::AsNumber(Streak.BestLen)), 22, FLinearColor::White)
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 14.f)[Ladder]
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 10.f, 0.f, 0.f)
+		[
+			CampusStyle::StartButton(
+				Streak.bClaimable
+					? FText::FromString(FString::Printf(TEXT("CLAIM  %s"), *Streak.TodayReward.Describe()))
+					: LOCTEXT("StreakClaimed", "CLAIMED TODAY"),
+				FOnClicked::CreateLambda([this]()
+				{
+					UCampusBackend* Api2 = Backend();
+					if (!Api2 || bClaiming || !Api2->Engagement.Streak.bClaimable)
+					{
+						Show(EScreen::Lobby);
+						return FReply::Handled();
+					}
+					bClaiming = true;
+					Busy(TEXT("Claiming..."));
+					Api2->ClaimStreak([this](bool bOk, const FString& Error)
+					{
+						bClaiming = false;
+						bBusy = false;
+						if (bOk)
+						{
+							Toast(TEXT("Streak reward claimed!"));
+							RefreshEngagement();
+						}
+						else if (const UCampusBackend* A = Backend(); A && A->bRewardCapReached)
+						{
+							Toast(TEXT("You have hit today's reward limit. This is waiting for you tomorrow."));
+						}
+						else
+						{
+							Toast(Error);
+						}
+						// Back to the lobby either way: the popup must never trap the player.
+						Show(EScreen::Lobby);
+					});
+					return FReply::Handled();
+				}), FVector2D(460.f, 86.f))
+		]
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 10.f, 0.f, 0.f)
+		[
+			Button(LOCTEXT("StreakLater", "LATER"),
+				FOnClicked::CreateLambda([this]() { Show(EScreen::Lobby); return FReply::Handled(); }), EButton::Ghost, 18, FVector2D(220.f, 56.f))
+		];
+
+	return Dialog(LOCTEXT("StreakTitle", "DAILY LOGIN STREAK"), Body, 880.f, true, EScreen::Lobby);
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildAdultConfirm()
+{
+	TSharedRef<SWidget> Body = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("AdultBody",
+				"Campus Combat is for players aged 18 and over. Confirm your age to carry on playing. "
+				"We record only that you confirmed; we never ask for or store your date of birth."))
+			.Font(CampusAngular::Body(17)).ColorAndOpacity(FLinearColor::White).AutoWrapText(true)
+		]
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 26.f, 0.f, 0.f)
+		[
+			CampusStyle::StartButton(LOCTEXT("AdultYes", "I AM 18 OR OLDER"), FOnClicked::CreateLambda([this]()
+			{
+				if (UCampusBackend* Api = Backend())
+				{
+					Busy(TEXT("Confirming..."));
+					Api->ConfirmAdult([this](bool bOk, const FString& Error)
+					{
+						bBusy = false;
+						if (bOk)
+						{
+							// Whatever was refused a moment ago can be asked for again now.
+							RefreshEngagement();
+							Show(EScreen::Lobby);
+						}
+						else
+						{
+							Toast(Error);
+							Refresh();
+						}
+					});
+				}
+				return FReply::Handled();
+			}), FVector2D(460.f, 86.f))
+		]
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 12.f, 0.f, 0.f)
+		[
+			Button(LOCTEXT("AdultNo", "SIGN OUT"), FOnClicked::CreateLambda([this]()
+			{
+				if (UCampusBackend* Api = Backend()) { Api->SetAdultTick(false); Api->Logout(); }
+				if (UCampusGameInstance* Instance = Controller.IsValid() ? Controller->GetCampusInstance() : nullptr)
+				{
+					Instance->bSignedIn = false;
+				}
+				bAdultTicked = false;
+				Show(EScreen::LoginChoice);
+				return FReply::Handled();
+			}), EButton::Ghost, 18, FVector2D(220.f, 56.f))
+		];
+	// No close button: this one really is a gate.
+	return Dialog(LOCTEXT("AdultTitle", "AGE CONFIRMATION"), Body, 760.f, false, EScreen::AdultConfirm);
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildCollegePick()
+{
+	const UCampusBackend* Api = Backend();
+	TSharedRef<SVerticalBox> List = SNew(SVerticalBox);
+
+	// "No college" is a first-class choice, not an empty row.
+	auto Row = [this](const FString& Id, const FString& Name, const FString& City)
+	{
+		const bool bSelected = PickedCollegeId == Id;
+		return CampusStyle::Card(
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()[Label(FText::FromString(Name.ToUpper()), 19)]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Text(FText::FromString(City)).Font(CampusAngular::Body(13)).ColorAndOpacity(Muted)
+				]
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				CampusStyle::Pill(bSelected ? LOCTEXT("Picked", "PICKED") : LOCTEXT("Pick", "PICK"), bSelected,
+					FOnClicked::CreateLambda([this, Id]() { PickedCollegeId = Id; Refresh(); return FReply::Handled(); }),
+					FVector2D(132.f, 46.f))
+			],
+			bSelected);
+	};
+
+	List->AddSlot().AutoHeight().Padding(0.f, 3.f)[Row(FString(), TEXT("No college"), TEXT("Stay off the college boards"))];
+	if (Api)
+	{
+		for (const FCampusCollege& College : Api->Colleges)
+		{
+			List->AddSlot().AutoHeight().Padding(0.f, 3.f)[Row(College.Id, College.Name, College.City)];
+		}
+		if (Api->Colleges.Num() == 0)
+		{
+			List->AddSlot().AutoHeight().Padding(0.f, 16.f)
+			[
+				SNew(STextBlock).Text(LOCTEXT("NoColleges", "The college list could not be loaded. Try again in a moment."))
+				.Font(CampusAngular::Body(15)).ColorAndOpacity(Muted).AutoWrapText(true)
+			];
+		}
+	}
+
+	TSharedRef<SWidget> Body = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().FillHeight(1.f)[SNew(SScrollBox) + SScrollBox::Slot()[List]]
+		// Privacy toggle, default off: nothing about a player's college goes on a public board unasked.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 16.f, 0.f, 0.f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()[Label(LOCTEXT("ShowCollege", "SHOW MY COLLEGE ON LEADERBOARDS"), 18)]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Text(LOCTEXT("ShowCollegeHint", "Off by default. Your rank is the same either way."))
+					.Font(CampusAngular::Body(13)).ColorAndOpacity(Muted)
+				]
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				CampusStyle::Pill(bShowCollegeTick ? LOCTEXT("On2", "ON") : LOCTEXT("Off2", "OFF"), bShowCollegeTick,
+					FOnClicked::CreateLambda([this]() { bShowCollegeTick = !bShowCollegeTick; Refresh(); return FReply::Handled(); }),
+					FVector2D(110.f, 48.f))
+			]
+		]
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 18.f, 0.f, 0.f)
+		[
+			Button(LOCTEXT("SaveCollege", "SAVE"), FOnClicked::CreateLambda([this]()
+			{
+				if (UCampusBackend* Api2 = Backend())
+				{
+					Busy(TEXT("Saving..."));
+					Api2->SetCollege(PickedCollegeId, bShowCollegeTick, [this](bool bOk, const FString& Error)
+					{
+						Done(bOk, Error, [this]() { Toast(TEXT("College saved.")); Show(EScreen::Account); });
+					});
+				}
+				return FReply::Handled();
+			}), EButton::Go, 22, FVector2D(300.f, 68.f))
+		];
+
+	return Dialog(LOCTEXT("CollegeTitle", "YOUR COLLEGE"), Body, 820.f, true, EScreen::Account);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Store: text cards until there are icons.
+// Real money goes through Google Play where Play Billing is usable, and falls back to Razorpay
+// everywhere else. Play's own localized price string is the only price ever shown for a Play
+// product - never a rupee figure we worked out ourselves.
+
+UCampusPlayBilling* SCampusLobbyWidget::Billing() const
+{
+	UGameInstance* Instance = Controller.IsValid() ? Controller->GetGameInstance() : nullptr;
+	return Instance ? Instance->GetSubsystem<UCampusPlayBilling>() : nullptr;
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::MoneyButton(const FString& ItemId, const FString& ItemName, float PriceInr, FVector2D Size)
+{
+	const UCampusBackend* Api = Backend();
+	UCampusPlayBilling* Play = Billing();
+	const FString Product = Api ? Api->GooglePlayProductFor(ItemId) : FString();
+
+	if (Play && Play->IsAvailable() && !Product.IsEmpty())
+	{
+		// Play knows this product: use its price text, and keep the button out of action while a
+		// purchase is already in flight.
+		const FCampusPlayProduct* Known = Play->FindProduct(Product);
+		const FText Price = Known && !Known->PriceText.IsEmpty()
+			? FText::FromString(Known->PriceText)
+			: LOCTEXT("PlayPrice", "BUY");
+		const bool bEnabled = !Play->IsPurchasing();
+		return Button(Price, FOnClicked::CreateLambda([this, Product, ItemName]()
+		{
+			UCampusPlayBilling* Play2 = Billing();
+			if (!Play2 || Play2->IsPurchasing())
+			{
+				return FReply::Handled();
+			}
+			Busy(TEXT("Opening Google Play..."));
+			Play2->Purchase(Product, [this, ItemName](ECampusPurchaseResult Result, const FString& Error)
+			{
+				bBusy = false;
+				switch (Result)
+				{
+				case ECampusPurchaseResult::Credited:
+					// The backend credited the wallet as part of the verify; re-read it so the
+					// counters and the owned flags are right without guessing.
+					if (UCampusBackend* Api2 = Backend())
+					{
+						Api2->LoadStore([this, ItemName](bool, const FString&)
+						{
+							Toast(ItemName + TEXT(" is yours!"));
+							Refresh();
+						});
+					}
+					return;
+				case ECampusPurchaseResult::Pending:
+					Toast(TEXT("Payment in progress. It lands as soon as Google confirms it."));
+					break;
+				case ECampusPurchaseResult::Cancelled:
+					break;   // the player backed out; say nothing
+				case ECampusPurchaseResult::Unavailable:
+					Toast(TEXT("Google Play is not available on this device."));
+					break;
+				default:
+					Toast(Error.IsEmpty() ? TEXT("The payment did not go through.") : Error);
+					break;
+				}
+				Refresh();
+			});
+			return FReply::Handled();
+		}), EButton::Go, 16, Size, bEnabled);
+	}
+
+	// Razorpay fallback: unchanged behaviour.
+	return Button(FText::FromString(Money(PriceInr)), FOnClicked::CreateLambda([this, ItemId, ItemName]()
+	{
+		if (UCampusBackend* Api2 = Backend())
+		{
+			Busy(TEXT("Opening payment..."));
+			Api2->BuyWithMoney(ItemId, [this, ItemName](bool bOk, const FString& Error)
+			{
+				Done(bOk, Error, [this, ItemName]() { Toast(ItemName + TEXT(" is yours!")); });
+			});
+		}
+		return FReply::Handled();
+	}), EButton::Go, 16, Size);
+}
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildGunCard(int32 Index)
 {
@@ -1237,11 +2191,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildGunCard(int32 Index)
 		}
 		if (Gun.PriceInr > 0.f)
 		{
-			Actions->AddSlot().AutoWidth()
-			[
-				Button(FText::FromString(Money(Gun.PriceInr)), FOnClicked::CreateLambda(Act(
-					[Id](UCampusBackend* A, UCampusBackend::FDone D) { A->BuyWithMoney(Id, D); }, TEXT("Opening payment..."), Gun.Name + TEXT(" is yours!"))), EButton::Go, 16, FVector2D(110.f, 50.f))
-			];
+			Actions->AddSlot().AutoWidth()[MoneyButton(Id, Gun.Name, Gun.PriceInr, FVector2D(130.f, 50.f))];
 		}
 	}
 	else
@@ -1326,15 +2276,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildOfferCard(const FCampusOffer& Offer
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 8.f)[Perks]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
 				[
-					Button(FText::FromString(TEXT("BUY  ") + Money(Offer.PriceInr)), FOnClicked::CreateLambda([this, Id]()
-					{
-						if (UCampusBackend* Api = Backend())
-						{
-							Busy(TEXT("Opening payment..."));
-							Api->BuyWithMoney(Id, [this](bool bOk, const FString& Error) { Done(bOk, Error, [this]() { Toast(TEXT("Payment received! Added to your account.")); }); });
-						}
-						return FReply::Handled();
-					}), EButton::Go, 18, FVector2D(290.f, 56.f))
+					MoneyButton(Id, Offer.Name, Offer.PriceInr, FVector2D(290.f, 56.f))
 				]
 			]
 		];
@@ -1348,6 +2290,29 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStore()
 		return CampusStyle::Pill(Text, StoreTab == Which,
 			FOnClicked::CreateLambda([this, Which]() { StoreTab = Which; Refresh(); return FReply::Handled(); }), FVector2D(186.f, 52.f));
 	};
+
+	// Ask Play for its localized prices once per store visit, then redraw. Products Play has never
+	// heard of simply do not come back, which is why the button draws from FindProduct, not from
+	// the ids we asked for.
+	UCampusPlayBilling* Play = Billing();
+	if (Play && Play->IsAvailable() && Api && Play->GetProducts().Num() == 0)
+	{
+		TArray<FString> Wanted;
+		for (const FCampusOffer& Offer : Api->Offers) { Wanted.AddUnique(Api->GooglePlayProductFor(Offer.Id)); }
+		for (const FCampusOffer& Pack : Api->Packs) { Wanted.AddUnique(Api->GooglePlayProductFor(Pack.Id)); }
+		for (const FCampusGun& Gun : Api->Guns) { Wanted.AddUnique(Api->GooglePlayProductFor(Gun.Id)); }
+		Wanted.Remove(FString());
+		if (Wanted.Num() > 0)
+		{
+			Play->QueryProducts(Wanted, [this](bool bOk, const FString&, const TArray<FCampusPlayProduct>&)
+			{
+				if (bOk && Current == EScreen::Store)
+				{
+					Refresh();
+				}
+			});
+		}
+	}
 
 	TSharedRef<SScrollBox> Row = SNew(SScrollBox).Orientation(Orient_Horizontal);
 	if (Api)
@@ -1410,8 +2375,26 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStore()
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
 				[
-					Label(Api && Api->bPaymentsEnabled ? LOCTEXT("PayOn", "Pay with UPI or card (Razorpay).")
-						: LOCTEXT("PayOff", "Real-money payments switch on when Razorpay is connected. Diamond purchases work now."), 15, Muted, false)
+					Play && Play->IsAvailable()
+						? StaticCastSharedRef<SWidget>(Label(LOCTEXT("PayPlay", "Pay with Google Play."), 15, Muted, false))
+						: StaticCastSharedRef<SWidget>(Label(Api && Api->bPaymentsEnabled
+							? LOCTEXT("PayOn", "Pay with UPI or card (Razorpay).")
+							: LOCTEXT("PayOff", "Real-money payments switch on when Razorpay is connected. Diamond purchases work now."), 15, Muted, false))
+				]
+				// A UPI collect request Play is still waiting on: say so, so nobody buys twice.
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
+				[
+					Play && Play->GetPendingCount() > 0
+						? StaticCastSharedRef<SWidget>(SNew(SCampusAngularPanel)
+							.Shape(FCampusShape::Slanted(12.f))
+							.Fill(FLinearColor(0.35f, 0.26f, 0.02f, 0.9f))
+							.ContentPadding(FMargin(16.f, 7.f))
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("PayPending", "PAYMENT IN PROGRESS  ·  IT LANDS AS SOON AS GOOGLE CONFIRMS IT"))
+								.Font(CampusAngular::Display(14)).ColorAndOpacity(CardGold)
+							])
+						: SNullWidget::NullWidget
 				]
 				+ SVerticalBox::Slot().FillHeight(1.f).VAlign(VAlign_Center).Padding(0.f, 12.f, 0.f, 0.f)[Row]
 			]
@@ -1556,6 +2539,12 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildAccount()
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f)[Line(TEXT("Account"), bGuest ? TEXT("Guest (this phone only)") : Api->Email)]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f)[Line(TEXT("Roll no."), Api ? Api->RollNo : FString())]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f)[Line(TEXT("Branch / College"), Api ? FString::Printf(TEXT("%s  %s"), *Api->Branch, *Api->College) : FString())]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f)
+		[
+			Line(TEXT("Leaderboard college"), Api && !Api->CollegeId.IsEmpty()
+				? FString::Printf(TEXT("%s  ·  %s"), *Api->CollegeId, Api->bShowCollege ? TEXT("shown on boards") : TEXT("hidden on boards"))
+				: FString(TEXT("Not set")))
+		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 18.f, 0.f, 0.f)
 		[
 			SNew(SHorizontalBox)
@@ -1567,6 +2556,24 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildAccount()
 					Show(EScreen::Nickname);
 					return FReply::Handled();
 				}), EButton::Dark, 18, FVector2D(220.f, 56.f))
+			]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 8.f, 0.f)
+			[
+				Button(LOCTEXT("PickCollege", "COLLEGE"), FOnClicked::CreateLambda([this]()
+				{
+					if (UCampusBackend* A = Backend())
+					{
+						// Seed the picker from what the server currently holds, then fetch the list.
+						PickedCollegeId = A->CollegeId;
+						bShowCollegeTick = A->bShowCollege;
+						Busy(TEXT("Loading colleges..."));
+						A->LoadColleges([this](bool bOk, const FString& Error)
+						{
+							Done(bOk, Error, [this]() { Show(EScreen::CollegePick); });
+						});
+					}
+					return FReply::Handled();
+				}), EButton::Dark, 18, FVector2D(190.f, 56.f))
 			]
 			+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 8.f, 0.f)
 			[

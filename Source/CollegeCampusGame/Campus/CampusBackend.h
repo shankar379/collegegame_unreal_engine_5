@@ -71,6 +71,153 @@ struct FCampusMatchResult
 	bool bWon = false;
 };
 
+/** A college from the curated list (GET /colleges). One college = one leaderboard. */
+struct FCampusCollege
+{
+	FString Id;
+	FString Name;
+	FString City;
+};
+
+// -------------------------------------------------------------------------------------------------
+// Engagement (GET /engagement/home): streak + missions + weekend board, one round trip on lobby entry.
+// Every reward in the API is an open object {diamonds?, room_cards?, title?}; this is the whole of it.
+
+struct FCampusReward
+{
+	int32 Diamonds = 0;
+	int32 RoomCards = 0;
+	bool bTitle = false;
+
+	bool IsEmpty() const { return Diamonds == 0 && RoomCards == 0 && !bTitle; }
+	/** "50 DIAMONDS + 1 CARD" - already uppercase for the display face. */
+	FString Describe() const;
+};
+
+struct FCampusMission
+{
+	FString Id;
+	FString Title;
+	FString Subtitle;
+	/** claimable | in_progress | claimed | expired */
+	FString State;
+	int32 Progress = 0;
+	int32 Target = 1;
+	FCampusReward Reward;
+
+	bool IsClaimable() const { return State == TEXT("claimable"); }
+	float Fraction() const { return Target > 0 ? FMath::Clamp(float(Progress) / float(Target), 0.f, 1.f) : 0.f; }
+};
+
+/** One of the DAILY / WEEKLY / WEEKEND panels. */
+struct FCampusMissionPanel
+{
+	bool bValid = false;
+	FString PeriodId;
+	FDateTime EndsAt = FDateTime();
+	TArray<FCampusMission> Items;
+	/** The "N of M" set bonus, when the period has one. */
+	bool bHasBonus = false;
+	int32 BonusNeed = 0;
+	int32 BonusDone = 0;
+	FString BonusState;
+	FCampusReward BonusReward;
+
+	/** Missions ready to claim right now - the number on the menu tab's dot. */
+	int32 ClaimableCount() const;
+};
+
+struct FCampusStreakStep
+{
+	int32 Day = 0;
+	FCampusReward Reward;
+	/** claimed | claimable | locked */
+	FString State;
+};
+
+struct FCampusStreak
+{
+	int32 CurrentLen = 0;
+	int32 BestLen = 0;
+	int32 CycleDay = 0;
+	bool bClaimable = false;
+	FCampusReward TodayReward;
+	TArray<FCampusStreakStep> Ladder;
+	FDateTime ResetsAt = FDateTime();
+};
+
+struct FCampusBoardEntry
+{
+	int32 Rank = 0;
+	FString Name;
+	FString College;
+	int32 Points = 0;
+	int32 Kills = 0;
+	bool bMe = false;
+};
+
+/** The weekend board panel: the live board during a weekend, the upcoming one mid-week. */
+struct FCampusWeekend
+{
+	bool bValid = false;
+	FString PeriodId;
+	FString Label;
+	/** upcoming | live | ended | settled */
+	FString State;
+	FDateTime StartsAt = FDateTime();
+	FDateTime EndsAt = FDateTime();
+	/** True until the weekend settles: the board MUST say so (eventual consistency + anti-cheat hold). */
+	bool bProvisional = false;
+	bool bDegraded = false;
+	TArray<FCampusBoardEntry> Top;
+
+	/** null in the API when the player has not played a rated match this weekend. */
+	bool bHasMe = false;
+	int32 MyRank = 0;
+	int32 MyPoints = 0;
+	int32 MyRatedMatches = 0;
+	bool bHasNextRank = false;
+	int32 NextRank = 0;
+	int32 NextGap = 0;
+	FString ProjectedBracket;
+
+	bool IsUpcoming() const { return State == TEXT("upcoming"); }
+};
+
+struct FCampusLastWeekend
+{
+	bool bValid = false;
+	FString PeriodId;
+	FString ChampionName;
+	int32 MyRank = 0;
+	bool bUnclaimed = false;
+	FString Bracket;
+	FCampusReward Reward;
+};
+
+struct FCampusEngagement
+{
+	bool bLoaded = false;
+	/** Every countdown is measured from the server clock, never from the phone's. */
+	FDateTime ServerTime = FDateTime();
+	/** FPlatformTime::Seconds() when ServerTime was read, so the clock can run on locally. */
+	double ReadAt = 0.0;
+	bool bDailyCardAvailable = false;
+
+	FCampusStreak Streak;
+	FCampusMissionPanel Daily;
+	FCampusMissionPanel Weekly;
+	FCampusMissionPanel WeekendMissions;
+	FCampusWeekend Board;
+	FCampusLastWeekend LastWeekend;
+
+	/** Server "now", advanced by the time since the response landed. */
+	FDateTime Now() const;
+	/** Seconds until When by the server clock; 0 once it has passed. */
+	int32 SecondsUntil(const FDateTime& When) const;
+	int32 TotalClaimable() const;
+};
+
 UCLASS()
 class UCampusBackend : public UGameInstanceSubsystem
 {
@@ -100,10 +247,34 @@ public:
 	void Login(const FString& Email, const FString& Password, FDone Done);
 	void Logout();
 
+	// ---- 18+ gate (migration 009). The game is 18 and over only; we store no date of birth, only the tick.
+	/** The "I am 18 or older" tick from the sign-in screen. Remembered locally, and sent with every sign-in. */
+	bool HasAdultTick() const;
+	void SetAdultTick(bool bTicked);
+	/** True once a protected route answered 403 AGE_CONFIRM_REQUIRED and we could not settle it ourselves:
+	 *  the lobby shows its one-time confirm dialog. Cleared by ConfirmAdult(). */
+	bool NeedsAdultConfirm() const { return bAgeConfirmRequired; }
+	/** POST /me/confirm-adult. The one route an unconfirmed account may call. */
+	void ConfirmAdult(FDone Done);
+
 	// ---- profile + wallet
 	void LoadMe(FDone Done);
 	void UpdateProfile(const FString& Name, const FString& RollNo, const FString& Branch, const FString& College, FDone Done);
+	/** The curated college list and the board-privacy toggle (PATCH /me {college_id, show_college}). */
+	void LoadColleges(FDone Done);
+	void SetCollege(const FString& CollegeId, bool bShow, FDone Done);
 	void ClaimDailyCard(FDone Done);
+
+	// ---- engagement (streak, missions, weekend board)
+	/** GET /engagement/home: one call on lobby entry. The response is cached in the save so the next launch
+	 *  paints instantly; Done fires again with the fresh copy. */
+	void LoadEngagementHome(FDone Done);
+	/** Re-reads the cached response from the save, for an instant first paint. Safe before any network call. */
+	void LoadEngagementFromCache();
+	void ClaimMission(const FString& PeriodId, const FString& MissionId, FDone Done);
+	void ClaimStreak(FDone Done);
+	/** A settled weekend's reward (last_weekend.unclaimed_reward). */
+	void ClaimPeriodReward(const FString& PeriodId, FDone Done);
 
 	// ---- store
 	void LoadStore(FDone Done);
@@ -148,10 +319,22 @@ public:
 	TArray<FCampusOffer> Packs;
 	FString EquippedGun;
 	bool bPaymentsEnabled = false;
+	/** The curated college list, loaded on demand by the profile screen. */
+	TArray<FCampusCollege> Colleges;
+	FString CollegeId;
+	bool bShowCollege = false;
+	/** The server says this account has confirmed 18+. */
+	bool bAdultConfirmed = false;
+	/** Streak, missions and the weekend board. Valid once bLoaded; painted from cache before that. */
+	FCampusEngagement Engagement;
 	/** Last error worth showing (e.g. "Could not reach the server"). */
 	FString LastError;
+	/** Set when the last claim was refused by the daily reward cap (429), so the UI can say so kindly. */
+	bool bRewardCapReached = false;
 
 	const FCampusGun* FindGun(const FString& Id) const;
+	/** The Play Console product id for a catalogue item, empty when it is not sold through Play. */
+	FString GooglePlayProductFor(const FString& ItemId) const;
 
 private:
 	using FResponse = TFunction<void(int32 Status, TSharedPtr<FJsonObject> Json)>;
@@ -165,6 +348,9 @@ private:
 	void ReadWallet(TSharedPtr<FJsonObject> Wallet);
 	void ReadStore(TSharedPtr<FJsonObject> Json);
 	static FString ErrorText(int32 Status, TSharedPtr<FJsonObject> Json);
+	/** Adds adultConfirmed:true to a sign-in body when the player has ticked the 18+ box. */
+	void AddAdultTick(TSharedPtr<FJsonObject> Body) const;
+	void ReadEngagement(TSharedPtr<FJsonObject> Json);
 	FString ApiBase() const;
 	bool HeartbeatTick(float DeltaTime);
 	bool PaymentPollTick(float DeltaTime);
@@ -180,6 +366,13 @@ private:
 	int32 PendingOrderPolls = 0;
 	FDone PendingOrderDone;
 	FTSTicker::FDelegateHandle PaymentPollHandle;
+
+	/** Set by Send() when a protected route answered 403 AGE_CONFIRM_REQUIRED and the local tick was absent. */
+	bool bAgeConfirmRequired = false;
+	/** One self-healing confirm per app run: stops a confirm/retry loop if the server keeps refusing. */
+	bool bAdultRetryUsed = false;
+	/** Play Console product id per catalogue item id, from GET /store. */
+	TMap<FString, FString> GoogleProducts;
 
 	FString AccessToken;
 	FCampusRoom HostedRoom;

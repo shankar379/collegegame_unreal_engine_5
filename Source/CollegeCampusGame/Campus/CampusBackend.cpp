@@ -91,6 +91,24 @@ namespace
 		return Json.IsValid() && Json->TryGetObjectField(Field, Out) ? *Out : nullptr;
 	}
 
+	/** An ISO-8601 instant from the API. Returns a zero date when the field is missing or unparseable. */
+	FDateTime Stamp(const TSharedPtr<FJsonObject>& Json, const TCHAR* Field)
+	{
+		FDateTime Out;
+		const FString Text = Str(Json, Field);
+		return !Text.IsEmpty() && FDateTime::ParseIso8601(*Text, Out) ? Out : FDateTime();
+	}
+
+	/** Every reward in the engagement API is the same open shape: {diamonds?, room_cards?, title?}. */
+	FCampusReward ReadReward(const TSharedPtr<FJsonObject>& Json)
+	{
+		FCampusReward Out;
+		Out.Diamonds = int32(Num(Json, TEXT("diamonds")));
+		Out.RoomCards = int32(Num(Json, TEXT("room_cards")));
+		Out.bTitle = Bool(Json, TEXT("title"));
+		return Out;
+	}
+
 	TArray<FString> Strings(const TSharedPtr<FJsonObject>& Json, const TCHAR* Field)
 	{
 		TArray<FString> Out;
@@ -159,6 +177,65 @@ FString UCampusBackend::ErrorText(int32 Status, TSharedPtr<FJsonObject> Json)
 
 // ---------------------------------------------------------------------------------------------
 // HTTP
+
+// -------------------------------------------------------------------------------------------------
+// Engagement value types
+
+FString FCampusReward::Describe() const
+{
+	TArray<FString> Parts;
+	if (Diamonds > 0)
+	{
+		Parts.Add(FString::Printf(TEXT("%d DIAMONDS"), Diamonds));
+	}
+	if (RoomCards > 0)
+	{
+		Parts.Add(FString::Printf(TEXT("%d ROOM CARD%s"), RoomCards, RoomCards == 1 ? TEXT("") : TEXT("S")));
+	}
+	if (bTitle)
+	{
+		Parts.Add(TEXT("A TITLE"));
+	}
+	return Parts.Num() ? FString::Join(Parts, TEXT(" + ")) : FString();
+}
+
+int32 FCampusMissionPanel::ClaimableCount() const
+{
+	int32 Count = 0;
+	for (const FCampusMission& Item : Items)
+	{
+		Count += Item.IsClaimable() ? 1 : 0;
+	}
+	// the set bonus is one more thing to tap
+	Count += bHasBonus && BonusState == TEXT("claimable") ? 1 : 0;
+	return Count;
+}
+
+FDateTime FCampusEngagement::Now() const
+{
+	if (ServerTime == FDateTime())
+	{
+		return FDateTime::UtcNow();
+	}
+	// The phone's wall clock is never trusted for a countdown (players change it); only the elapsed
+	// time since the response landed is taken from the device.
+	const double Elapsed = FMath::Max(0.0, FPlatformTime::Seconds() - ReadAt);
+	return ServerTime + FTimespan::FromSeconds(Elapsed);
+}
+
+int32 FCampusEngagement::SecondsUntil(const FDateTime& When) const
+{
+	if (When == FDateTime())
+	{
+		return 0;
+	}
+	return FMath::Max(0, int32((When - Now()).GetTotalSeconds()));
+}
+
+int32 FCampusEngagement::TotalClaimable() const
+{
+	return Daily.ClaimableCount() + Weekly.ClaimableCount() + WeekendMissions.ClaimableCount();
+}
 
 void UCampusBackend::Request(const FString& Verb, const FString& Path, TSharedPtr<FJsonObject> Body, bool bAuth, bool bIdempotent, FResponse OnResponse, bool bRetried)
 {
@@ -229,6 +306,34 @@ void UCampusBackend::Send(const FString& Verb, const FString& Path, const FStrin
 				});
 				return;
 			}
+			// 18+ gate: an account that pre-dates the rule gets 403 on every protected route until it
+			// confirms. If the player has already ticked "I am 18 or older" on this phone, settle it
+			// here and replay the same call with the same idempotency key - the retry is as safe as
+			// the token refresh above. Otherwise raise the flag and let the lobby ask.
+			if (Status == 403 && bAuth && !bRetried && Code == TEXT("AGE_CONFIRM_REQUIRED"))
+			{
+				if (Self->HasAdultTick() && !Self->bAdultRetryUsed)
+				{
+					Self->bAdultRetryUsed = true;
+					Self->ConfirmAdult([WeakThis, Verb, Path, BodyText, bAuth, IdempotencyKey, OnResponse](bool bOk, const FString&)
+					{
+						if (UCampusBackend* Again = WeakThis.Get())
+						{
+							if (bOk)
+							{
+								Again->Send(Verb, Path, BodyText, bAuth, IdempotencyKey, OnResponse, true);
+							}
+							else
+							{
+								Again->bAgeConfirmRequired = true;
+								OnResponse(403, nullptr);
+							}
+						}
+					});
+					return;
+				}
+				Self->bAgeConfirmRequired = true;
+			}
 			if (Status == 0)
 			{
 				Self->LastError = ErrorText(0, nullptr);
@@ -295,7 +400,15 @@ void UCampusBackend::ReadPlayer(TSharedPtr<FJsonObject> Player)
 	RollNo = Str(Player, TEXT("roll_no"));
 	Branch = Str(Player, TEXT("branch"));
 	College = Str(Player, TEXT("college"));
+	CollegeId = Str(Player, TEXT("college_id"));
+	bShowCollege = Bool(Player, TEXT("show_college"));
 	bGuest = Bool(Player, TEXT("guest"));
+	bAdultConfirmed = Bool(Player, TEXT("adult_confirmed"));
+	if (bAdultConfirmed)
+	{
+		// the server agrees this account is confirmed: no dialog is owed
+		bAgeConfirmRequired = false;
+	}
 	if (UCampusSave* Profile = Save())
 	{
 		Profile->PlayerName = PlayerName;
@@ -367,6 +480,7 @@ void UCampusBackend::Register(const FString& InEmail, const FString& Password, c
 	Body->SetStringField(TEXT("password"), Password);
 	Body->SetStringField(TEXT("display_name"), Name.TrimStartAndEnd());
 	Body->SetStringField(TEXT("platform"), PlatformName());
+	AddAdultTick(Body);
 	// signed in as a guest: the bearer makes the server upgrade that guest instead of starting over
 	Request(TEXT("POST"), TEXT("/auth/register"), Body, IsSignedIn(), false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
 	{
@@ -386,6 +500,7 @@ void UCampusBackend::Login(const FString& InEmail, const FString& Password, FDon
 	Body->SetStringField(TEXT("email"), InEmail.TrimStartAndEnd());
 	Body->SetStringField(TEXT("password"), Password);
 	Body->SetStringField(TEXT("platform"), PlatformName());
+	AddAdultTick(Body);
 	Request(TEXT("POST"), TEXT("/auth/login"), Body, false, false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
 	{
 		if (Status != 200)
@@ -418,6 +533,367 @@ void UCampusBackend::Logout()
 
 // ---------------------------------------------------------------------------------------------
 // Profile, wallet
+
+// -------------------------------------------------------------------------------------------------
+// 18+ gate. We store the tick, never a date of birth or an age band.
+
+bool UCampusBackend::HasAdultTick() const
+{
+	const UCampusSave* Profile = Save();
+	return Profile && Profile->bAdultConfirmed;
+}
+
+void UCampusBackend::SetAdultTick(bool bTicked)
+{
+	if (UCampusSave* Profile = Save(); Profile && Profile->bAdultConfirmed != bTicked)
+	{
+		Profile->bAdultConfirmed = bTicked;
+		Profile->Persist();
+	}
+}
+
+void UCampusBackend::AddAdultTick(TSharedPtr<FJsonObject> Body) const
+{
+	// Sent as camelCase, which is the spelling the API documents for the game client.
+	if (Body.IsValid() && HasAdultTick())
+	{
+		Body->SetBoolField(TEXT("adultConfirmed"), true);
+	}
+}
+
+void UCampusBackend::ConfirmAdult(FDone Done)
+{
+	SetAdultTick(true);
+	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
+	Body->SetBoolField(TEXT("adultConfirmed"), true);
+	Request(TEXT("POST"), TEXT("/me/confirm-adult"), Body, true, false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		if (Status != 200)
+		{
+			Done(false, ErrorText(Status, Json));
+			return;
+		}
+		bAgeConfirmRequired = false;
+		bAdultConfirmed = true;
+		ReadPlayer(Obj(Json, TEXT("player")));
+		Done(true, FString());
+	});
+}
+
+// -------------------------------------------------------------------------------------------------
+// Colleges (one college = one leaderboard) and the board-privacy toggle
+
+void UCampusBackend::LoadColleges(FDone Done)
+{
+	Request(TEXT("GET"), TEXT("/colleges"), nullptr, false, false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		if (Status != 200)
+		{
+			Done(false, ErrorText(Status, Json));
+			return;
+		}
+		Colleges.Reset();
+		const TArray<TSharedPtr<FJsonValue>>* List = nullptr;
+		if (Json.IsValid() && Json->TryGetArrayField(TEXT("colleges"), List))
+		{
+			Colleges.Reserve(List->Num());
+			for (const TSharedPtr<FJsonValue>& Value : *List)
+			{
+				const TSharedPtr<FJsonObject> Item = Value->AsObject();
+				FCampusCollege& College = Colleges.AddDefaulted_GetRef();
+				College.Id = Str(Item, TEXT("id"));
+				College.Name = Str(Item, TEXT("name"));
+				College.City = Str(Item, TEXT("city"));
+			}
+		}
+		Done(true, FString());
+	});
+}
+
+void UCampusBackend::SetCollege(const FString& InCollegeId, bool bShow, FDone Done)
+{
+	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
+	if (InCollegeId.IsEmpty())
+	{
+		Body->SetField(TEXT("college_id"), MakeShared<FJsonValueNull>());
+	}
+	else
+	{
+		Body->SetStringField(TEXT("college_id"), InCollegeId);
+	}
+	Body->SetBoolField(TEXT("show_college"), bShow);
+	Request(TEXT("PATCH"), TEXT("/me"), Body, true, true, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		if (Status != 200)
+		{
+			Done(false, ErrorText(Status, Json));
+			return;
+		}
+		ReadPlayer(Obj(Json, TEXT("player")));
+		ReadWallet(Obj(Json, TEXT("wallet")));
+		Done(true, FString());
+	});
+}
+
+// -------------------------------------------------------------------------------------------------
+// Engagement: streak, missions, weekend board
+
+void UCampusBackend::ReadEngagement(TSharedPtr<FJsonObject> Json)
+{
+	if (!Json.IsValid())
+	{
+		return;
+	}
+	FCampusEngagement& Out = Engagement;
+	Out.bLoaded = true;
+	Out.ServerTime = Stamp(Json, TEXT("server_time"));
+	Out.ReadAt = FPlatformTime::Seconds();
+	Out.bDailyCardAvailable = Bool(Json, TEXT("daily_card_available"));
+	bDailyCardAvailable = Out.bDailyCardAvailable;
+
+	// ---- streak
+	const TSharedPtr<FJsonObject> Streak = Obj(Json, TEXT("streak"));
+	Out.Streak = FCampusStreak();
+	if (Streak.IsValid())
+	{
+		Out.Streak.CurrentLen = int32(Num(Streak, TEXT("current_len")));
+		Out.Streak.BestLen = int32(Num(Streak, TEXT("best_len")));
+		Out.Streak.CycleDay = int32(Num(Streak, TEXT("cycle_day")));
+		Out.Streak.bClaimable = Bool(Streak, TEXT("claimable"));
+		Out.Streak.TodayReward = ReadReward(Obj(Streak, TEXT("today_reward")));
+		Out.Streak.ResetsAt = Stamp(Streak, TEXT("resets_at"));
+		const TArray<TSharedPtr<FJsonValue>>* Ladder = nullptr;
+		if (Streak->TryGetArrayField(TEXT("ladder"), Ladder))
+		{
+			for (const TSharedPtr<FJsonValue>& Value : *Ladder)
+			{
+				const TSharedPtr<FJsonObject> Item = Value->AsObject();
+				FCampusStreakStep& Step = Out.Streak.Ladder.AddDefaulted_GetRef();
+				Step.Day = int32(Num(Item, TEXT("day")));
+				Step.Reward = ReadReward(Obj(Item, TEXT("reward")));
+				Step.State = Str(Item, TEXT("state"));
+			}
+		}
+	}
+
+	// ---- missions: the same shape three times
+	auto ReadPanel = [](const TSharedPtr<FJsonObject>& Panel)
+	{
+		FCampusMissionPanel Out2;
+		if (!Panel.IsValid())
+		{
+			return Out2;
+		}
+		Out2.bValid = true;
+		Out2.PeriodId = Str(Panel, TEXT("period_id"));
+		Out2.EndsAt = Stamp(Panel, TEXT("ends_at"));
+		const TSharedPtr<FJsonObject> Bonus = Obj(Panel, TEXT("bonus"));
+		if (Bonus.IsValid())
+		{
+			Out2.bHasBonus = true;
+			Out2.BonusNeed = int32(Num(Bonus, TEXT("need")));
+			Out2.BonusDone = int32(Num(Bonus, TEXT("done")));
+			Out2.BonusState = Str(Bonus, TEXT("state"));
+			Out2.BonusReward = ReadReward(Obj(Bonus, TEXT("reward")));
+		}
+		const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
+		if (Panel->TryGetArrayField(TEXT("items"), Items))
+		{
+			Out2.Items.Reserve(Items->Num());
+			for (const TSharedPtr<FJsonValue>& Value : *Items)
+			{
+				const TSharedPtr<FJsonObject> Item = Value->AsObject();
+				FCampusMission& Mission = Out2.Items.AddDefaulted_GetRef();
+				Mission.Id = Str(Item, TEXT("mission_id"));
+				Mission.Title = Str(Item, TEXT("title"));
+				Mission.Subtitle = Str(Item, TEXT("subtitle"));
+				Mission.State = Str(Item, TEXT("state"));
+				Mission.Progress = int32(Num(Item, TEXT("progress")));
+				Mission.Target = FMath::Max(1, int32(Num(Item, TEXT("target"))));
+				Mission.Reward = ReadReward(Obj(Item, TEXT("reward")));
+			}
+		}
+		// The API already sorts claimable first; keep that order rather than re-sorting it here.
+		return Out2;
+	};
+	const TSharedPtr<FJsonObject> Missions = Obj(Json, TEXT("missions"));
+	Out.Daily = ReadPanel(Obj(Missions, TEXT("daily")));
+	Out.Weekly = ReadPanel(Obj(Missions, TEXT("weekly")));
+	Out.WeekendMissions = ReadPanel(Obj(Missions, TEXT("weekend")));
+
+	// ---- weekend board
+	Out.Board = FCampusWeekend();
+	if (const TSharedPtr<FJsonObject> Weekend = Obj(Json, TEXT("weekend")); Weekend.IsValid())
+	{
+		FCampusWeekend& Board = Out.Board;
+		Board.bValid = true;
+		Board.PeriodId = Str(Weekend, TEXT("period_id"));
+		Board.Label = Str(Weekend, TEXT("label"));
+		Board.State = Str(Weekend, TEXT("state"));
+		Board.StartsAt = Stamp(Weekend, TEXT("starts_at"));
+		Board.EndsAt = Stamp(Weekend, TEXT("ends_at"));
+		// Anything short of 'settled' is provisional, and the board must say so.
+		Board.bProvisional = Board.State != TEXT("settled");
+		Board.bDegraded = Bool(Weekend, TEXT("degraded"));
+		const TArray<TSharedPtr<FJsonValue>>* Top = nullptr;
+		if (Weekend->TryGetArrayField(TEXT("top"), Top))
+		{
+			for (const TSharedPtr<FJsonValue>& Value : *Top)
+			{
+				const TSharedPtr<FJsonObject> Item = Value->AsObject();
+				FCampusBoardEntry& Entry = Board.Top.AddDefaulted_GetRef();
+				Entry.Rank = int32(Num(Item, TEXT("rank")));
+				Entry.Name = Str(Item, TEXT("display_name"));
+				Entry.College = Str(Item, TEXT("college"));
+				Entry.Points = int32(Num(Item, TEXT("points")));
+				Entry.Kills = int32(Num(Item, TEXT("kills")));
+				Entry.bMe = Bool(Item, TEXT("is_me"));
+			}
+		}
+		// me is null until the player has played a rated match this weekend: that is the empty state.
+		if (const TSharedPtr<FJsonObject> Me = Obj(Weekend, TEXT("me")); Me.IsValid())
+		{
+			Board.bHasMe = true;
+			Board.MyRank = int32(Num(Me, TEXT("rank")));
+			Board.MyPoints = int32(Num(Me, TEXT("points")));
+			Board.MyRatedMatches = int32(Num(Me, TEXT("rated_matches")));
+			Board.ProjectedBracket = Str(Me, TEXT("projected_reward"));
+			if (const TSharedPtr<FJsonObject> Next = Obj(Me, TEXT("next_rank")); Next.IsValid())
+			{
+				Board.bHasNextRank = true;
+				Board.NextRank = int32(Num(Next, TEXT("rank")));
+				Board.NextGap = int32(Num(Next, TEXT("gap")));
+			}
+			// projected_reward may arrive as an object with a bracket rather than a bare string
+			if (Board.ProjectedBracket.IsEmpty())
+			{
+				Board.ProjectedBracket = Str(Obj(Me, TEXT("projected_reward")), TEXT("bracket"));
+			}
+		}
+	}
+
+	// ---- last weekend's champion card and unclaimed reward
+	Out.LastWeekend = FCampusLastWeekend();
+	if (const TSharedPtr<FJsonObject> Last = Obj(Json, TEXT("last_weekend")); Last.IsValid())
+	{
+		FCampusLastWeekend& Prev = Out.LastWeekend;
+		Prev.bValid = true;
+		Prev.PeriodId = Str(Last, TEXT("period_id"));
+		Prev.ChampionName = Str(Obj(Last, TEXT("champion")), TEXT("display_name"));
+		Prev.MyRank = int32(Num(Last, TEXT("my_rank")));
+		if (const TSharedPtr<FJsonObject> Unclaimed = Obj(Last, TEXT("unclaimed_reward")); Unclaimed.IsValid())
+		{
+			Prev.bUnclaimed = true;
+			Prev.Bracket = Str(Unclaimed, TEXT("bracket"));
+			Prev.Reward = ReadReward(Unclaimed);
+		}
+	}
+}
+
+void UCampusBackend::LoadEngagementFromCache()
+{
+	const UCampusSave* Profile = Save();
+	if (Engagement.bLoaded || !Profile || Profile->EngagementCache.IsEmpty())
+	{
+		return;
+	}
+	TSharedPtr<FJsonObject> Json;
+	if (FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Profile->EngagementCache), Json))
+	{
+		ReadEngagement(Json);
+		// A cached response is a stale snapshot: its countdowns must keep running from the server
+		// time it carried, which ReadEngagement already anchors against. Nothing else to do.
+	}
+}
+
+void UCampusBackend::LoadEngagementHome(FDone Done)
+{
+	Request(TEXT("GET"), TEXT("/engagement/home"), nullptr, true, false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		if (Status != 200)
+		{
+			Done(false, ErrorText(Status, Json));
+			return;
+		}
+		ReadEngagement(Json);
+		// Cache the raw body so the next launch paints the lobby before the network answers.
+		if (UCampusSave* Profile = Save(); Profile && Json.IsValid())
+		{
+			FString Text;
+			const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Text);
+			if (FJsonSerializer::Serialize(Json.ToSharedRef(), Writer))
+			{
+				Profile->EngagementCache = Text;
+				Profile->Persist();
+			}
+		}
+		Done(true, FString());
+	});
+}
+
+/** Every claim answers with the new wallet; taking it from the response is what keeps the counters honest. */
+void UCampusBackend::ClaimMission(const FString& PeriodId, const FString& MissionId, FDone Done)
+{
+	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
+	Body->SetStringField(TEXT("period_id"), PeriodId);
+	bRewardCapReached = false;
+	Request(TEXT("POST"), FString::Printf(TEXT("/missions/%s/claim"), *MissionId), Body, true, true,
+		[this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+		{
+			if (Status != 200)
+			{
+				bRewardCapReached = Status == 429 && Str(Obj(Json, TEXT("error")), TEXT("code")) == TEXT("DAILY_REWARD_CAP");
+				Done(false, ErrorText(Status, Json));
+				return;
+			}
+			ReadWallet(Obj(Json, TEXT("wallet")));
+			Done(true, FString());
+		});
+}
+
+void UCampusBackend::ClaimStreak(FDone Done)
+{
+	bRewardCapReached = false;
+	Request(TEXT("POST"), TEXT("/me/streak/claim"), nullptr, true, true, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		if (Status != 200)
+		{
+			bRewardCapReached = Status == 429 && Str(Obj(Json, TEXT("error")), TEXT("code")) == TEXT("DAILY_REWARD_CAP");
+			Done(false, ErrorText(Status, Json));
+			return;
+		}
+		ReadWallet(Obj(Json, TEXT("wallet")));
+		// Claimed: the popup must not reappear until the ladder next advances.
+		Engagement.Streak.bClaimable = false;
+		Engagement.Streak.CurrentLen = int32(Num(Json, TEXT("current_len")));
+		Engagement.Streak.BestLen = int32(Num(Json, TEXT("best_len")));
+		Done(true, FString());
+	});
+}
+
+void UCampusBackend::ClaimPeriodReward(const FString& PeriodId, FDone Done)
+{
+	bRewardCapReached = false;
+	Request(TEXT("POST"), FString::Printf(TEXT("/rewards/%s/claim"), *PeriodId), nullptr, true, true,
+		[this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+		{
+			if (Status != 200)
+			{
+				bRewardCapReached = Status == 429 && Str(Obj(Json, TEXT("error")), TEXT("code")) == TEXT("DAILY_REWARD_CAP");
+				Done(false, ErrorText(Status, Json));
+				return;
+			}
+			ReadWallet(Obj(Json, TEXT("wallet")));
+			Engagement.LastWeekend.bUnclaimed = false;
+			Done(true, FString());
+		});
+}
+
+FString UCampusBackend::GooglePlayProductFor(const FString& ItemId) const
+{
+	const FString* Found = GoogleProducts.Find(ItemId);
+	return Found ? *Found : FString();
+}
 
 void UCampusBackend::LoadMe(FDone Done)
 {
@@ -502,6 +978,20 @@ void UCampusBackend::ReadStore(TSharedPtr<FJsonObject> Json)
 	Guns.Reset();
 	Offers.Reset();
 	Packs.Reset();
+	GoogleProducts.Reset();
+	// Play Console id per catalogue item; the store uses it to price and buy through Google Play.
+	auto NoteGoogleId = [this](const TSharedPtr<FJsonObject>& Item, const FString& Id)
+	{
+		FString Product = Str(Item, TEXT("google_product_id"));
+		if (Product.IsEmpty())
+		{
+			Product = Str(Item, TEXT("googleProductId"));
+		}
+		if (!Product.IsEmpty() && !Id.IsEmpty())
+		{
+			GoogleProducts.Add(Id, Product);
+		}
+	};
 	const TArray<TSharedPtr<FJsonValue>>* List = nullptr;
 	if (Json->TryGetArrayField(TEXT("guns"), List))
 	{
@@ -527,6 +1017,7 @@ void UCampusBackend::ReadStore(TSharedPtr<FJsonObject> Json)
 			Gun.FireRate = float(Num(Stats, TEXT("fire_rate")));
 			Gun.Accuracy = float(Num(Stats, TEXT("accuracy")));
 			Gun.Magazine = int32(Num(Stats, TEXT("mag")));
+			NoteGoogleId(Item, Gun.Id);
 		}
 	}
 	for (const TCHAR* Field : { TEXT("offers"), TEXT("packs") })
@@ -543,6 +1034,7 @@ void UCampusBackend::ReadStore(TSharedPtr<FJsonObject> Json)
 				Offer.Badge = Str(Item, TEXT("badge"));
 				Offer.Perks = Strings(Item, TEXT("perks"));
 				Offer.PriceInr = float(Num(Item, TEXT("price_inr")));
+				NoteGoogleId(Item, Offer.Id);
 			}
 		}
 	}

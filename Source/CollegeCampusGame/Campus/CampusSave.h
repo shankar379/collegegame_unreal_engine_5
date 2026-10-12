@@ -118,4 +118,18 @@ public:
 
 	UPROPERTY()
 	bool bShowMinimap = true;
+
+	// ---- 18+ gate and engagement (streak / missions / weekend board)
+
+	/** The "I am 18 or older" tick. Sent with every sign-in; the server stores the confirmation, not an age. */
+	UPROPERTY()
+	bool bAdultConfirmed = false;
+
+	/** The last GET /engagement/home body, so the lobby paints before the network answers. */
+	UPROPERTY()
+	FString EngagementCache;
+
+	/** IST game day (YYYYMMDD) the streak popup was last shown, so it opens once a day and never nags. */
+	UPROPERTY()
+	FString StreakPopupDay;
 };

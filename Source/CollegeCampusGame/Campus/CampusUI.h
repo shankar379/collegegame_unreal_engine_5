@@ -16,9 +16,12 @@
 class ACampusLobbyPlayerController;
 class UCampusBackend;
 class UCampusParty;
+class UCampusPlayBilling;
 class UCampusSave;
 struct FCampusOffer;
+struct FCampusMission;
 struct FCampusPartyMember;
+struct FCampusPlayProduct;
 class ACampusMatchPlayerController;
 class SBox;
 
@@ -126,8 +129,10 @@ public:
 private:
 	// Free Fire / PUBG style flow: Splash -> (first time) Agreement -> Login choice -> Email login / Register ->
 	// (first time) Nickname -> Lobby. The lobby opens the Store, Rooms (quick / create / join by code), Account.
-	enum class EScreen : uint8 { Splash, Agreement, LoginChoice, EmailLogin, Register, Nickname, Lobby, Store, Rooms, Account, Event, Daily, Settings };
+	enum class EScreen : uint8 { Splash, Agreement, LoginChoice, EmailLogin, Register, Nickname, Lobby, Store, Rooms,
+		Account, Event, Daily, Settings, Missions, Streak, AdultConfirm, CollegePick };
 	enum class EStoreTab : uint8 { Guns, Offers, Packs };
+	enum class EMissionTab : uint8 { Daily, Weekly, Weekend };
 
 	void Show(EScreen Screen);
 	void Refresh();
@@ -165,11 +170,34 @@ private:
 	TSharedRef<SWidget> BuildStore();
 	TSharedRef<SWidget> BuildGunCard(int32 Index);
 	TSharedRef<SWidget> BuildOfferCard(const FCampusOffer& Offer);
+	/** The real-money button: Google Play where it is available, Razorpay everywhere else. */
+	TSharedRef<SWidget> MoneyButton(const FString& ItemId, const FString& ItemName, float PriceInr, FVector2D Size);
+	/** Play Billing for this game instance, or null off Android / when IAP is not packaged. */
+	UCampusPlayBilling* Billing() const;
 	TSharedRef<SWidget> BuildRooms();
 	TSharedRef<SWidget> BuildAccount();
 	TSharedRef<SWidget> BuildDaily();
 	TSharedRef<SWidget> BuildEvent();
 	TSharedRef<SWidget> BuildSettings();
+
+	// ---- engagement
+	/** The weekend board panel under the menu tabs: countdown, top 3, my row, empty state. */
+	TSharedRef<SWidget> BuildWeekendPanel();
+	/** The banner for a settled weekend's unclaimed reward. */
+	TSharedRef<SWidget> BuildClaimBanner();
+	TSharedRef<SWidget> BuildMissions();
+	TSharedRef<SWidget> BuildMissionCard(const FCampusMission& Mission, const FString& PeriodId);
+	TSharedRef<SWidget> BuildStreak();
+	TSharedRef<SWidget> BuildAdultConfirm();
+	TSharedRef<SWidget> BuildCollegePick();
+	/** One live "2D 04:11:08" countdown, driven off the server clock by a text lambda (no rebuild). */
+	TSharedRef<SWidget> Countdown(const FDateTime& Until, const FText& Prefix, int32 Size, FLinearColor Color) const;
+	/** Refreshes GET /engagement/home and repaints when it lands. */
+	void RefreshEngagement();
+	/** Shared tail of every claim: wallet from the response, toast, repaint, reward-cap message. */
+	void AfterClaim(bool bOk, const FString& Error, const FString& OkText);
+	/** The IST game day (YYYYMMDD) by the server clock, for the once-a-day streak popup. */
+	FString ServerGameDay() const;
 
 	TWeakObjectPtr<ACampusLobbyPlayerController> Controller;
 	TSharedPtr<SBox> Content;
@@ -187,6 +215,19 @@ private:
 	bool bBusy = false;
 	FString BusyText;
 	FDelegateHandle PartyChangedHandle;
+
+	// ---- engagement / 18+ state
+	EMissionTab MissionTab = EMissionTab::Daily;
+	/** The "I am 18 or older" tick on the sign-in screen; nothing proceeds without it. */
+	bool bAdultTicked = false;
+	/** The streak popup has been offered this session, so it never re-opens behind the player. */
+	bool bStreakOffered = false;
+	/** A claim is in flight: every CLAIM button is disabled so nothing is double-tapped. */
+	bool bClaiming = false;
+	/** Profile screen: the college chosen but not yet saved, and the board-privacy tick. */
+	FString PickedCollegeId;
+	bool bShowCollegeTick = false;
+	FString CollegeFilter;
 
 	// form fields
 	FString EmailText;
