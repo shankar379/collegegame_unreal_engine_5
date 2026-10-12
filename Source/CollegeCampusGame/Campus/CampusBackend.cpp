@@ -184,11 +184,15 @@ bool UCampusBackend::HasSavedSession() const
 	return Profile && !Profile->RefreshToken.IsEmpty();
 }
 
+/** Last transport failure (reason | url), shown with the "could not reach" message. */
+static FString GLastNetDetail;
+
 FString UCampusBackend::ErrorText(int32 Status, TSharedPtr<FJsonObject> Json)
 {
 	if (Status == 0)
 	{
-		return TEXT("Could not reach the server. Same Wi-Fi as the PC? Is the API running?");
+		return GLastNetDetail.IsEmpty() ? FString(TEXT("Could not reach the server. Check your internet."))
+			: FString::Printf(TEXT("Could not reach the server (%s)"), *GLastNetDetail);
 	}
 	const FString Message = Str(Obj(Json, TEXT("error")), TEXT("message"));
 	return Message.IsEmpty() ? FString::Printf(TEXT("Server error (%d)."), Status) : Message;
@@ -293,7 +297,7 @@ void UCampusBackend::Send(const FString& Verb, const FString& Path, const FStrin
 	}
 	TWeakObjectPtr<UCampusBackend> WeakThis(this);
 	Http->OnProcessRequestComplete().BindLambda(
-		[WeakThis, Verb, Path, BodyText, bAuth, IdempotencyKey, OnResponse, bRetried](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		[WeakThis, Verb, Path, BodyText, bAuth, IdempotencyKey, OnResponse, bRetried](FHttpRequestPtr Request, FHttpResponsePtr Response, bool bConnected)
 		{
 			UCampusBackend* Self = WeakThis.Get();
 			if (!Self)
@@ -356,6 +360,10 @@ void UCampusBackend::Send(const FString& Verb, const FString& Path, const FStrin
 			}
 			if (Status == 0)
 			{
+				// show WHY on screen (no USB log on a friend's phone): the engine's failure reason + the address tried
+				const FString Reason = Request.IsValid() ? FString(LexToString(Request->GetFailureReason())) : TEXT("NoRequest");
+				GLastNetDetail = FString::Printf(TEXT("%s | %s"), *Reason, Request.IsValid() ? *Request->GetURL() : TEXT("?"));
+				UE_LOG(LogTemp, Warning, TEXT("[CampusNet] request failed: %s"), *GLastNetDetail);
 				Self->LastError = ErrorText(0, nullptr);
 			}
 			OnResponse(Status, Json);
