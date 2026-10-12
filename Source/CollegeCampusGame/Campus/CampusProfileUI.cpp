@@ -39,7 +39,7 @@ namespace
 	constexpr float StatCellWidth = 112.f;
 	constexpr float BadgeSize = 128.f;
 
-	FText Grouped(int32 Value)
+	FText ProfileGrouped(int32 Value)
 	{
 		FNumberFormattingOptions Options;
 		Options.SetUseGrouping(true);
@@ -105,11 +105,11 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStatsStrip()
 	{
 		Strip->AddSlot().Padding(0.f, 0.f, 6.f, 6.f)[StatCell(Glyph, Value, Caption)];
 	};
-	Add(CampusAngular::EGlyph::Clock, Grouped(Page.Matches), LOCTEXT("StatMatches", "MATCHES"));
-	Add(CampusAngular::EGlyph::Trophy, Grouped(Page.Wins), LOCTEXT("StatWins", "WINS"));
-	Add(CampusAngular::EGlyph::Skull, Grouped(Page.Kills), LOCTEXT("StatKills", "KILLS"));
+	Add(CampusAngular::EGlyph::Clock, ProfileGrouped(Page.Matches), LOCTEXT("StatMatches", "MATCHES"));
+	Add(CampusAngular::EGlyph::Trophy, ProfileGrouped(Page.Wins), LOCTEXT("StatWins", "WINS"));
+	Add(CampusAngular::EGlyph::Skull, ProfileGrouped(Page.Kills), LOCTEXT("StatKills", "KILLS"));
 	Add(CampusAngular::EGlyph::Chevron, Ratio(Page.Kd), LOCTEXT("StatKd", "K/D"));
-	Add(CampusAngular::EGlyph::Crown, Grouped(Page.Mvps), LOCTEXT("StatMvp", "MVP"));
+	Add(CampusAngular::EGlyph::Crown, ProfileGrouped(Page.Mvps), LOCTEXT("StatMvp", "MVP"));
 	Add(CampusAngular::EGlyph::Target, Percent(Page.HeadshotRate), LOCTEXT("StatHs", "HS%"));
 	return Strip;
 }
@@ -192,8 +192,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildRankBlock()
 		[
 			SNew(STextBlock)
 			.Text(Page.WeekendRank > 0
-				? FText::Format(LOCTEXT("NowRank", "{0} PTS  ·  #{1}"), Grouped(Page.WeekendPoints), FText::AsNumber(Page.WeekendRank))
-				: FText::Format(LOCTEXT("NowPoints", "{0} PTS"), Grouped(Page.WeekendPoints)))
+				? FText::Format(LOCTEXT("NowRank", "{0} PTS  ·  #{1}"), ProfileGrouped(Page.WeekendPoints), FText::AsNumber(Page.WeekendRank))
+				: FText::Format(LOCTEXT("NowPoints", "{0} PTS"), ProfileGrouped(Page.WeekendPoints)))
 			.Font(CampusAngular::Numeric(22)).ColorAndOpacity(CampusAngular::Accent)
 		];
 		TSharedRef<SHorizontalBox> Flags = SNew(SHorizontalBox);
@@ -328,7 +328,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildProfileHeader()
 						]
 						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 						[
-							SNew(STextBlock).Text(Grouped(Likes)).Font(CampusAngular::Numeric(20))
+							SNew(STextBlock).Text(ProfileGrouped(Likes)).Font(CampusAngular::Numeric(20))
 							.ColorAndOpacity(FLinearColor::White)
 						]
 						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.f, 2.f, 0.f, 0.f)
@@ -375,7 +375,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildProfileHeader()
 					SNew(STextBlock)
 					.Text(bMax
 						? LOCTEXT("MaxLevel", "MAX")
-						: FText::Format(LOCTEXT("XpInto", "{0} / {1}"), Grouped(Page.XpInto), Grouped(Page.XpForNext)))
+						: FText::Format(LOCTEXT("XpInto", "{0} / {1}"), ProfileGrouped(Page.XpInto), ProfileGrouped(Page.XpForNext)))
 					.Font(CampusAngular::Numeric(13)).ColorAndOpacity(CampusAngular::TextMuted)
 				]
 			]
@@ -864,7 +864,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildProfile()
 
 	const bool bMine = !ProfileData.IsValid() || ProfileData->bMine;
 
-	TSharedRef<SHorizontalBox> Tabs = SNew(SHorizontalBox);
+	TSharedRef<SHorizontalBox> ProfileTabs = SNew(SHorizontalBox);
 	struct FTabDef { EProfileTab Tab; FText Label; };
 	const FTabDef Defs[] = {
 		{ EProfileTab::Showcase, LOCTEXT("TabShowcase", "SHOWCASE") },
@@ -875,7 +875,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildProfile()
 	{
 		const EProfileTab Which = Def.Tab;
 		const bool bSelected = ProfileTab == Which;
-		Tabs->AddSlot().AutoWidth().Padding(0.f, 0.f, 6.f, 0.f)
+		ProfileTabs->AddSlot().AutoWidth().Padding(0.f, 0.f, 6.f, 0.f)
 		[
 			SNew(SBox).WidthOverride(190.f).HeightOverride(60.f)
 			[
@@ -1035,7 +1035,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildProfile()
 		.ContentPadding(FMargin(26.f, 20.f))
 		[
 			SNew(SVerticalBox)
-			+ SVerticalBox::Slot().AutoHeight()[Tabs]
+			+ SVerticalBox::Slot().AutoHeight()[ProfileTabs]
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 16.f, 0.f, 14.f)[BuildProfileHeader()]
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 14.f)
 			[

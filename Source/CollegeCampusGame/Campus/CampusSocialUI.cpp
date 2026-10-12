@@ -44,7 +44,7 @@ namespace
 	}
 
 	/** "1,830" - thousands separated, which is what makes a stats strip readable at a glance. */
-	FText Grouped(int32 Value)
+	FText SocialGrouped(int32 Value)
 	{
 		FNumberFormattingOptions Options;
 		Options.SetUseGrouping(true);
@@ -1603,7 +1603,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSummaryRow(const FCampusSummaryRow&
 				[
 					SNew(SBox).WidthOverride(86.f)
 					[
-						SNew(STextBlock).Text(Grouped(Row.DamageDealt)).Font(CampusAngular::Numeric(17))
+						SNew(STextBlock).Text(SocialGrouped(Row.DamageDealt)).Font(CampusAngular::Numeric(17))
 						.ColorAndOpacity(CampusAngular::TextMuted).Justification(ETextJustify::Right)
 					]
 				]
@@ -1676,7 +1676,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSummary()
 						SNew(STextBlock)
 						.Text(FText::Format(LOCTEXT("MvpLine", "{0} KILLS  ·  {1} DEATHS  ·  {2} HS  ·  {3} DMG"),
 							FText::AsNumber(Mvp->Kills), FText::AsNumber(Mvp->Deaths),
-							FText::AsNumber(Mvp->Headshots), Grouped(Mvp->DamageDealt)))
+							FText::AsNumber(Mvp->Headshots), SocialGrouped(Mvp->DamageDealt)))
 						.Font(CampusAngular::Numeric(18)).ColorAndOpacity(CampusAngular::Accent)
 					]
 				]
