@@ -100,3 +100,25 @@ Match traffic: host phone <--> Epic Online Services P2P relay <--> other phones
 | Profile | Showcase (not photo gallery); XP only from counted matches; 1 like/day |
 | Scope zoom | Starts at 2x (owner may change to 1x) |
 | Cars | Driver can't shoot, 43 km/h, 4 seats, 600 HP |
+
+---
+
+## 6. Night of 2026-10-12 → status at 00:05 (13 Oct)
+
+Backend (pushed to `main`, live, 191 tests green): battle-royale matchmaking (`/v1/br/*`), friends search + public IDs, party/invites/WebSocket, profile/XP, payments fixes (refund over-claw, wallet credits, multi-quantity, already-owned gun), guns bought with Diamonds + attribute bars, demo people + demo bots scripts.
+
+Game (branch `wip/battle-royale-night`, **NOT compile-verified** — the integration compile was killed by low memory):
+- BR mode: `CampusBRGameMode/Zone/Plane` (waiting deck, countdown, plane, jump/parachute, 5-phase zone, virtual combatants to 50, BOOYAH)
+- AI bots: `CampusBot` (missing-include fix applied)
+- BR client: `CampusBR`, `CampusBRUI`, `CampusBRHud`, map select BR card + DAY/NIGHT
+- Map: `Scripts/varsity_layout.py` + `build_varsity_valley.py` (not generated yet), `CampusDayNight`
+- Weapons + loot: `CampusWeapons`, `CampusLoot`, bought-gun mods; gun meshes `Scripts/build_guns.py` (not generated yet), `CampusGunMeshes.h`
+- Cars: finished + reviewed (compiled clean in an earlier pass)
+- Store redesign `CampusStoreUI.cpp`; UPI pending fix in `CampusPlayBilling.cpp`
+- Docs: BATTLE_ROYALE_DESIGN, CUSTOM_ROOM_DESIGN, GUN_ATTRIBUTES_DESIGN, VEHICLES_DESIGN
+
+Next steps (in order, one Unreal job at a time, close other apps first — 8 GB RAM):
+1. `Build.bat CollegeCampusGameEditor Win64 Development -Project=...uproject -WaitMutex` → fix errors (known risk: `CampusWeapons::ModsForLevel` arity in `CampusCharacter.cpp` ApplyWeapon, C4458 shadowing there)
+2. Run `Scripts/build_guns.py`, then `Scripts/build_varsity_valley.py` via UnrealEditor-Cmd pythonscript
+3. Merge `wip/battle-royale-night` into `main`, then `BuildAndroid.bat`, install
+4. Open questions: ranked vs fun-toggle rooms; flat stats in BR; gun price/power rebalance (AK47 2.7× starter DPS)
