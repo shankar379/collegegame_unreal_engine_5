@@ -79,6 +79,8 @@ class UCampusBackend : public UGameInstanceSubsystem
 public:
 	using FDone = TFunction<void(bool bOk, const FString& Error)>;
 	using FRoomDone = TFunction<void(bool bOk, const FString& Error, const FCampusRoom& Room)>;
+	/** Like FDone, but also hands back the raw response body for callers that need more than ok/error. */
+	using FJsonDone = TFunction<void(bool bOk, const FString& Error, TSharedPtr<FJsonObject> Json)>;
 
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
@@ -111,6 +113,11 @@ public:
 	void EquipGun(const FString& Id, FDone Done);
 	/** Real money (Razorpay): opens the payment page, then reports once the server confirms the payment. */
 	void BuyWithMoney(const FString& ItemId, FDone Done);
+	/** Google Play paid: hands the purchase token to the server, which checks it with Google, credits the wallet
+	 *  and consumes the purchase (we never consume on the device). Safe to call again with the same token - the
+	 *  server is idempotent on it, which is exactly how an interrupted purchase is recovered. On success the
+	 *  cached wallet here is already updated; Json is the whole response body for anything else the caller wants. */
+	void VerifyGooglePurchase(const FString& ProductId, const FString& PurchaseToken, FJsonDone Done);
 
 	// ---- rooms
 	/** Spends 1 Room Card; this phone becomes the host (listen server) of the returned room. */

@@ -1,7 +1,9 @@
 #include "Campus/CampusTouchControls.h"
 
+#include "Campus/CampusAngular.h"
 #include "Campus/CampusCharacter.h"
 #include "Campus/CampusMatchState.h"
+#include "Campus/CampusSave.h"
 #include "Engine/World.h"
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
@@ -47,6 +49,12 @@ namespace TouchStyle
 	constexpr float FreeLookDeadZone = 0.4f;
 	const FLinearColor EyeBack(FColor(20, 24, 30, 115));
 	const FLinearColor EyeRing(FColor(255, 255, 255, 191));
+
+	// Free Fire chrome: the same accent and ink as the lobby menus, so the two never disagree.
+	const FLinearColor Accent = CampusAngular::Accent;
+	const FLinearColor Chip(0.016f, 0.02f, 0.027f, 0.78f);
+	const FLinearColor ChipStrong(0.016f, 0.02f, 0.027f, 0.9f);
+	const FLinearColor Hairline(1.f, 1.f, 1.f, 0.16f);
 }
 
 SCampusTouchControls::SCampusTouchControls()
@@ -119,8 +127,28 @@ const FSlateBrush* SCampusTouchControls::RoundBrush(float Radius, float OutlineW
 
 void SCampusTouchControls::DrawPill(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, const FVector2D& Size, const FLinearColor& Color) const
 {
+	// Kept for the round joystick / zoom art; every HUD *plate* now goes through the angular
+	// painters below, so nothing in the Free Fire chrome is rounded any more.
 	const float Radius = FMath::RoundToFloat(FMath::Min(14.f, FMath::Min(Size.X, Size.Y) * 0.5f));
 	FSlateDrawElement::MakeBox(Out, Layer, G.ToPaintGeometry(FVector2f(Size), FSlateLayoutTransform(FVector2f(Min))), RoundBrush(Radius), ESlateDrawEffect::None, Color);
+}
+
+void SCampusTouchControls::DrawSlantedPanel(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min,
+	const FVector2D& Size, float Slant, const FLinearColor& Fill, const FLinearColor& Border, float BorderWidth) const
+{
+	CampusAngular::DrawSlantedPanel(Out, Layer, G, FVector2f(Min), FVector2f(Size), FCampusShape::Slanted(Slant), Fill, Border, BorderWidth);
+}
+
+void SCampusTouchControls::DrawCutCornerBox(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min,
+	const FVector2D& Size, float Cut, const FLinearColor& Fill, const FLinearColor& Border, float BorderWidth) const
+{
+	CampusAngular::DrawCutCornerBox(Out, Layer, G, FVector2f(Min), FVector2f(Size), Cut, Fill, Border, BorderWidth);
+}
+
+void SCampusTouchControls::DrawNotchedBox(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min,
+	const FVector2D& Size, float Cut, const FLinearColor& Fill, const FLinearColor& Border, float BorderWidth) const
+{
+	CampusAngular::DrawSlantedPanel(Out, Layer, G, FVector2f(Min), FVector2f(Size), FCampusShape::Notched(Cut), Fill, Border, BorderWidth);
 }
 
 void SCampusTouchControls::Construct(const FArguments& InArgs)
@@ -204,9 +232,23 @@ SCampusTouchControls::FLayout SCampusTouchControls::MakeLayout(const FVector2D& 
 	L.Mic = FVector2D(L.W * 0.5f - 18.f * U, 32.f + 3.2f * U);
 	L.Speaker = L.Mic - FVector2D(6.f * U, 0.f);
 
-	// Weapons panel, top right (26% x 20% in the web HUD; kept compact here).
+	// Settings gear, very top-right corner (Free Fire). 48 px minimum so a thumb always lands.
+	L.GearR = FMath::Max(2.3f * U, 24.f);
+	L.Gear = FVector2D(L.W - L.W * 0.012f - L.GearR, L.W * 0.012f + L.GearR);
+	// ALIVE / KILL chips sit to the left of the gear, on the same baseline.
+	L.ChipRight = FVector2D(L.Gear.X - L.GearR - 1.2f * U, L.Gear.Y);
+	L.ChipTop = L.Gear.Y - 1.9f * U;
+
+	// Team roster, top-left; the minimap goes under it. The roster block is a fixed height (header
+	// plus four rows) so the minimap never jumps when a teammate dies.
+	L.TeamMin = FVector2D(L.W * 0.012f, L.W * 0.012f);
+	L.TeamSize = FVector2D(FMath::Clamp(L.W * 0.19f, 150.f, 26.f * U), 2.6f * U + 4.f * 3.1f * U);
+	L.MapSize = 17.f * U;
+	L.MapMin = FVector2D(L.TeamMin.X, L.TeamMin.Y + L.TeamSize.Y + 1.2f * U);
+
+	// Weapons panel, top right, pushed below the gear row.
 	L.WeaponSize = FVector2D(L.W * 0.17f, L.H * 0.13f);
-	L.WeaponMin = FVector2D(L.W - L.WeaponSize.X - L.W * 0.01f, L.H * 0.12f);
+	L.WeaponMin = FVector2D(L.W - L.WeaponSize.X - L.W * 0.012f, L.Gear.Y + L.GearR + 1.4f * U);
 	return L;
 }
 
@@ -217,8 +259,10 @@ SCampusTouchControls::EControl SCampusTouchControls::HitTest(const FLayout& L, c
 	auto In = [&P](const FVector2D& C, float R) { return FVector2D::DistSquared(P, C) <= R * R; };
 	// Slightly generous hit areas for thumbs.
 	const float Pad = 1.15f;
+	// The gear is checked first: it must stay reachable even if a control creeps near the corner.
+	if (In(L.Gear, L.GearR * 1.25f)) return EControl::Settings;
 	if (In(L.Fire, L.FireR * Pad)) return EControl::Fire;
-	if (In(L.FireLeft, L.FireLeftR * 1.6f)) return EControl::FireLeft;
+	if (bLeftFireButton && In(L.FireLeft, L.FireLeftR * 1.6f)) return EControl::FireLeft;
 	if (In(L.Reload, L.ReloadR * Pad)) return EControl::Reload;
 	if (bArmed && In(L.Scope, L.ScopeR * Pad)) return EControl::Scope;
 	if (bAiming && FMath::Abs(P.X - L.Zoom.X) <= L.ZoomSize.X * 0.6f && FMath::Abs(P.Y - L.Zoom.Y) <= L.ZoomSize.Y * 0.6f) return EControl::Zoom;
@@ -240,7 +284,8 @@ void SCampusTouchControls::ApplyLook(const FVector2D& Delta, float Multiplier) c
 {
 	if (ACampusCharacter* Character = GetCharacter())
 	{
-		const float Scale = DegreesPerUnit() * TouchStyle::Sensitivity * Multiplier * Character->GetLookScale();
+		// LookSensitivity comes from the settings gear; cached in Tick, never read per event.
+		const float Scale = DegreesPerUnit() * TouchStyle::Sensitivity * LookSensitivity * Multiplier * Character->GetLookScale();
 		// Finger right turns right; finger up looks up (screen Y grows downward, so negate it).
 		Character->AddTouchLook(FVector2D(Delta.X * Scale, -Delta.Y * Scale));
 	}
@@ -248,6 +293,16 @@ void SCampusTouchControls::ApplyLook(const FVector2D& Delta, float Multiplier) c
 
 void SCampusTouchControls::PressControl(EControl Control)
 {
+	// The gear works even while respawning (no pawn), which is exactly when players reach for it.
+	if (Control == EControl::Settings)
+	{
+		if (ACampusMatchPlayerController* Match = Cast<ACampusMatchPlayerController>(Controller.Get()))
+		{
+			Match->ToggleSettings();
+		}
+		return;
+	}
+
 	ACampusCharacter* Character = GetCharacter();
 	if (!Character)
 	{
@@ -361,9 +416,7 @@ FReply SCampusTouchControls::OnTouchStarted(const FGeometry& MyGeometry, const F
 	}
 	// tap the minimap: full map; tap the timer: scoreboard
 	{
-		const float MapSize = 17.f * L.U;
-		const FVector2D MapMin(L.W * 0.01f, L.W * 0.01f);
-		if (P.X >= MapMin.X && P.Y >= MapMin.Y && P.X <= MapMin.X + MapSize && P.Y <= MapMin.Y + MapSize)
+		if (bShowMinimap && P.X >= L.MapMin.X && P.Y >= L.MapMin.Y && P.X <= L.MapMin.X + L.MapSize && P.Y <= L.MapMin.Y + L.MapSize)
 		{
 			bBigMap = true;
 			return FReply::Handled();
@@ -525,6 +578,17 @@ void SCampusTouchControls::Tick(const FGeometry& AllottedGeometry, const double 
 	CachedLayout = MakeLayout(FVector2D(AllottedGeometry.GetLocalSize()));
 	SpinAngle = FMath::Fmod(SpinAngle + InDeltaTime * UE_TWO_PI / 0.7f, UE_TWO_PI);
 
+	// Settings cached once a frame instead of once per look event / draw call.
+	if (const ACampusMatchPlayerController* Match = Cast<ACampusMatchPlayerController>(Controller.Get()))
+	{
+		LookSensitivity = Match->GetLookSensitivity();
+		if (const UCampusSave* Save = Match->GetProfile())
+		{
+			bShowMinimap = Save->bShowMinimap;
+			bLeftFireButton = Save->bLeftFireButton;
+		}
+	}
+
 	ACampusCharacter* Character = GetCharacter();
 	if (!Character)
 	{
@@ -636,9 +700,11 @@ void SCampusTouchControls::DrawRect(FSlateWindowElementList& Out, int32 Layer, c
 }
 
 void SCampusTouchControls::DrawText(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FString& Text, const FVector2D& Anchor, int32 Size,
-	const FLinearColor& Color, float AlignX, float AlignY) const
+	const FLinearColor& Color, float AlignX, float AlignY, bool bTabular) const
 {
-	const FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle("Bold", FMath::Max(Size, 6));
+	// Bold condensed italic everywhere in the HUD, same display face as the lobby menus; upright
+	// condensed only where numbers have to line up in a column.
+	const FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle(bTabular ? "BoldCondensed" : "BoldCondensedItalic", FMath::Max(Size, 6));
 	const auto Measured = FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(Text, Font);
 	const FVector2D TextSize(Measured.X, Measured.Y);
 	const FVector2D Min = Anchor - FVector2D(TextSize.X * AlignX, TextSize.Y * AlignY);
@@ -791,7 +857,7 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		if (bAutoRun)
 		{
 			const FVector2D Size(9.f * L.U, 2.8f * L.U);
-			DrawPill(Out, Layer + 3, G, Badge - Size * 0.5f, Size, TouchStyle::IconOn.CopyWithNewOpacity(0.9f));
+			DrawSlantedPanel(Out, Layer + 3, G, Badge - Size * 0.5f, Size, Size.Y * 0.32f, TouchStyle::IconOn.CopyWithNewOpacity(0.92f));
 			DrawText(Out, Layer + 4, G, TEXT("RUN LOCK"), Badge, FMath::RoundToInt(L.U * 1.2f), FLinearColor::White);
 		}
 		else
@@ -838,15 +904,18 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		DrawIcon(Out, Layer + 2, G, EControl::Fire, Inner, InnerR, TouchStyle::FireIcon, 0.f);
 	}
 
-	// Small left fire button: the same artwork.
-	if (const FSlateBrush* FireIcon = Icon(TEXT("fire")))
+	// Small left fire button: the same artwork. Switchable in the settings gear.
+	if (bLeftFireButton)
 	{
-		DrawImage(Out, Layer, G, FireIcon, L.FireLeft, FVector2D(L.FireLeftR * 2.f) * (IsHeld(EControl::FireLeft) ? 0.94f : 1.f), FLinearColor::White.CopyWithNewOpacity(FireAlpha));
-	}
-	else
-	{
-		DrawCircle(Out, Layer, G, L.FireLeft, L.FireLeftR, FireColor);
-		DrawIcon(Out, Layer + 1, G, EControl::FireLeft, L.FireLeft, L.FireLeftR * 1.6f, FLinearColor::White, 0.f);
+		if (const FSlateBrush* FireIcon = Icon(TEXT("fire")))
+		{
+			DrawImage(Out, Layer, G, FireIcon, L.FireLeft, FVector2D(L.FireLeftR * 2.f) * (IsHeld(EControl::FireLeft) ? 0.94f : 1.f), FLinearColor::White.CopyWithNewOpacity(FireAlpha));
+		}
+		else
+		{
+			DrawCircle(Out, Layer, G, L.FireLeft, L.FireLeftR, FireColor);
+			DrawIcon(Out, Layer + 1, G, EControl::FireLeft, L.FireLeft, L.FireLeftR * 1.6f, FLinearColor::White, 0.f);
+		}
 	}
 
 	// Reload: white disc, spinning icon and a filling ring while reloading.
@@ -916,13 +985,16 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	{
 		auto Toggle = [&](const FVector2D& C, const TCHAR* Label, bool bOn)
 		{
-			const FLinearColor Back = bOn ? FLinearColor(0.1f, 0.55f, 0.25f, 0.85f) : FLinearColor(0.08f, 0.08f, 0.08f, 0.6f);
-			DrawCircle(Out, Layer, G, C, L.VoiceR, Back);
-			DrawText(Out, Layer + 1, G, Label, C, FMath::RoundToInt(L.U * 1.05f), FLinearColor::White);
+			// Notched plates, not discs: the voice toggles match the rest of the angular chrome.
+			const FLinearColor Back = bOn ? FLinearColor(0.08f, 0.42f, 0.2f, 0.9f) : FLinearColor(0.02f, 0.025f, 0.035f, 0.72f);
+			DrawNotchedBox(Out, Layer, G, C - FVector2D(L.VoiceR), FVector2D(L.VoiceR * 2.f), L.VoiceR * 0.5f,
+				Back, bOn ? FLinearColor(1.f, 1.f, 1.f, 0.4f) : TouchStyle::Hairline, 1.f);
+			DrawText(Out, Layer + 2, G, Label, C, FMath::RoundToInt(L.U * 1.05f), FLinearColor::White);
+			// Colour is never the only signal: the off state also carries a slash.
 			if (!bOn)
 			{
 				const float S = L.VoiceR * 0.7f;
-				DrawPolyline(Out, Layer + 2, G, { FVector2f(C.X - S, C.Y + S), FVector2f(C.X + S, C.Y - S) }, TouchStyle::Red, 2.f);
+				DrawPolyline(Out, Layer + 3, G, { FVector2f(C.X - S, C.Y + S), FVector2f(C.X + S, C.Y - S) }, TouchStyle::Red, 2.f);
 			}
 		};
 		Toggle(L.Mic, TEXT("MIC"), Voice->IsMicOn());
@@ -974,9 +1046,94 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	// Zoom pill, only while aiming.
 	if (bAiming && Character)
 	{
-		DrawPill(Out, Layer, G, L.Zoom - L.ZoomSize * 0.5f, L.ZoomSize, FLinearColor(0.08f, 0.08f, 0.08f, 0.6f));
+		DrawSlantedPanel(Out, Layer, G, L.Zoom - L.ZoomSize * 0.5f, L.ZoomSize, L.ZoomSize.Y * 0.32f, TouchStyle::Chip, TouchStyle::Hairline, 1.f);
 		DrawText(Out, Layer + 1, G, FString::Printf(TEXT("%dx"), FMath::RoundToInt(Character->GetZoom())), L.Zoom, FMath::RoundToInt(L.U * 1.4f), FLinearColor::White);
 	}
+}
+
+void SCampusTouchControls::DrawTeamList(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
+{
+	const APlayerController* PC = Controller.Get();
+	const UWorld* World = PC ? PC->GetWorld() : nullptr;
+	const ACampusGameState* State = World ? World->GetGameState<ACampusGameState>() : nullptr;
+	const ACampusPlayerState* Mine = PC ? PC->GetPlayerState<ACampusPlayerState>() : nullptr;
+	if (!State || !Mine)
+	{
+		return;
+	}
+	const float U = L.U;
+	const bool bRed = Mine->Team == ECampusTeam::Red;
+	const FLinearColor TeamColor = bRed ? TouchStyle::Red : TouchStyle::Blue;
+
+	DrawNotchedBox(Out, Layer, G, L.TeamMin, L.TeamSize, 1.4f * U, TouchStyle::Chip, TouchStyle::Hairline, 1.f);
+	// Team colour flash down the leading edge, so RED and BLUE read at a glance.
+	DrawSlantedPanel(Out, Layer + 1, G, L.TeamMin, FVector2D(0.45f * U, L.TeamSize.Y), 0.f, TeamColor);
+	DrawText(Out, Layer + 2, G, bRed ? TEXT("RED SQUAD") : TEXT("BLUE SQUAD"),
+		L.TeamMin + FVector2D(1.6f * U, 1.4f * U), FMath::RoundToInt(U * 1.25f), TeamColor, 0.f, 0.5f);
+
+	int32 Row = 0;
+	for (const APlayerState* Player : State->PlayerArray)
+	{
+		const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
+		if (!Campus || Campus->Team != Mine->Team || Row >= 4)
+		{
+			continue;
+		}
+		const float RowY = L.TeamMin.Y + 2.6f * U + Row * 3.1f * U;
+		const bool bMe = Campus == Mine;
+		const ACampusCharacter* Body = Cast<ACampusCharacter>(Campus->GetPawn());
+		// Only the local player's own health is guaranteed to be here; a teammate whose pawn is not
+		// replicated to us (or who is dead) shows as DOWN rather than as a misleading full bar.
+		const float Max = Body ? FMath::Max(1.f, Body->GetMaxHealth()) : 100.f;
+		const float Health = Body ? Body->GetHealth() : 0.f;
+		const float Fraction = FMath::Clamp(Health / Max, 0.f, 1.f);
+
+		FString Name = Campus->GetPlayerName();
+		if (Name.Len() > 10)
+		{
+			Name = Name.Left(9) + TEXT(".");
+		}
+		DrawText(Out, Layer + 2, G, Name.ToUpper(), FVector2D(L.TeamMin.X + 1.6f * U, RowY + 0.9f * U),
+			FMath::RoundToInt(U * 1.2f), bMe ? TouchStyle::Accent : FLinearColor::White, 0.f, 0.5f);
+		// Flat health bar: black trough, team-coloured fill, red when low. No rounded caps.
+		const FVector2D BarMin(L.TeamMin.X + 1.6f * U, RowY + 1.9f * U);
+		const FVector2D BarSize(L.TeamSize.X - 3.2f * U, FMath::Max(4.f, 0.55f * U));
+		DrawRect(Out, Layer + 2, G, BarMin, BarSize, FLinearColor(0.f, 0.f, 0.f, 0.55f));
+		if (Fraction > 0.f)
+		{
+			DrawRect(Out, Layer + 3, G, BarMin, FVector2D(BarSize.X * Fraction, BarSize.Y),
+				Fraction < 0.3f ? TouchStyle::Red : (bMe ? TouchStyle::Accent : TeamColor));
+		}
+		else
+		{
+			DrawText(Out, Layer + 3, G, TEXT("DOWN"), FVector2D(L.TeamMin.X + L.TeamSize.X - 1.6f * U, RowY + 0.9f * U),
+				FMath::RoundToInt(U * 1.05f), TouchStyle::Red, 1.f, 0.5f);
+		}
+		++Row;
+	}
+}
+
+void SCampusTouchControls::DrawConnection(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
+{
+	const APlayerController* PC = Controller.Get();
+	const UWorld* World = PC ? PC->GetWorld() : nullptr;
+	const ACampusPlayerState* Mine = PC ? PC->GetPlayerState<ACampusPlayerState>() : nullptr;
+	if (!Mine || !World)
+	{
+		return;
+	}
+	// The host is the server: it has no ping to itself, so show the link as local instead of "0 ms".
+	const bool bClient = World->GetNetMode() == NM_Client;
+	const int32 Ping = bClient ? FMath::RoundToInt(Mine->GetPingInMilliseconds()) : 0;
+	const FLinearColor Color = !bClient ? FLinearColor(0.3f, 1.f, 0.4f)
+		: (Ping < 60 ? FLinearColor(0.3f, 1.f, 0.4f) : Ping < 120 ? FLinearColor(1.f, 0.85f, 0.2f) : TouchStyle::Red);
+
+	const float U = L.U;
+	const float Radius = 1.1f * U;
+	const FVector2D Center(L.Gear.X - L.GearR - 1.2f * U - Radius, L.Gear.Y + L.GearR * 0.55f + 1.4f * U);
+	CampusAngular::DrawGlyph(Out, Layer, G, CampusAngular::EGlyph::Wifi, FVector2f(Center), Radius, Color, FMath::Max(1.5f, U * 0.18f));
+	DrawText(Out, Layer, G, bClient ? FString::Printf(TEXT("%d MS"), Ping) : FString(TEXT("HOST")),
+		FVector2D(Center.X - Radius - 0.5f * U, Center.Y), FMath::RoundToInt(U * 1.05f), Color, 1.f, 0.5f);
 }
 
 void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
@@ -995,47 +1152,80 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 		const int32 Seconds = FMath::CeilToInt(Remaining);
 		const FVector2D Top(L.W * 0.5f, 32.f + U);
 		const FVector2D BoxSize(26.f * U, 4.4f * U);
-		DrawPill(Out, Layer, G, Top - BoxSize * 0.5f, BoxSize, TouchStyle::PanelDark);
+		// Score / clock plate: clipped corners, team-coloured end flashes.
+		DrawCutCornerBox(Out, Layer, G, Top - BoxSize * 0.5f, BoxSize, 1.5f * U, TouchStyle::ChipStrong, TouchStyle::Hairline, 1.f);
+		DrawSlantedPanel(Out, Layer + 1, G, Top - BoxSize * 0.5f, FVector2D(0.5f * U, BoxSize.Y), 0.f, TouchStyle::Blue);
+		DrawSlantedPanel(Out, Layer + 1, G, Top + FVector2D(BoxSize.X * 0.5f - 0.5f * U, -BoxSize.Y * 0.5f), FVector2D(0.5f * U, BoxSize.Y), 0.f, TouchStyle::Red);
 		const int32 Font = FMath::RoundToInt(U * 1.9f);
-		DrawText(Out, Layer + 1, G, FString::FromInt(State->BlueScore), Top - FVector2D(BoxSize.X * 0.36f, 0.f), Font, TouchStyle::Blue);
-		DrawText(Out, Layer + 1, G, FString::Printf(TEXT("%02d:%02d"), Seconds / 60, Seconds % 60), Top, Font, Remaining < 30.f ? TouchStyle::Red : FLinearColor::White);
-		DrawText(Out, Layer + 1, G, FString::FromInt(State->RedScore), Top + FVector2D(BoxSize.X * 0.36f, 0.f), Font, TouchStyle::Red);
+		DrawText(Out, Layer + 2, G, FString::FromInt(State->BlueScore), Top - FVector2D(BoxSize.X * 0.36f, 0.f), Font, TouchStyle::Blue);
+		DrawText(Out, Layer + 2, G, FString::Printf(TEXT("%02d:%02d"), Seconds / 60, Seconds % 60), Top, Font, Remaining < 30.f ? TouchStyle::Red : FLinearColor::White);
+		DrawText(Out, Layer + 2, G, FString::FromInt(State->RedScore), Top + FVector2D(BoxSize.X * 0.36f, 0.f), Font, TouchStyle::Red);
 		// round wins above, the round under the clock
 		const FString RoundText = State->bDecider ? FString(TEXT("DECIDING ROUND"))
 			: (State->Phase == ECampusPhase::RoundOver ? FString::Printf(TEXT("ROUND %d DONE  ·  NEXT IN A MOMENT"), State->Round)
 			: FString::Printf(TEXT("ROUND %d / %d"), FMath::Max(State->Round, 1), State->Rounds));
-		DrawText(Out, Layer + 1, G, RoundText, Top + FVector2D(0.f, BoxSize.Y * 0.85f), FMath::RoundToInt(U * 1.2f), State->bDecider ? TouchStyle::Red : FLinearColor::White);
+		DrawText(Out, Layer + 2, G, RoundText, Top + FVector2D(0.f, BoxSize.Y * 0.85f), FMath::RoundToInt(U * 1.2f), State->bDecider ? TouchStyle::Red : FLinearColor::White);
 
-		// Alive / kill counter, top right.
+		// ALIVE and KILL chips, top right, left of the gear. Two slanted plates, accent numbers.
 		int32 Alive = 0;
 		for (const APlayerState* Player : State->PlayerArray)
 		{
 			Alive += Player && Player->GetPawn() ? 1 : 0;
 		}
-		DrawText(Out, Layer + 1, G, FString::Printf(TEXT("ALIVE %d    KILL %d"), Alive, Mine ? Mine->Kills : 0),
-			FVector2D(L.W - L.W * 0.01f, 3.f * U), FMath::RoundToInt(U * 1.4f), FLinearColor::White, 1.f, 0.5f);
-		// Ping to the match server (green / yellow / red), under the counter.
-		if (Mine && World->GetNetMode() == NM_Client)
 		{
-			const int32 Ping = FMath::RoundToInt(Mine->GetPingInMilliseconds());
-			const FLinearColor PingColor = Ping < 60 ? FLinearColor(0.3f, 1.f, 0.4f) : Ping < 120 ? FLinearColor(1.f, 0.85f, 0.2f) : TouchStyle::Red;
-			DrawText(Out, Layer + 1, G, FString::Printf(TEXT("%d ms"), Ping), FVector2D(L.W - L.W * 0.01f, 5.f * U),
-				FMath::RoundToInt(U * 1.1f), PingColor, 1.f, 0.5f);
+			const float ChipH = 2.9f * U;
+			const float ChipW = 7.2f * U;
+			const float Slant = ChipH * 0.3f;
+			float Right = L.ChipRight.X;
+			auto Chipped = [&](const TCHAR* Caption, int32 Value, const FLinearColor& Tint)
+			{
+				const FVector2D Min(Right - ChipW, L.ChipTop);
+				DrawSlantedPanel(Out, Layer, G, Min, FVector2D(ChipW, ChipH), Slant, TouchStyle::Chip, TouchStyle::Hairline, 1.f);
+				DrawText(Out, Layer + 2, G, Caption, Min + FVector2D(ChipW * 0.34f, ChipH * 0.5f),
+					FMath::RoundToInt(U * 1.05f), FLinearColor(1.f, 1.f, 1.f, 0.65f), 0.5f, 0.5f);
+				DrawText(Out, Layer + 2, G, FString::FromInt(Value), Min + FVector2D(ChipW * 0.78f, ChipH * 0.5f),
+					FMath::RoundToInt(U * 1.7f), Tint, 0.5f, 0.5f);
+				Right = Min.X - 0.6f * U;
+			};
+			Chipped(TEXT("KILL"), Mine ? Mine->Kills : 0, TouchStyle::Accent);
+			Chipped(TEXT("ALIVE"), Alive, FLinearColor::White);
 		}
+		// Connection strength under the chips.
+		DrawConnection(Out, Layer, G, L);
 
-		// Kill feed, right side.
+		// Kill feed, right side: slanted plates with a diagonal cut end.
 		for (int32 Index = 0; Index < State->Feed.Num(); ++Index)
 		{
-			const FVector2D Anchor(L.W - L.W * 0.01f, L.H * 0.36f + Index * 3.2f * U);
+			const FVector2D Anchor(L.W - L.W * 0.012f, L.H * 0.36f + Index * 3.2f * U);
 			const int32 FeedFont = FMath::Max(9, FMath::RoundToInt(U * 1.2f));
-			const auto Measured = FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(State->Feed[Index], FCoreStyle::GetDefaultFontStyle("Bold", FeedFont));
-			const FVector2D Pill(Measured.X + 2.f * U, Measured.Y + 0.8f * U);
-			DrawPill(Out, Layer, G, Anchor - FVector2D(Pill.X, Pill.Y * 0.5f), Pill, TouchStyle::PanelDark);
-			DrawText(Out, Layer + 1, G, State->Feed[Index], Anchor - FVector2D(U, 0.f), FeedFont, FLinearColor::White, 1.f, 0.5f);
+			const auto Measured = FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(State->Feed[Index], FCoreStyle::GetDefaultFontStyle("BoldCondensedItalic", FeedFont));
+			const FVector2D Plate(Measured.X + 3.2f * U, Measured.Y + 0.9f * U);
+			DrawSlantedPanel(Out, Layer, G, Anchor - FVector2D(Plate.X, Plate.Y * 0.5f), Plate, Plate.Y * 0.3f, TouchStyle::Chip, TouchStyle::Hairline, 1.f);
+			DrawText(Out, Layer + 2, G, State->Feed[Index], Anchor - FVector2D(1.3f * U, 0.f), FeedFont, FLinearColor::White, 1.f, 0.5f);
 		}
 
-		// Minimap, top left (tap: full map)
-		DrawMap(Out, Layer, G, FVector2D(L.W * 0.01f, L.W * 0.01f), 17.f * U, false, U);
+		// Team roster top-left, then the minimap under it (tap the map: full screen).
+		DrawTeamList(Out, Layer, G, L);
+		if (bShowMinimap)
+		{
+			DrawMap(Out, Layer, G, L.MapMin, L.MapSize, false, U);
+		}
+	}
+
+	// Settings gear, top-right corner. Drawn outside the State block so it is reachable even
+	// before the game state has replicated.
+	{
+		bool bGearHeld = false;
+		for (const TPair<int32, FFinger>& Pair : Fingers)
+		{
+			bGearHeld |= Pair.Value.Control == EControl::Settings;
+		}
+		const FVector2D GearMin(L.Gear.X - L.GearR, L.Gear.Y - L.GearR);
+		const FVector2D GearSize(L.GearR * 2.f, L.GearR * 2.f);
+		DrawNotchedBox(Out, Layer + 6, G, GearMin, GearSize, L.GearR * 0.52f,
+			bGearHeld ? FLinearColor(0.16f, 0.12f, 0.02f, 0.95f) : TouchStyle::Chip, bGearHeld ? TouchStyle::Accent : TouchStyle::Hairline, bGearHeld ? 2.f : 1.f);
+		CampusAngular::DrawGlyph(Out, Layer + 7, G, CampusAngular::EGlyph::Gear, FVector2f(L.Gear), L.GearR * 0.56f,
+			bGearHeld ? TouchStyle::Accent : FLinearColor(1.f, 1.f, 1.f, 0.92f), FMath::Max(1.6f, L.GearR * 0.11f));
 	}
 
 	if (!Character)
@@ -1046,7 +1236,8 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 
 	// Weapons panel with ammo: big magazine count / reserve; tap to switch to the rifle or fists.
 	const bool bArmed = Character->IsArmed();
-	DrawPill(Out, Layer, G, L.WeaponMin, L.WeaponSize, TouchStyle::PanelDark.CopyWithNewOpacity(bArmed ? 0.75f : 0.45f));
+	DrawNotchedBox(Out, Layer, G, L.WeaponMin, L.WeaponSize, 1.6f * U,
+		TouchStyle::Chip.CopyWithNewOpacity(bArmed ? 0.82f : 0.5f), bArmed ? TouchStyle::Accent.CopyWithNewOpacity(0.55f) : TouchStyle::Hairline, 1.f);
 	if (const FSlateBrush* GunArt = Icon(bArmed ? TEXT("ak") : TEXT("fist")))
 	{
 		const FVector2D ArtSize = bArmed ? FVector2D(L.WeaponSize.X * 0.5f, L.WeaponSize.X * 0.25f) : FVector2D(L.WeaponSize.Y * 0.55f);
@@ -1062,16 +1253,31 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 	DrawText(Out, Layer + 1, G, FString::FromInt(Mag), AmmoAnchor, FMath::RoundToInt(U * 2.2f * 1.4f), Mag <= 5 ? TouchStyle::Red : FLinearColor::White, 1.f, 0.5f);
 	DrawText(Out, Layer + 1, G, FString::Printf(TEXT("/ %d"), Character->GetAmmoReserve()), AmmoAnchor + FVector2D(0.6f * U, 0.4f * U), FMath::RoundToInt(U * 2.2f * 0.8f), FLinearColor(1.f, 1.f, 1.f, 0.8f), 0.f, 0.5f);
 
-	// Health bar, bottom centre: white fill, orange lag, red when low.
+	// Health, bottom centre: a slanted trough with the numbers on the plate (Free Fire).
 	const float BarWidth = FMath::Min(L.W * 0.34f, 380.f * L.H / 400.f * 0.5f);
+	const float BarHeight = FMath::Max(10.f, 1.1f * U);
 	const FVector2D BarMin(L.W * 0.5f - BarWidth * 0.5f, L.H - 3.4f * U);
 	const float Max = FMath::Max(1.f, Character->GetMaxHealth());
 	const float Health = Character->GetHealth();
-	DrawRect(Out, Layer, G, BarMin, FVector2D(BarWidth, 8.f), FLinearColor(0.f, 0.f, 0.f, 0.45f));
-	DrawRect(Out, Layer + 1, G, BarMin, FVector2D(BarWidth * FMath::Clamp(LagHealth / Max, 0.f, 1.f), 8.f), TouchStyle::LagOrange);
-	DrawRect(Out, Layer + 2, G, BarMin, FVector2D(BarWidth * FMath::Clamp(Health / Max, 0.f, 1.f), 8.f), Health / Max < 0.3f ? TouchStyle::Red : FLinearColor::White);
-	DrawText(Out, Layer + 2, G, FString::Printf(TEXT("HP %d/%d"), FMath::RoundToInt(Health), FMath::RoundToInt(Max)), BarMin + FVector2D(0.f, -1.2f * U),
-		FMath::RoundToInt(U * 1.2f), FLinearColor::White, 0.f, 0.5f);
+	const float Slant = BarHeight * 0.85f;
+	const FLinearColor HealthColor = Health / Max < 0.3f ? TouchStyle::Red : FLinearColor::White;
+	DrawSlantedPanel(Out, Layer, G, BarMin, FVector2D(BarWidth, BarHeight), Slant, FLinearColor(0.f, 0.f, 0.f, 0.55f), TouchStyle::Hairline, 1.f);
+	// The lag bar and the live bar keep the trough's lean, so the fill never looks pasted on.
+	const float LagFraction = FMath::Clamp(LagHealth / Max, 0.f, 1.f);
+	const float LiveFraction = FMath::Clamp(Health / Max, 0.f, 1.f);
+	if (LagFraction > 0.f)
+	{
+		DrawSlantedPanel(Out, Layer + 1, G, BarMin, FVector2D(BarWidth * LagFraction, BarHeight), Slant * LagFraction, TouchStyle::LagOrange);
+	}
+	if (LiveFraction > 0.f)
+	{
+		DrawSlantedPanel(Out, Layer + 2, G, BarMin, FVector2D(BarWidth * LiveFraction, BarHeight), Slant * LiveFraction, HealthColor);
+	}
+	// Numbers above the bar: big current value, small max, so health reads without counting pixels.
+	DrawText(Out, Layer + 3, G, FString::FromInt(FMath::RoundToInt(Health)), BarMin + FVector2D(0.f, -1.6f * U),
+		FMath::RoundToInt(U * 1.8f), HealthColor, 0.f, 0.5f);
+	DrawText(Out, Layer + 3, G, FString::Printf(TEXT("/ %d  HP"), FMath::RoundToInt(Max)), BarMin + FVector2D(2.6f * U, -1.5f * U),
+		FMath::RoundToInt(U * 1.1f), FLinearColor(1.f, 1.f, 1.f, 0.7f), 0.f, 0.5f);
 
 	// Crosshair (hidden when scoped), red arms while aiming; gap opens when moving.
 	const bool bScoped = Character->IsAiming() && Character->GetZoom() >= 2.f && Character->GetAimBlend() > 0.5f;
@@ -1303,7 +1509,7 @@ void SCampusTouchControls::DrawScoreboard(FSlateWindowElementList& Out, int32 La
 		const ECampusTeam Team = Side == 0 ? ECampusTeam::Red : ECampusTeam::Blue;
 		const FLinearColor TeamColor = Side == 0 ? TouchStyle::Red : TouchStyle::Blue;
 		const float X0 = Side == 0 ? L.W * 0.04f : L.W * 0.52f;
-		DrawPill(Out, Layer + 1, G, FVector2D(X0, Top), FVector2D(BoxW, BoxH), TouchStyle::PanelDark.CopyWithNewOpacity(0.92f));
+		DrawNotchedBox(Out, Layer + 1, G, FVector2D(X0, Top), FVector2D(BoxW, BoxH), U * 1.8f, TouchStyle::ChipStrong, TouchStyle::Hairline, 1.f);
 		DrawRect(Out, Layer + 2, G, FVector2D(X0, Top), FVector2D(BoxW, U * 0.4f), TeamColor);
 		DrawText(Out, Layer + 2, G, FString::Printf(TEXT("%s  ·  %d rounds won"), Side == 0 ? TEXT("RED") : TEXT("BLUE"), Side == 0 ? State->RedScore : State->BlueScore),
 			FVector2D(X0 + U, Top + Row * 0.8f), FMath::RoundToInt(U * 1.6f), TeamColor, 0.f, 0.5f);
@@ -1337,10 +1543,10 @@ void SCampusTouchControls::DrawScoreboard(FSlateWindowElementList& Out, int32 La
 			}
 			const FLinearColor Text = Campus->GetPawn() ? FLinearColor::White : FLinearColor(1.f, 1.f, 1.f, 0.45f); // dimmed = out this round
 			DrawText(Out, Layer + 3, G, Campus->GetPlayerName() + (Campus->bIsHost ? TEXT("  (host)") : TEXT("")), FVector2D(X0 + U, Y), Font, Text, 0.f, 0.5f);
-			DrawText(Out, Layer + 3, G, FString::FromInt(Campus->Kills), FVector2D(CK, Y), Font, Text);
-			DrawText(Out, Layer + 3, G, FString::FromInt(Campus->Deaths), FVector2D(CD, Y), Font, Text);
-			DrawText(Out, Layer + 3, G, FString::FromInt(FMath::RoundToInt(Campus->DamageDealt)), FVector2D(CDealt, Y), Font, Text);
-			DrawText(Out, Layer + 3, G, FString::FromInt(FMath::RoundToInt(Campus->DamageTaken)), FVector2D(CTaken, Y), Font, Text);
+			DrawText(Out, Layer + 3, G, FString::FromInt(Campus->Kills), FVector2D(CK, Y), Font, Text, 0.5f, 0.5f, true);
+			DrawText(Out, Layer + 3, G, FString::FromInt(Campus->Deaths), FVector2D(CD, Y), Font, Text, 0.5f, 0.5f, true);
+			DrawText(Out, Layer + 3, G, FString::FromInt(FMath::RoundToInt(Campus->DamageDealt)), FVector2D(CDealt, Y), Font, Text, 0.5f, 0.5f, true);
+			DrawText(Out, Layer + 3, G, FString::FromInt(FMath::RoundToInt(Campus->DamageTaken)), FVector2D(CTaken, Y), Font, Text, 0.5f, 0.5f, true);
 		}
 	}
 	DrawText(Out, Layer + 2, G, TEXT("tap anywhere to close"), FVector2D(L.W * 0.5f, Top + BoxH + U * 2.f), FMath::RoundToInt(U * 1.2f), FLinearColor(1.f, 1.f, 1.f, 0.7f));

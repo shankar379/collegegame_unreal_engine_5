@@ -664,6 +664,43 @@ void UCampusBackend::BuyWithMoney(const FString& ItemId, FDone Done)
 	});
 }
 
+void UCampusBackend::VerifyGooglePurchase(const FString& ProductId, const FString& PurchaseToken, FJsonDone Done)
+{
+	if (PurchaseToken.IsEmpty())
+	{
+		Done(false, TEXT("Missing purchase token."), nullptr);
+		return;
+	}
+	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
+	Body->SetStringField(TEXT("productId"), ProductId);
+	Body->SetStringField(TEXT("purchaseToken"), PurchaseToken);
+	// Not idempotency-keyed: the purchase token is the natural key, and a retry days later from a restore must hit
+	// the same server-side record rather than a fresh one.
+	Request(TEXT("POST"), TEXT("/store/google/verify"), Body, true, false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		if (Status < 200 || Status > 299)
+		{
+			Done(false, ErrorText(Status, Json), Json);
+			return;
+		}
+		// Read the wallet wherever it turns up: nested under "wallet", under "player", or flat on the response.
+		if (const TSharedPtr<FJsonObject> Wallet = Obj(Json, TEXT("wallet")))
+		{
+			ReadWallet(Wallet);
+		}
+		else if (const TSharedPtr<FJsonObject> Player = Obj(Json, TEXT("player")))
+		{
+			const TSharedPtr<FJsonObject> Nested = Obj(Player, TEXT("wallet"));
+			ReadWallet(Nested.IsValid() ? Nested : Player);
+		}
+		else if (Json.IsValid() && (Json->HasField(TEXT("diamonds")) || Json->HasField(TEXT("room_cards"))))
+		{
+			ReadWallet(Json);
+		}
+		Done(true, FString(), Json);
+	});
+}
+
 void UCampusBackend::OnNativePaymentResult(const FString& OrderId, int32 Code, const FString& RzpOrderId, const FString& PaymentId,
 	const FString& Signature, const FString& Message)
 {

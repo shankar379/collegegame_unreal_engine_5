@@ -93,4 +93,29 @@ public:
 	/** First-time nickname chosen (guests get one generated until then). */
 	UPROPERTY()
 	bool bNicknameChosen = false;
+
+	// ---- settings (the gear in the lobby top-right and in the match HUD top-right). Added fields
+	// default sensibly, so an old save file loads with no migration.
+
+	/** Touch look speed multiplier, 0.6 .. 1.6. */
+	UPROPERTY()
+	float LookSensitivity = 1.f;
+
+	/** 0 smooth (lowest), 1 balanced, 2 HD. Pushed into the engine scalability levels. */
+	UPROPERTY()
+	int32 GraphicsQuality = 1;
+
+	/** Team voice: whether the mic / speaker start on when a match loads. */
+	UPROPERTY()
+	bool bMicDefaultOn = false;
+
+	UPROPERTY()
+	bool bSpeakerDefaultOn = true;
+
+	/** Second, smaller fire button on the left of the HUD (two-thumb shooting). */
+	UPROPERTY()
+	bool bLeftFireButton = true;
+
+	UPROPERTY()
+	bool bShowMinimap = true;
 };

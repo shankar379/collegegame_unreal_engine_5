@@ -1,30 +1,65 @@
 // Menu screens built in Slate (no widget assets to cook):
-//   Lobby level: Splash -> Sign in -> Event post (optional) -> Lobby -> Create / Join.
-//   Match level: Waiting room -> (game HUD lives in SCampusTouchControls) -> Win screen.
+//   Lobby level: Splash -> Sign in -> Event post (optional) -> Lobby -> Create / Join / Settings.
+//   Match level: Waiting room -> (game HUD lives in SCampusTouchControls) -> Settings -> Win screen.
+//
+// Look: Garena Free Fire. Sharp edges only - every panel, tab, counter and button is an
+// FCampusShape (slanted parallelogram or clipped corner box, see CampusAngular.h), bold condensed
+// italic uppercase type, dark translucent fills, one accent (#FFB800) with white text.
 
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Campus/CampusAngular.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/SLeafWidget.h"
 
 class ACampusLobbyPlayerController;
 class UCampusBackend;
+class UCampusParty;
 class UCampusSave;
 struct FCampusOffer;
+struct FCampusPartyMember;
 class ACampusMatchPlayerController;
 class SBox;
 
-/** Shared look: colours, fonts, buttons, panels. */
+/** Shared look: colours, fonts, angular buttons, angular panels. */
 namespace CampusStyle
 {
 	enum class EButton : uint8 { Dark, Accent, Go, Ghost };
 
+	/** Display type (bold condensed italic) when bBold, readable body type otherwise. */
 	FSlateFontInfo Font(int32 Size, bool bBold = true);
+
+	/** Sharp-cornered fallback brushes for the few places that still want a plain SBorder. */
 	const FSlateBrush* PanelBrush();
 	const FSlateBrush* CardBrush(bool bSelected);
+
 	TSharedRef<SWidget> Button(const FText& Label, FOnClicked OnClicked, EButton Kind = EButton::Dark,
 		int32 FontSize = 22, FVector2D MinSize = FVector2D(220.f, 64.f), bool bEnabled = true);
+
+	/** Free Fire's yellow slanted call to action (bottom-right START). */
+	TSharedRef<SWidget> StartButton(const FText& Label, FOnClicked OnClicked, FVector2D MinSize = FVector2D(300.f, 96.f));
+
+	/** Slanted dark menu tab (left-hand STORE / CHARACTER / VAULT / WEAPONS column). */
+	TSharedRef<SWidget> MenuTab(const FText& Label, CampusAngular::EGlyph Glyph, FOnClicked OnClicked,
+		bool bHighlighted = false, FVector2D MinSize = FVector2D(248.f, 62.f));
+
+	/** Small slanted selector pill (team size, map, rounds, store tabs). */
+	TSharedRef<SWidget> Pill(const FText& Label, bool bSelected, FOnClicked OnClicked, FVector2D MinSize = FVector2D(140.f, 48.f));
+
+	/** Square clipped-corner icon button: friends, mail, settings gear, close. */
+	TSharedRef<SWidget> IconButton(CampusAngular::EGlyph Glyph, FOnClicked OnClicked, float Size = 60.f,
+		FLinearColor Tint = FLinearColor::White, bool bAccentFill = false);
+
+	/** Slanted currency counter with an optional "+" cap, like the coin / gem chips. */
+	TSharedRef<SWidget> Counter(CampusAngular::EGlyph Glyph, const FLinearColor& Tint, TAttribute<FText> Value, FOnClicked OnPlus = FOnClicked());
+
+	/** Clipped-corner dark panel. */
+	TSharedRef<SWidget> Panel(TSharedRef<SWidget> Content, FMargin ContentPadding = FMargin(30.f, 22.f), float Cut = 18.f, bool bStrong = false);
+
+	/** Card plate; the selected one gets an accent border and left edge. */
+	TSharedRef<SWidget> Card(TSharedRef<SWidget> Content, bool bSelected, FMargin ContentPadding = FMargin(18.f, 12.f));
+
 	TSharedRef<SWidget> Label(const FText& Text, int32 Size, FLinearColor Color = FLinearColor::White, bool bBold = true);
 
 	extern const FLinearColor Accent;
@@ -32,7 +67,17 @@ namespace CampusStyle
 	extern const FLinearColor Muted;
 }
 
-/** Empty area that reports horizontal drags (mouse or one finger). Used to turn the podium character. */
+/** The one options panel, shared by the lobby gear and the in-match gear. */
+namespace CampusOptions
+{
+	/** Builds the rows; OnChanged is called after every tap so the caller can rebuild and persist. */
+	TSharedRef<SWidget> Body(UCampusSave* Save, TFunction<void()> OnChanged);
+
+	/** Pushes the saved graphics choice into the engine's scalability levels. */
+	void ApplyGraphics(const UCampusSave* Save);
+}
+
+/** Empty area that reports horizontal drags (mouse or one finger). Used to turn the squad. */
 class SCampusDragArea : public SLeafWidget
 {
 public:
@@ -75,12 +120,13 @@ public:
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
+	~SCampusLobbyWidget();
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
 private:
 	// Free Fire / PUBG style flow: Splash -> (first time) Agreement -> Login choice -> Email login / Register ->
 	// (first time) Nickname -> Lobby. The lobby opens the Store, Rooms (quick / create / join by code), Account.
-	enum class EScreen : uint8 { Splash, Agreement, LoginChoice, EmailLogin, Register, Nickname, Lobby, Store, Rooms, Account, Event, Daily };
+	enum class EScreen : uint8 { Splash, Agreement, LoginChoice, EmailLogin, Register, Nickname, Lobby, Store, Rooms, Account, Event, Daily, Settings };
 	enum class EStoreTab : uint8 { Guns, Offers, Packs };
 
 	void Show(EScreen Screen);
@@ -95,6 +141,9 @@ private:
 
 	UCampusBackend* Backend() const;
 	UCampusSave* Profile() const;
+	UCampusParty* Party() const;
+	/** Pushes the local player into the squad roster and keeps the plate row the right width. */
+	void SyncParty();
 
 	TSharedRef<SWidget> Backdrop(float Alpha) const;
 	TSharedRef<SWidget> Dialog(const FText& Title, TSharedRef<SWidget> Body, float Width, bool bClose, EScreen CloseTo);
@@ -108,6 +157,10 @@ private:
 	TSharedRef<SWidget> BuildNickname();
 	TSharedRef<SWidget> BuildLobby();
 	TSharedRef<SWidget> BuildTopBar();
+	TSharedRef<SWidget> BuildMenuColumn();
+	TSharedRef<SWidget> BuildSquadRow();
+	TSharedRef<SWidget> BuildNamePlate(const FCampusPartyMember& Member);
+	TSharedRef<SWidget> BuildInvitePlate();
 	TSharedRef<SWidget> BuildModeSelect();
 	TSharedRef<SWidget> BuildStore();
 	TSharedRef<SWidget> BuildGunCard(int32 Index);
@@ -116,6 +169,7 @@ private:
 	TSharedRef<SWidget> BuildAccount();
 	TSharedRef<SWidget> BuildDaily();
 	TSharedRef<SWidget> BuildEvent();
+	TSharedRef<SWidget> BuildSettings();
 
 	TWeakObjectPtr<ACampusLobbyPlayerController> Controller;
 	TSharedPtr<SBox> Content;
@@ -132,6 +186,7 @@ private:
 	FString ToastText;
 	bool bBusy = false;
 	FString BusyText;
+	FDelegateHandle PartyChangedHandle;
 
 	// form fields
 	FString EmailText;
@@ -156,6 +211,7 @@ public:
 private:
 	TSharedRef<SWidget> BuildWaiting();
 	TSharedRef<SWidget> BuildWin();
+	TSharedRef<SWidget> BuildSettings();
 	TSharedRef<SWidget> TeamColumn(uint8 Team);
 
 	TWeakObjectPtr<ACampusMatchPlayerController> Controller;
@@ -164,4 +220,5 @@ private:
 
 	int32 ShownPhase = -1;
 	FString ShownSignature;
+	bool bShownSettings = false;
 };

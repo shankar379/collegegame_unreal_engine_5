@@ -37,7 +37,7 @@ public:
 	virtual FReply OnTouchEnded(const FGeometry& MyGeometry, const FPointerEvent& TouchEvent) override;
 
 private:
-	enum class EControl : uint8 { None, Fire, FireLeft, Scope, Zoom, Reload, Jump, Crouch, Prone, Sprint, Weapon, Eye, Mic, Speaker };
+	enum class EControl : uint8 { None, Fire, FireLeft, Scope, Zoom, Reload, Jump, Crouch, Prone, Sprint, Weapon, Eye, Mic, Speaker, Settings };
 	enum class ERole : uint8 { Look, Joystick, FireDrag, Button, FreeLook };
 
 	struct FFinger
@@ -61,6 +61,16 @@ private:
 		float FireR = 0.f, FireLeftR = 0.f, ScopeR = 0.f, ReloadR = 0.f, JumpR = 0.f, CrouchR = 0.f, ProneR = 0.f, SprintR = 0.f, EyeR = 0.f;
 		FVector2D WeaponMin, WeaponSize;
 		FVector2D ZoomSize;
+		/** Settings gear, HUD top-right corner (Free Fire puts it there). */
+		FVector2D Gear;
+		float GearR = 0.f;
+		/** Team roster panel, top-left; the minimap sits under it. */
+		FVector2D TeamMin, TeamSize;
+		FVector2D MapMin;
+		float MapSize = 0.f;
+		/** ALIVE / KILL chips, left of the gear. */
+		FVector2D ChipRight;
+		float ChipTop = 0.f;
 	};
 
 	FLayout MakeLayout(const FVector2D& Size) const;
@@ -75,7 +85,9 @@ private:
 	void DrawCircle(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Center, float Radius, const FLinearColor& Color) const;
 	void DrawRing(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Center, float Radius, const FLinearColor& Color) const;
 	void DrawRect(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, const FVector2D& Size, const FLinearColor& Color) const;
-	void DrawText(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FString& Text, const FVector2D& Anchor, int32 Size, const FLinearColor& Color, float AlignX = 0.5f, float AlignY = 0.5f) const;
+	/** bTabular: upright bold condensed instead of italic, for numbers that sit in a column
+	 *  (the scoreboard). Italic numerals in a table never line up. */
+	void DrawText(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FString& Text, const FVector2D& Anchor, int32 Size, const FLinearColor& Color, float AlignX = 0.5f, float AlignY = 0.5f, bool bTabular = false) const;
 	void DrawPolyline(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const TArray<FVector2f>& Points, const FLinearColor& Color, float Thickness) const;
 	void DrawIcon(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, EControl Control, const FVector2D& C, float R, const FLinearColor& Color, float Spin) const;
 	void DrawHud(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
@@ -103,9 +115,31 @@ private:
 	float DamageFlash = 0.f;
 	float SpinAngle = 0.f;
 
+	// Settings cached in Tick: reading the save game in OnPaint / per look event would hit the
+	// game instance thousands of times a second for values that change on a menu tap.
+	float LookSensitivity = 1.f;
+	bool bShowMinimap = true;
+	bool bLeftFireButton = true;
+
 	/** Rounded-box brushes need an exact corner radius (the shader does not clamp), so cache one per size. */
 	const FSlateBrush* RoundBrush(float Radius, float OutlineWidth = 0.f, const FLinearColor& OutlineColor = FLinearColor::White) const;
 	void DrawPill(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, const FVector2D& Size, const FLinearColor& Color) const;
+
+	// ---- angular HUD chrome (Free Fire look). Same FCampusShape vocabulary as the Slate menus,
+	// so a HUD chip and a lobby tab lean by the same amount.
+	/** Dark translucent parallelogram chip; Slant is in px of top-edge shift. */
+	void DrawSlantedPanel(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, const FVector2D& Size,
+		float Slant, const FLinearColor& Fill, const FLinearColor& Border = FLinearColor::Transparent, float BorderWidth = 0.f) const;
+	/** Clipped-corner box (all four corners cut by Cut px). */
+	void DrawCutCornerBox(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, const FVector2D& Size,
+		float Cut, const FLinearColor& Fill, const FLinearColor& Border = FLinearColor::Transparent, float BorderWidth = 0.f) const;
+	/** Chip with only the top-right and bottom-left corners cut: the standard HUD plate. */
+	void DrawNotchedBox(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, const FVector2D& Size,
+		float Cut, const FLinearColor& Fill, const FLinearColor& Border = FLinearColor::Transparent, float BorderWidth = 0.f) const;
+	/** The teammate list, top-left: name + flat health bar per player on your team. */
+	void DrawTeamList(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
+	/** Connection strength: Wi-Fi bars tinted by ping, with the number beside them. */
+	void DrawConnection(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
 
 	mutable TMap<uint64, TUniquePtr<FSlateRoundedBoxBrush>> BrushCache;
 

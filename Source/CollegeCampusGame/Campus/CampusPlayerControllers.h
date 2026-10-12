@@ -1,5 +1,6 @@
 // One controller per level.
-// Lobby: UI only — shows the character on a podium, drag to turn, menus, START.
+// Lobby: UI only — the squad stands side by side on the lobby floor (no podium), drag to turn,
+//        menus, START.
 // Match: game controls — waiting room, then on-screen controls + HUD, then the win screen.
 
 #pragma once
@@ -13,6 +14,7 @@ class ASkeletalMeshActor;
 class SCampusLobbyWidget;
 class SCampusMatchWidget;
 class SCampusTouchControls;
+class UCampusParty;
 class UCampusSave;
 class UCampusBackend;
 class UCampusGameInstance;
@@ -27,8 +29,9 @@ public:
 
 	UCampusGameInstance* GetCampusInstance() const;
 	UCampusSave* GetProfile() const;
+	UCampusParty* GetParty() const;
 
-	/** Turns the podium character (drag in the empty middle of the screen). */
+	/** Turns the whole squad together (drag in the empty middle of the screen). */
 	void RotateDisplay(float DeltaYaw);
 
 	UCampusBackend* GetBackend() const;
@@ -47,13 +50,28 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	/** Drops the podium cylinder that ships in L_Lobby so the squad stands on the floor. */
+	void RemovePodium();
+
+	/** Spawns / moves / hides one character per accepted squad member, leader in the middle.
+	 *  Called once at BeginPlay and again whenever the roster or the squad size changes. */
+	void RebuildSquad();
+
+	/** The floor height under a slot, traced once per rebuild (the podium may be gone by then). */
+	float GroundAt(const FVector& Where) const;
+
+	/** Keeps the yaw the player dragged to when the line-up is rebuilt. */
+	float DisplayYaw = 0.f;
+
+	/** Index 0 is the local player; up to UCampusParty::MaxMembers. */
 	UPROPERTY(Transient)
-	TObjectPtr<ASkeletalMeshActor> Display;
+	TArray<TObjectPtr<ASkeletalMeshActor>> Squad;
 
 	UPROPERTY(Transient)
 	TObjectPtr<ACameraActor> PodiumCamera;
 
 	TSharedPtr<SCampusLobbyWidget> Widget;
+	FDelegateHandle PartyChangedHandle;
 };
 
 UCLASS()
@@ -88,6 +106,14 @@ public:
 	bool IsMicOn() const { return bMicOn; }
 	bool IsSpeakerOn() const { return bSpeakerOn; }
 
+	/** The in-match settings gear (HUD top-right). SCampusMatchWidget draws the panel. */
+	void SetSettingsOpen(bool bOpen) { bSettingsOpen = bOpen; }
+	void ToggleSettings() { bSettingsOpen = !bSettingsOpen; }
+	bool IsSettingsOpen() const { return bSettingsOpen; }
+
+	/** Look speed from the saved settings; the touch HUD multiplies its deltas by this. */
+	float GetLookSensitivity() const;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -107,6 +133,7 @@ private:
 
 	bool bMicOn = false;
 	bool bSpeakerOn = true;
+	bool bSettingsOpen = false;
 	/** Android: the microphone permission is asked the first time the mic is turned on. */
 	UFUNCTION()
 	void OnMicPermission(const TArray<FString>& Permissions, const TArray<bool>& Granted);

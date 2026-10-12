@@ -204,6 +204,13 @@
 			"Enabled": true
 		},
 		{
+			"Name": "OnlineSubsystemGooglePlay",
+			"Enabled": true,
+			"SupportedTargetPlatforms": [
+				"Android"
+			]
+		},
+		{
 			"Name": "AndroidPermission",
 			"Enabled": true
 		}

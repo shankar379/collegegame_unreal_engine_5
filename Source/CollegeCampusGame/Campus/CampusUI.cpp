@@ -1,6 +1,7 @@
 #include "Campus/CampusUI.h"
 
 #include "Brushes/SlateRoundedBoxBrush.h"
+#include "Campus/CampusAngular.h"
 #include "Campus/CampusGameInstance.h"
 #include "Campus/CampusMatchState.h"
 #include "Campus/CampusNetSettings.h"
@@ -8,6 +9,7 @@
 #include "Campus/CampusSave.h"
 #include "Engine/World.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Scalability.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
@@ -24,79 +26,362 @@
 
 namespace CampusStyle
 {
-	const FLinearColor Accent(FColor(0xF0, 0x8A, 0x24));
-	const FLinearColor Go(FColor(0x2E, 0xB8, 0x5C));
-	const FLinearColor Muted(1.f, 1.f, 1.f, 0.55f);
+	const FLinearColor Accent = CampusAngular::Accent;
+	const FLinearColor Go = CampusAngular::Go;
+	const FLinearColor Muted = CampusAngular::TextMuted;
 
 	FSlateFontInfo Font(int32 Size, bool bBold)
 	{
-		return FCoreStyle::GetDefaultFontStyle(bBold ? "Bold" : "Regular", Size);
+		// Bold = the Free Fire display face (condensed italic). Not bold = paragraphs, which must
+		// stay readable: condensed italic over several lines of terms text is not.
+		return bBold ? CampusAngular::Display(Size) : CampusAngular::Body(Size);
 	}
 
 	const FSlateBrush* PanelBrush()
 	{
-		static const FSlateRoundedBoxBrush Brush(FLinearColor(0.035f, 0.045f, 0.06f, 0.88f), 18.f, FLinearColor(1.f, 1.f, 1.f, 0.08f), 1.f);
+		// Radius 0: even the fallback brush has sharp corners now.
+		static const FSlateRoundedBoxBrush Brush(CampusAngular::Ink, 0.f, CampusAngular::Hairline, 1.f);
 		return &Brush;
 	}
 
 	const FSlateBrush* CardBrush(bool bSelected)
 	{
-		static const FSlateRoundedBoxBrush Normal(FLinearColor(0.07f, 0.08f, 0.1f, 0.9f), 14.f, FLinearColor(1.f, 1.f, 1.f, 0.12f), 1.f);
-		static const FSlateRoundedBoxBrush Selected(FLinearColor(0.07f, 0.08f, 0.1f, 0.95f), 14.f, Accent, 3.f);
+		static const FSlateRoundedBoxBrush Normal(FLinearColor(0.04f, 0.05f, 0.07f, 0.88f), 0.f, CampusAngular::Hairline, 1.f);
+		static const FSlateRoundedBoxBrush Selected(FLinearColor(0.09f, 0.08f, 0.04f, 0.94f), 0.f, CampusAngular::Accent, 2.f);
 		return bSelected ? &Selected : &Normal;
 	}
 
-	static const FButtonStyle& ButtonStyle(EButton Kind)
+	namespace
 	{
-		auto Make = [](const FLinearColor& Color)
+		FLinearColor Face(EButton Kind)
 		{
-			const float Radius = 14.f;
-			return FButtonStyle()
-				.SetNormal(FSlateRoundedBoxBrush(Color, Radius))
-				.SetHovered(FSlateRoundedBoxBrush(Color * FLinearColor(1.15f, 1.15f, 1.15f, 1.f), Radius))
-				.SetPressed(FSlateRoundedBoxBrush(Color * FLinearColor(0.8f, 0.8f, 0.8f, 1.f), Radius))
-				.SetDisabled(FSlateRoundedBoxBrush(FLinearColor(0.2f, 0.2f, 0.22f, 0.6f), Radius))
-				.SetNormalPadding(FMargin(12.f, 6.f))
-				.SetPressedPadding(FMargin(12.f, 7.f, 12.f, 5.f));
-		};
-		static const FButtonStyle Dark = Make(FLinearColor(0.11f, 0.13f, 0.17f, 0.92f));
-		static const FButtonStyle AccentStyle = Make(Accent);
-		static const FButtonStyle GoStyle = Make(Go);
-		static const FButtonStyle Ghost = Make(FLinearColor(1.f, 1.f, 1.f, 0.08f));
-		switch (Kind)
+			switch (Kind)
+			{
+			case EButton::Accent: return CampusAngular::Accent;
+			case EButton::Go: return CampusAngular::Go;
+			case EButton::Ghost: return FLinearColor(1.f, 1.f, 1.f, 0.10f);
+			default: return FLinearColor(0.07f, 0.09f, 0.12f, 0.92f);
+			}
+		}
+
+		/** The accent plate carries dark text, like Free Fire's yellow button. */
+		FLinearColor Ink(EButton Kind)
 		{
-		case EButton::Accent: return AccentStyle;
-		case EButton::Go: return GoStyle;
-		case EButton::Ghost: return Ghost;
-		default: return Dark;
+			return Kind == EButton::Accent ? FLinearColor(0.06f, 0.05f, 0.02f, 1.f) : FLinearColor::White;
 		}
 	}
 
 	TSharedRef<SWidget> Button(const FText& Label, FOnClicked OnClicked, EButton Kind, int32 FontSize, FVector2D MinSize, bool bEnabled)
 	{
+		// The slant scales with the plate height, so a 46px pill and a 96px button lean the same amount.
+		const float Slant = FMath::Clamp(MinSize.Y * 0.26f, 8.f, 26.f);
 		return SNew(SBox)
 			.MinDesiredWidth(MinSize.X)
 			.MinDesiredHeight(MinSize.Y)
+			.IsEnabled(bEnabled)
 			[
-				SNew(SButton)
-				.ButtonStyle(&ButtonStyle(Kind))
-				.IsEnabled(bEnabled)
-				.HAlign(HAlign_Center)
-				.VAlign(VAlign_Center)
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Slanted(Slant))
+				.Fill(Face(Kind))
+				.Border(Kind == EButton::Dark || Kind == EButton::Ghost ? CampusAngular::Hairline : FLinearColor::Transparent)
+				.BorderWidth(1.f)
+				.ContentPadding(FMargin(16.f, 6.f))
 				.OnClicked(OnClicked)
 				[
 					SNew(STextBlock)
 					.Text(Label)
 					.Font(Font(FontSize))
-					.ColorAndOpacity(FLinearColor::White)
+					.ColorAndOpacity(Ink(Kind))
 					.Justification(ETextJustify::Center)
 				]
+			];
+	}
+
+	TSharedRef<SWidget> StartButton(const FText& Label, FOnClicked OnClicked, FVector2D MinSize)
+	{
+		return SNew(SBox).MinDesiredWidth(MinSize.X).MinDesiredHeight(MinSize.Y)
+			[
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Wedge(MinSize.Y * 0.3f, MinSize.Y * 0.22f))
+				.Fill(CampusAngular::Accent)
+				.Border(FLinearColor(1.f, 1.f, 1.f, 0.35f))
+				.BorderWidth(2.f)
+				.ContentPadding(FMargin(26.f, 8.f))
+				.OnClicked(OnClicked)
+				[
+					SNew(STextBlock)
+					.Text(Label)
+					.Font(CampusAngular::Display(FMath::RoundToInt(MinSize.Y * 0.36f)))
+					.ColorAndOpacity(FLinearColor(0.06f, 0.05f, 0.02f, 1.f))
+				]
+			];
+	}
+
+	TSharedRef<SWidget> MenuTab(const FText& Label, CampusAngular::EGlyph Glyph, FOnClicked OnClicked, bool bHighlighted, FVector2D MinSize)
+	{
+		return SNew(SBox).MinDesiredWidth(MinSize.X).MinDesiredHeight(MinSize.Y)
+			[
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Tab(MinSize.Y * 0.34f))
+				.Fill(bHighlighted ? FLinearColor(0.16f, 0.12f, 0.02f, 0.92f) : FLinearColor(0.02f, 0.03f, 0.04f, 0.78f))
+				.Border(bHighlighted ? CampusAngular::Accent : CampusAngular::Hairline)
+				.BorderWidth(bHighlighted ? 2.f : 1.f)
+				.AccentEdge(bHighlighted ? CampusAngular::Accent : FLinearColor(1.f, 1.f, 1.f, 0.22f))
+				.AccentEdgeWidth(5.f)
+				.ContentPadding(FMargin(MinSize.Y * 0.42f, 4.f, 16.f, 4.f))
+				.OnClicked(OnClicked)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 12.f, 0.f)
+					[
+						SNew(SBox).WidthOverride(24.f).HeightOverride(24.f)
+						[
+							SNew(SCampusGlyph).Glyph(Glyph).Size(24.f).Color(bHighlighted ? CampusAngular::Accent : FLinearColor(1.f, 1.f, 1.f, 0.8f))
+						]
+					]
+					+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+					[
+						SNew(STextBlock).Text(Label).Font(CampusAngular::Display(21)).ColorAndOpacity(FLinearColor::White)
+					]
+				]
+			];
+	}
+
+	TSharedRef<SWidget> Pill(const FText& Label, bool bSelected, FOnClicked OnClicked, FVector2D MinSize)
+	{
+		return SNew(SBox).MinDesiredWidth(MinSize.X).MinDesiredHeight(MinSize.Y)
+			[
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Slanted(MinSize.Y * 0.3f))
+				.Fill(bSelected ? CampusAngular::Accent : FLinearColor(0.04f, 0.05f, 0.07f, 0.85f))
+				.Border(bSelected ? FLinearColor::Transparent : CampusAngular::Hairline)
+				.BorderWidth(1.f)
+				.ContentPadding(FMargin(14.f, 4.f))
+				.OnClicked(OnClicked)
+				[
+					SNew(STextBlock)
+					.Text(Label)
+					.Font(CampusAngular::Display(FMath::Max(14, FMath::RoundToInt(MinSize.Y * 0.38f))))
+					.ColorAndOpacity(bSelected ? FLinearColor(0.06f, 0.05f, 0.02f, 1.f) : FLinearColor(1.f, 1.f, 1.f, 0.92f))
+				]
+			];
+	}
+
+	TSharedRef<SWidget> IconButton(CampusAngular::EGlyph Glyph, FOnClicked OnClicked, float Size, FLinearColor Tint, bool bAccentFill)
+	{
+		return SNew(SBox).WidthOverride(Size).HeightOverride(Size)
+			[
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Notched(Size * 0.26f))
+				.Fill(bAccentFill ? CampusAngular::Accent : FLinearColor(0.02f, 0.03f, 0.04f, 0.82f))
+				.Border(bAccentFill ? FLinearColor::Transparent : CampusAngular::Hairline)
+				.BorderWidth(1.f)
+				.ContentPadding(FMargin(Size * 0.2f))
+				.OnClicked(OnClicked)
+				[
+					SNew(SCampusGlyph)
+					.Glyph(Glyph)
+					.Size(Size * 0.56f)
+					.Color(bAccentFill ? FLinearColor(0.06f, 0.05f, 0.02f, 1.f) : Tint)
+				]
+			];
+	}
+
+	TSharedRef<SWidget> Counter(CampusAngular::EGlyph Glyph, const FLinearColor& Tint, TAttribute<FText> Value, FOnClicked OnPlus)
+	{
+		TSharedRef<SHorizontalBox> Row = SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				SNew(SCampusAngularPanel)
+				.Shape(FCampusShape::Slanted(14.f))
+				.Fill(FLinearColor(0.02f, 0.03f, 0.04f, 0.84f))
+				.Border(CampusAngular::Hairline)
+				.BorderWidth(1.f)
+				.ContentPadding(FMargin(20.f, 8.f, 18.f, 8.f))
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 9.f, 0.f)
+					[
+						SNew(SBox).WidthOverride(20.f).HeightOverride(20.f)
+						[
+							SNew(SCampusGlyph).Glyph(Glyph).Size(20.f).Color(Tint)
+						]
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						SNew(STextBlock).Text(Value).Font(CampusAngular::Numeric(22)).ColorAndOpacity(FLinearColor::White)
+					]
+				]
+			];
+		if (OnPlus.IsBound())
+		{
+			Row->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(2.f, 0.f, 0.f, 0.f)
+			[
+				SNew(SBox).WidthOverride(44.f).HeightOverride(46.f)
+				[
+					SNew(SCampusAngularButton)
+					.Shape(FCampusShape::Slanted(12.f))
+					.Fill(CampusAngular::Accent)
+					.Border(FLinearColor::Transparent)
+					.BorderWidth(0.f)
+					.OnClicked(OnPlus)
+					[
+						SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Plus).Size(18.f).Color(FLinearColor(0.06f, 0.05f, 0.02f, 1.f))
+					]
+				]
+			];
+		}
+		return Row;
+	}
+
+	TSharedRef<SWidget> Panel(TSharedRef<SWidget> Content, FMargin ContentPadding, float Cut, bool bStrong)
+	{
+		return SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Clipped(Cut))
+			.Fill(bStrong ? CampusAngular::InkStrong : CampusAngular::Ink)
+			.Border(CampusAngular::Hairline)
+			.BorderWidth(1.f)
+			.ContentPadding(ContentPadding)
+			[
+				Content
+			];
+	}
+
+	TSharedRef<SWidget> Card(TSharedRef<SWidget> Content, bool bSelected, FMargin ContentPadding)
+	{
+		return SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Notched(16.f))
+			.Fill(bSelected ? FLinearColor(0.09f, 0.08f, 0.04f, 0.94f) : FLinearColor(0.04f, 0.05f, 0.07f, 0.88f))
+			.Border(bSelected ? CampusAngular::Accent : CampusAngular::Hairline)
+			.BorderWidth(bSelected ? 2.f : 1.f)
+			.AccentEdge(bSelected ? CampusAngular::Accent : FLinearColor::Transparent)
+			.AccentEdgeWidth(bSelected ? 5.f : 0.f)
+			.ContentPadding(ContentPadding)
+			[
+				Content
 			];
 	}
 
 	TSharedRef<SWidget> Label(const FText& Text, int32 Size, FLinearColor Color, bool bBold)
 	{
 		return SNew(STextBlock).Text(Text).Font(Font(Size, bBold)).ColorAndOpacity(Color).AutoWrapText(false);
+	}
+}
+
+// -------------------------------------------------------------------------------------------------
+// Options (the gear). One panel, two entry points: the lobby top-right and the in-match HUD.
+
+namespace CampusOptions
+{
+	void ApplyGraphics(const UCampusSave* Save)
+	{
+		if (!Save)
+		{
+			return;
+		}
+		// 0 smooth / 1 balanced / 2 HD -> engine scalability 1 / 2 / 3 (level 0 is unusable on a phone).
+		const int32 Level = FMath::Clamp(Save->GraphicsQuality, 0, 2) + 1;
+		Scalability::FQualityLevels Levels = Scalability::GetQualityLevels();
+		Levels.SetFromSingleQualityLevel(Level);
+		Scalability::SetQualityLevels(Levels);
+	}
+
+	namespace
+	{
+		/** One labelled row with its choices on the right. */
+		TSharedRef<SWidget> OptionRow(const FText& Title, const FText& Hint, TSharedRef<SWidget> Choices)
+		{
+			return SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center).Padding(0.f, 0.f, 18.f, 0.f)
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()[CampusStyle::Label(Title, 21)]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock).Text(Hint).Font(CampusAngular::Body(14)).ColorAndOpacity(CampusAngular::TextMuted).AutoWrapText(true)
+					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[Choices];
+		}
+
+		TSharedRef<SWidget> OptionSwitch(const FText& Title, const FText& Hint, bool bOn, TFunction<void()> Toggle)
+		{
+			return OptionRow(Title, Hint, CampusStyle::Pill(bOn ? LOCTEXT("On", "ON") : LOCTEXT("Off", "OFF"), bOn,
+				FOnClicked::CreateLambda([Toggle]() { Toggle(); return FReply::Handled(); }), FVector2D(110.f, 48.f)));
+		}
+	}
+
+	TSharedRef<SWidget> Body(UCampusSave* Save, TFunction<void()> OnChanged)
+	{
+		if (!Save)
+		{
+			return CampusStyle::Label(LOCTEXT("NoSettings", "SETTINGS ARE NOT READY YET"), 20, CampusAngular::TextMuted);
+		}
+
+		TSharedRef<SHorizontalBox> Sensitivity = SNew(SHorizontalBox);
+		for (float Choice : { 0.6f, 0.8f, 1.0f, 1.3f, 1.6f })
+		{
+			const bool bSelected = FMath::IsNearlyEqual(Save->LookSensitivity, Choice, 0.05f);
+			Sensitivity->AddSlot().AutoWidth().Padding(3.f, 0.f)
+			[
+				CampusStyle::Pill(FText::FromString(FString::Printf(TEXT("%.1fx"), Choice)), bSelected,
+					FOnClicked::CreateLambda([Save, Choice, OnChanged]()
+					{
+						Save->LookSensitivity = Choice;
+						Save->Persist();
+						OnChanged();
+						return FReply::Handled();
+					}), FVector2D(78.f, 48.f))
+			];
+		}
+
+		static const TCHAR* QualityNames[] = { TEXT("SMOOTH"), TEXT("BALANCED"), TEXT("HD") };
+		TSharedRef<SHorizontalBox> Quality = SNew(SHorizontalBox);
+		for (int32 Index = 0; Index < 3; ++Index)
+		{
+			Quality->AddSlot().AutoWidth().Padding(3.f, 0.f)
+			[
+				CampusStyle::Pill(FText::FromString(QualityNames[Index]), Save->GraphicsQuality == Index,
+					FOnClicked::CreateLambda([Save, Index, OnChanged]()
+					{
+						Save->GraphicsQuality = Index;
+						Save->Persist();
+						ApplyGraphics(Save);
+						OnChanged();
+						return FReply::Handled();
+					}), FVector2D(132.f, 48.f))
+			];
+		}
+
+		return SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)
+			[
+				OptionRow(LOCTEXT("SetSens", "LOOK SENSITIVITY"), LOCTEXT("SetSensHint", "How far the view turns for one swipe."), Sensitivity)
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)
+			[
+				OptionRow(LOCTEXT("SetGfx", "GRAPHICS"), LOCTEXT("SetGfxHint", "Drop to SMOOTH if the frame rate dips."), Quality)
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)
+			[
+				OptionSwitch(LOCTEXT("SetMic", "TEAM MIC"), LOCTEXT("SetMicHint", "Start matches with your microphone open."), Save->bMicDefaultOn,
+					[Save, OnChanged]() { Save->bMicDefaultOn = !Save->bMicDefaultOn; Save->Persist(); OnChanged(); })
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)
+			[
+				OptionSwitch(LOCTEXT("SetSpk", "TEAM SPEAKER"), LOCTEXT("SetSpkHint", "Hear your teammates."), Save->bSpeakerDefaultOn,
+					[Save, OnChanged]() { Save->bSpeakerDefaultOn = !Save->bSpeakerDefaultOn; Save->Persist(); OnChanged(); })
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)
+			[
+				OptionSwitch(LOCTEXT("SetLeftFire", "LEFT FIRE BUTTON"), LOCTEXT("SetLeftFireHint", "A second, smaller fire button for your left thumb."), Save->bLeftFireButton,
+					[Save, OnChanged]() { Save->bLeftFireButton = !Save->bLeftFireButton; Save->Persist(); OnChanged(); })
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)
+			[
+				OptionSwitch(LOCTEXT("SetMap", "MINIMAP"), LOCTEXT("SetMapHint", "The campus map in the HUD's top-left corner."), Save->bShowMinimap,
+					[Save, OnChanged]() { Save->bShowMinimap = !Save->bShowMinimap; Save->Persist(); OnChanged(); })
+			];
 	}
 }
 
@@ -229,22 +514,103 @@ void SCampusMatchWidget::Tick(const FGeometry& AllottedGeometry, const double In
 	const UWorld* World = Controller.IsValid() ? Controller->GetWorld() : nullptr;
 	const ACampusGameState* State = World ? World->GetGameState<ACampusGameState>() : nullptr;
 	const int32 Phase = State ? int32(State->Phase) : -1;
+	const bool bSettings = Controller.IsValid() && Controller->IsSettingsOpen();
 
-	// Rebuild only when the phase or the room's players change; rebuilding every frame makes it flicker.
+	// Rebuild only when the phase, the room's players, or the gear state change; rebuilding every
+	// frame makes it flicker (and allocates a screenful of widgets 60 times a second).
 	const FString Signature = Phase == int32(ECampusPhase::Waiting) ? RoomSignature() : FString();
-	if (Phase == ShownPhase && Signature == ShownSignature)
+	if (Phase == ShownPhase && Signature == ShownSignature && bSettings == bShownSettings)
 	{
 		return;
 	}
 	ShownPhase = Phase;
 	ShownSignature = Signature;
+	bShownSettings = bSettings;
 
+	// The gear wins over everything: it is the only way out of a match on a phone.
+	if (bSettings)
+	{
+		Content->SetContent(BuildSettings());
+		return;
+	}
 	switch (Phase)
 	{
 	case int32(ECampusPhase::Waiting): Content->SetContent(BuildWaiting()); break;
 	case int32(ECampusPhase::Ended): Content->SetContent(BuildWin()); break;
 	default: Content->SetContent(SNullWidget::NullWidget); break;
 	}
+}
+
+TSharedRef<SWidget> SCampusMatchWidget::BuildSettings()
+{
+	auto Close = [this]()
+	{
+		if (Controller.IsValid()) { Controller->SetSettingsOpen(false); }
+		return FReply::Handled();
+	};
+	UCampusSave* Save = Controller.IsValid() ? Controller->GetProfile() : nullptr;
+	// The in-match panel applies the two voice switches immediately, so a player can mute mid-fight.
+	TWeakObjectPtr<ACampusMatchPlayerController> Weak = Controller;
+	TFunction<void()> OnChanged = [this, Weak]()
+	{
+		if (ACampusMatchPlayerController* PC = Weak.Get())
+		{
+			if (const UCampusSave* S = PC->GetProfile())
+			{
+				PC->SetMicOn(S->bMicDefaultOn);
+				PC->SetSpeakerOn(S->bSpeakerDefaultOn);
+			}
+		}
+		// Force a rebuild on the next Tick so the pills show their new state.
+		bShownSettings = false;
+	};
+
+	return SNew(SOverlay)
+		+ SOverlay::Slot()
+		[
+			// Opaque enough to read over gameplay, and it swallows taps so nothing fires behind it.
+			SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox")).BorderBackgroundColor(FLinearColor(0.f, 0.f, 0.f, 0.72f))
+		]
+		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
+		[
+			SNew(SBox).WidthOverride(900.f)
+			[
+				CampusStyle::Panel(
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 14.f)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)[CampusStyle::Label(LOCTEXT("MatchSettings", "SETTINGS"), 32, Accent)]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							CampusStyle::IconButton(CampusAngular::EGlyph::Close, FOnClicked::CreateLambda(Close), 58.f)
+						]
+					]
+					+ SVerticalBox::Slot().AutoHeight()[CampusOptions::Body(Save, OnChanged)]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 20.f, 0.f, 0.f)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							Button(LOCTEXT("BackToMatch", "BACK TO MATCH"), FOnClicked::CreateLambda(Close), EButton::Go, 22, FVector2D(280.f, 64.f))
+						]
+						+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer)]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							Button(LOCTEXT("QuitMatch", "LEAVE MATCH"), FOnClicked::CreateLambda([this]()
+							{
+								if (Controller.IsValid())
+								{
+									Controller->SetSettingsOpen(false);
+									Controller->LeaveToLobby();
+								}
+								return FReply::Handled();
+							}), EButton::Ghost, 20, FVector2D(230.f, 64.f))
+						]
+					],
+					FMargin(36.f, 26.f), 22.f, true)
+			]
+		];
 }
 
 FString SCampusMatchWidget::RoomSignature() const
@@ -294,7 +660,17 @@ TSharedRef<SWidget> SCampusMatchWidget::TeamColumn(uint8 Team)
 	}
 	return SNew(SBox).WidthOverride(300.f)
 		[
-			SNew(SBorder).BorderImage(CardBrush(false)).Padding(FMargin(20.f, 16.f))[Names]
+			SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Notched(18.f))
+			.Fill(FLinearColor(0.03f, 0.04f, 0.055f, 0.9f))
+			.Border(bRed ? FLinearColor(FColor(0xE5, 0x3E, 0x3E)) : FLinearColor(FColor(0x3E, 0x8E, 0xE5)))
+			.BorderWidth(2.f)
+			.AccentEdge(bRed ? FLinearColor(FColor(0xE5, 0x3E, 0x3E)) : FLinearColor(FColor(0x3E, 0x8E, 0xE5)))
+			.AccentEdgeWidth(5.f)
+			.ContentPadding(FMargin(24.f, 16.f))
+			[
+				Names
+			]
 		];
 }
 
@@ -312,19 +688,16 @@ TSharedRef<SWidget> SCampusMatchWidget::BuildWaiting()
 				if (Controller.IsValid()) { Controller->ServerRequestStart(); }
 				return FReply::Handled();
 			}), EButton::Go, 28, FVector2D(320.f, 84.f))
-		: Label(FText::Format(LOCTEXT("WaitingHost", "Waiting for the host  ·  {0} players"), FText::AsNumber(Count)), 20, Muted, false);
+		: Label(FText::Format(LOCTEXT("WaitingHost", "WAITING FOR THE HOST  ·  {0} PLAYERS"), FText::AsNumber(Count)), 20, Muted);
 
 	return SNew(SOverlay)
 		+ SOverlay::Slot()
 		[
-			SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox")).BorderBackgroundColor(FLinearColor(0.f, 0.f, 0.f, 0.35f))
+			SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox")).BorderBackgroundColor(FLinearColor(0.f, 0.f, 0.f, 0.45f))
 		]
 		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
 		[
-			SNew(SBorder)
-			.BorderImage(PanelBrush())
-			.Padding(FMargin(36.f, 26.f))
-			[
+			CampusStyle::Panel(
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot().AutoHeight()
 				[
@@ -367,8 +740,8 @@ TSharedRef<SWidget> SCampusMatchWidget::BuildWaiting()
 					[
 						StartArea
 					]
-				]
-			]
+				],
+				FMargin(40.f, 28.f), 22.f, true)
 		];
 }
 
@@ -390,16 +763,21 @@ TSharedRef<SWidget> SCampusMatchWidget::BuildWin()
 		]
 		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
 		[
-			SNew(SBorder)
-			.BorderImage(PanelBrush())
-			.Padding(FMargin(56.f, 34.f))
-			[
+			CampusStyle::Panel(
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 				[
 					Label(Headline, 56, bWon ? Go : Accent)
 				]
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 8.f)
+				// A slanted accent rule under the headline instead of a soft divider.
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 2.f, 0.f, 10.f)
+				[
+					SNew(SCampusAngularPanel).Shape(FCampusShape::Slanted(14.f)).Fill(bWon ? Go : Accent)
+					[
+						SNew(SBox).WidthOverride(260.f).HeightOverride(5.f)
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 				[
 					Label(FText::Format(LOCTEXT("Score", "RED {0}  -  {1} BLUE"), FText::AsNumber(State ? State->RedScore : 0), FText::AsNumber(State ? State->BlueScore : 0)), 24)
 				]
@@ -409,13 +787,13 @@ TSharedRef<SWidget> SCampusMatchWidget::BuildWin()
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 				[
-					Button(FText::Format(LOCTEXT("Claim", "CLAIM {0} COINS"), FText::AsNumber(Reward)), FOnClicked::CreateLambda([this]()
+					StartButton(FText::Format(LOCTEXT("Claim", "CLAIM {0} COINS"), FText::AsNumber(Reward)), FOnClicked::CreateLambda([this]()
 					{
 						if (Controller.IsValid()) { Controller->ClaimAndLeave(); }
 						return FReply::Handled();
-					}), EButton::Go, 28, FVector2D(380.f, 88.f))
-				]
-			]
+					}), FVector2D(420.f, 92.f))
+				],
+				FMargin(60.f, 36.f), 26.f, true)
 		];
 }
 

@@ -5,15 +5,20 @@
 
 #include "Campus/CampusUI.h"
 
+#include "Campus/CampusAngular.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusGameInstance.h"
+#include "Campus/CampusParty.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "Campus/CampusSave.h"
+#include "Brushes/SlateNoResource.h"
 #include "Styling/CoreStyle.h"
+#include "Styling/SlateTypes.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SConstraintCanvas.h"
 #include "Widgets/Layout/SSafeZone.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SSpacer.h"
@@ -55,14 +60,35 @@ namespace
 		TEXT("Tip: upgrade a gun to raise its damage and accuracy."),
 	};
 
-	const FLinearColor Diamond(FColor(0x5C, 0xD6, 0xFF));
-	const FLinearColor Card(FColor(0xFF, 0xD3, 0x4D));
-	const FLinearColor Danger(FColor(0xE5, 0x4B, 0x4B));
+	const FLinearColor Diamond = CampusAngular::Gem;
+	const FLinearColor CardGold = CampusAngular::CoinGold;
+	const FLinearColor Danger = CampusAngular::Danger;
 
 	FString Money(float Inr)
 	{
 		return FString::Printf(TEXT("₹%s"), *FString::SanitizeFloat(Inr, 0));
 	}
+
+	/** One slot in the lobby squad row, as a fraction of the viewport width either side of centre.
+	 *  ACampusLobbyPlayerController uses the same step to place the 3D characters, so a plate is
+	 *  always under its own character whatever the screen size. */
+	constexpr float SquadSlotFraction = 0.16f;
+
+	/** The left-hand menu. Every tab lands on a screen that exists. */
+	enum class ELobbyTab : uint8 { Store, Character, Vault, Weapons, Events };
+	struct FTabDef
+	{
+		ELobbyTab Tab;
+		const TCHAR* Label;
+		CampusAngular::EGlyph Glyph;
+	};
+	const FTabDef Tabs[] = {
+		{ ELobbyTab::Store,     TEXT("STORE"),     CampusAngular::EGlyph::Coin },
+		{ ELobbyTab::Character, TEXT("CHARACTER"), CampusAngular::EGlyph::Friends },
+		{ ELobbyTab::Vault,     TEXT("VAULT"),     CampusAngular::EGlyph::Gem },
+		{ ELobbyTab::Weapons,   TEXT("WEAPONS"),   CampusAngular::EGlyph::Rank },
+		{ ELobbyTab::Events,    TEXT("EVENTS"),    CampusAngular::EGlyph::Crown },
+	};
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -78,6 +104,26 @@ UCampusSave* SCampusLobbyWidget::Profile() const
 	return Controller.IsValid() ? Controller->GetProfile() : nullptr;
 }
 
+UCampusParty* SCampusLobbyWidget::Party() const
+{
+	return Controller.IsValid() ? Controller->GetParty() : nullptr;
+}
+
+void SCampusLobbyWidget::SyncParty()
+{
+	UCampusParty* Squad = Party();
+	if (!Squad)
+	{
+		return;
+	}
+	// The plate row is as wide as the chosen squad size, and the local player is always the leader.
+	Squad->SetCapacity(SelectedTeamSize);
+	const UCampusBackend* Api = Backend();
+	const UCampusSave* Save = Profile();
+	Squad->SetLeader(Api ? Api->PlayerName : TEXT("YOU"), Save ? Save->GetLevel() : 1,
+		Save ? FMath::Clamp(Save->Wins / 5, 0, 5) : 0);
+}
+
 void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 {
 	Controller = InArgs._Controller;
@@ -89,7 +135,20 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 		}
 		SelectedTeamSize = Save->TeamSize;
 	}
+	CampusOptions::ApplyGraphics(Profile());
 	SplashTip = FMath::RandRange(0, UE_ARRAY_COUNT(Tips) - 1);
+	// The roster changes from outside the UI (a finished match hands its squad over), so rebuild on
+	// the delegate instead of diffing it every frame.
+	if (UCampusParty* Squad = Party())
+	{
+		PartyChangedHandle = Squad->OnChanged.AddLambda([this]()
+		{
+			if (Current == EScreen::Lobby)
+			{
+				Refresh();
+			}
+		});
+	}
 
 	ChildSlot
 	[
@@ -109,15 +168,15 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 			.VAlign(VAlign_Center)
 			.Visibility_Lambda([this]() { return bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
 			[
-				SNew(SBorder).BorderImage(PanelBrush()).Padding(FMargin(36.f, 20.f))
-				[
+				CampusStyle::Panel(
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 					[
 						SNew(STextBlock).Text_Lambda([this]()
 						{
 							const UCampusBackend* Api = Backend();
-							return FText::FromString(Api && Api->IsWaitingForPayment() ? FString(TEXT("Waiting for the payment to finish...")) : BusyText);
+							// BusyText is already uppercased in Busy(); no per-frame string work here.
+						return FText::FromString(Api && Api->IsWaitingForPayment() ? FString(TEXT("WAITING FOR THE PAYMENT TO FINISH...")) : BusyText);
 						}).Font(Font(22)).ColorAndOpacity(FLinearColor::White)
 					]
 					// a payment can always be abandoned (back from the browser, sheet stuck): the server settles it
@@ -133,21 +192,24 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 							{
 								if (UCampusBackend* Api = Backend())
 								{
-									BusyText = TEXT("Checking with Razorpay...");
+									BusyText = TEXT("CHECKING WITH RAZORPAY...");
 									Api->CancelPendingPayment();
 								}
 								return FReply::Handled();
 							}), EButton::Ghost, 18, FVector2D(280.f, 56.f))
 						]
-					]
-				]
+					],
+					FMargin(40.f, 24.f), 20.f, true)
 			]
 		]
-		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(0.f, 90.f, 0.f, 0.f)
+		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(0.f, 96.f, 0.f, 0.f)
 		[
-			SNew(SBorder)
-			.BorderImage(PanelBrush())
-			.Padding(FMargin(22.f, 12.f))
+			SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Slanted(22.f))
+			.Fill(CampusAngular::InkStrong)
+			.Border(CampusAngular::Accent)
+			.BorderWidth(2.f)
+			.ContentPadding(FMargin(30.f, 12.f))
 			.Visibility_Lambda([this]() { return ToastTime > 0.f ? EVisibility::HitTestInvisible : EVisibility::Collapsed; })
 			[
 				SNew(STextBlock).Text_Lambda([this]() { return FText::FromString(ToastText); }).Font(Font(20)).ColorAndOpacity(FLinearColor::White)
@@ -156,7 +218,19 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 	];
 
 	const UCampusBackend* Api = Backend();
+	SyncParty();
 	Show(Api && Api->IsSignedIn() ? EScreen::Lobby : EScreen::Splash);
+}
+
+SCampusLobbyWidget::~SCampusLobbyWidget()
+{
+	if (PartyChangedHandle.IsValid())
+	{
+		if (UCampusParty* Squad = Party())
+		{
+			Squad->OnChanged.Remove(PartyChangedHandle);
+		}
+	}
 }
 
 void SCampusLobbyWidget::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
@@ -208,7 +282,8 @@ void SCampusLobbyWidget::Toast(const FString& Message)
 void SCampusLobbyWidget::Busy(const FString& What)
 {
 	bBusy = true;
-	BusyText = What;
+	// Uppercased once here, not in the overlay's per-frame text lambda.
+	BusyText = What.ToUpper();
 }
 
 void SCampusLobbyWidget::Done(bool bOk, const FString& Error, TFunction<void()> OnOk)
@@ -243,6 +318,7 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	case EScreen::Account: Body = BuildAccount(); break;
 	case EScreen::Event: Body = BuildEvent(); break;
 	case EScreen::Daily: Body = BuildDaily(); break;
+	case EScreen::Settings: Body = BuildSettings(); break;
 	}
 	Content->SetContent(Body);
 }
@@ -294,27 +370,35 @@ TSharedRef<SWidget> SCampusLobbyWidget::Backdrop(float Alpha) const
 TSharedRef<SWidget> SCampusLobbyWidget::Dialog(const FText& Title, TSharedRef<SWidget> Body, float Width, bool bClose, EScreen CloseTo)
 {
 	return SNew(SOverlay)
-		+ SOverlay::Slot()[Backdrop(0.55f)]
+		+ SOverlay::Slot()[Backdrop(0.6f)]
 		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
 		[
 			SNew(SBox).WidthOverride(Width).MaxDesiredHeight(660.f)
 			[
-				SNew(SBorder).BorderImage(PanelBrush()).Padding(FMargin(34.f, 24.f))
-				[
+				CampusStyle::Panel(
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot().AutoHeight()
 					[
 						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)[Label(Title, 30, Accent)]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 14.f, 0.f)
+						[
+							// A slanted accent flash to the left of every dialog title.
+							SNew(SCampusAngularPanel).Shape(FCampusShape::Slanted(9.f)).Fill(Accent)
+							[
+								SNew(SBox).WidthOverride(16.f).HeightOverride(30.f)
+							]
+						]
+						+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)[Label(Title, 30, FLinearColor::White)]
 						+ SHorizontalBox::Slot().AutoWidth()
 						[
 							bClose
-								? Button(LOCTEXT("X", "X"), FOnClicked::CreateLambda([this, CloseTo]() { Show(CloseTo); return FReply::Handled(); }), EButton::Ghost, 22, FVector2D(64.f, 64.f))
+								? CampusStyle::IconButton(CampusAngular::EGlyph::Close,
+									FOnClicked::CreateLambda([this, CloseTo]() { Show(CloseTo); return FReply::Handled(); }), 62.f)
 								: SNullWidget::NullWidget
 						]
 					]
-					+ SVerticalBox::Slot().FillHeight(1.f).Padding(0.f, 16.f, 0.f, 0.f)[Body]
-				]
+					+ SVerticalBox::Slot().FillHeight(1.f).Padding(0.f, 16.f, 0.f, 0.f)[Body],
+					FMargin(36.f, 26.f), 22.f, true)
 			]
 		];
 }
@@ -322,14 +406,38 @@ TSharedRef<SWidget> SCampusLobbyWidget::Dialog(const FText& Title, TSharedRef<SW
 TSharedRef<SWidget> SCampusLobbyWidget::Field(const FText& Hint, FString& Target, bool bPassword)
 {
 	FString* Bound = &Target;
-	return SNew(SBox).HeightOverride(64.f)
+	// A clipped-corner plate behind the text box; the box itself draws no background.
+	static FEditableTextBoxStyle FieldStyle = []()
+	{
+		FEditableTextBoxStyle Style = FCoreStyle::Get().GetWidgetStyle<FEditableTextBoxStyle>("NormalEditableTextBox");
+		static const FSlateNoResource Empty;
+		Style.SetBackgroundImageNormal(Empty);
+		Style.SetBackgroundImageHovered(Empty);
+		Style.SetBackgroundImageFocused(Empty);
+		Style.SetBackgroundImageReadOnly(Empty);
+		Style.SetForegroundColor(FSlateColor(FLinearColor::White));
+		Style.SetFocusedForegroundColor(FSlateColor(FLinearColor::White));
+		Style.SetPadding(FMargin(0.f, 6.f));
+		return Style;
+	}();
+
+	return SNew(SBox).HeightOverride(66.f)
 		[
-			SNew(SEditableTextBox)
-			.Text(FText::FromString(Target))
-			.HintText(Hint)
-			.IsPassword(bPassword)
-			.Font(Font(22, false))
-			.OnTextChanged_Lambda([Bound](const FText& Text) { *Bound = Text.ToString(); })
+			SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Notched(14.f))
+			.Fill(FLinearColor(0.f, 0.f, 0.f, 0.45f))
+			.Border(CampusAngular::Hairline)
+			.BorderWidth(1.f)
+			.ContentPadding(FMargin(16.f, 0.f))
+			[
+				SNew(SEditableTextBox)
+				.Style(&FieldStyle)
+				.Text(FText::FromString(Target))
+				.HintText(Hint)
+				.IsPassword(bPassword)
+				.Font(Font(22, false))
+				.OnTextChanged_Lambda([Bound](const FText& Text) { *Bound = Text.ToString(); })
+			]
 		];
 }
 
@@ -343,7 +451,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSplash()
 	{
 		Bottom->AddSlot().AutoHeight().HAlign(HAlign_Center)
 		[
-			Button(LOCTEXT("TapStart", "TAP TO START"), FOnClicked::CreateLambda([this]()
+			CampusStyle::StartButton(LOCTEXT("TapStart", "TAP TO START"), FOnClicked::CreateLambda([this]()
 			{
 				const UCampusBackend* Api = Backend();
 				const UCampusSave* Save = Profile();
@@ -356,7 +464,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSplash()
 					Show(Save && Save->bAgreedTerms ? EScreen::LoginChoice : EScreen::Agreement);
 				}
 				return FReply::Handled();
-			}), EButton::Go, 28, FVector2D(420.f, 84.f))
+			}), FVector2D(440.f, 88.f))
 		];
 	}
 	else
@@ -389,10 +497,10 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSplash()
 				+ SVerticalBox::Slot().FillHeight(1.f).VAlign(VAlign_Center)
 				[
 					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)[Label(LOCTEXT("Title", "CAMPUS COMBAT"), 76, Accent)]
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 6.f, 0.f, 0.f)
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)[CampusAngular::Logo(84)]
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 10.f, 0.f, 0.f)
 					[
-						Label(LOCTEXT("Tagline", "Your college. Your squad. Last one standing."), 22, Muted, false)
+						Label(LOCTEXT("Tagline", "YOUR COLLEGE. YOUR SQUAD. LAST ONE STANDING."), 20, Muted)
 					]
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 18.f)[Bottom]
@@ -468,16 +576,15 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLoginChoice()
 	};
 
 	return SNew(SOverlay)
-		+ SOverlay::Slot()[Backdrop(0.5f)]
+		+ SOverlay::Slot()[Backdrop(0.55f)]
 		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
 		[
-			SNew(SBorder).BorderImage(PanelBrush()).Padding(FMargin(52.f, 36.f))
-			[
+			CampusStyle::Panel(
 				SNew(SVerticalBox)
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)[Label(LOCTEXT("Title2", "CAMPUS COMBAT"), 46, Accent)]
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 4.f, 0.f, 26.f)
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)[CampusAngular::Logo(50)]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 12.f, 0.f, 26.f)
 				[
-					Label(LOCTEXT("ChooseLogin", "Choose how to sign in"), 18, Muted, false)
+					Label(LOCTEXT("ChooseLogin", "CHOOSE HOW TO SIGN IN"), 18, Muted)
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 				[
@@ -485,7 +592,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLoginChoice()
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 6.f, 0.f, 18.f)
 				[
-					Label(LOCTEXT("GuestWarn", "Guest progress lives on this phone only. Register to keep it on any phone."), 15, Card, false)
+					Label(LOCTEXT("GuestWarn", "Guest progress lives on this phone only. Register to keep it on any phone."), 15, CardGold, false)
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 				[
@@ -501,9 +608,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLoginChoice()
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 14.f, 0.f, 0.f)
 				[
-					Button(LOCTEXT("Google", "Google (coming soon)"), FOnClicked(), EButton::Ghost, 18, FVector2D(460.f, 56.f), false)
-				]
-			]
+					Button(LOCTEXT("Google", "GOOGLE (COMING SOON)"), FOnClicked(), EButton::Ghost, 18, FVector2D(460.f, 56.f), false)
+				],
+				FMargin(56.f, 40.f), 26.f, true)
 		];
 }
 
@@ -629,41 +736,305 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildNickname()
 TSharedRef<SWidget> SCampusLobbyWidget::BuildTopBar()
 {
 	const UCampusBackend* Api = Backend();
-	const FString Name = Api ? Api->PlayerName : TEXT("Guest");
-	auto Currency = [](const FText& Caption, int32 Amount, const FLinearColor& Color)
-	{
-		return SNew(SBorder).BorderImage(PanelBrush()).Padding(FMargin(18.f, 10.f))
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 10.f, 0.f)[Label(Caption, 16, Color)]
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[Label(FText::AsNumber(Amount), 24)]
-			];
-	};
-	return SNew(SHorizontalBox).Visibility(EVisibility::SelfHitTestInvisible)
-		+ SHorizontalBox::Slot().AutoWidth()
+	const UCampusSave* Save = Profile();
+	const FString Name = Api && !Api->PlayerName.IsEmpty() ? Api->PlayerName : TEXT("GUEST");
+	const int32 Level = Save ? Save->GetLevel() : 1;
+	// XP inside the current level (GetLevel() is 1 + Xp / 500).
+	const float LevelProgress = Save ? float(Save->Xp % 500) / 500.f : 0.f;
+
+	// Avatar + name + level + XP bar, the whole plate taps through to the profile.
+	TSharedRef<SWidget> Identity = SNew(SCampusAngularButton)
+		.Shape(FCampusShape::Notched(18.f))
+		.Fill(FLinearColor(0.02f, 0.03f, 0.04f, 0.84f))
+		.Border(CampusAngular::Hairline)
+		.BorderWidth(1.f)
+		.AccentEdge(CampusAngular::Accent)
+		.AccentEdgeWidth(5.f)
+		.ContentPadding(FMargin(16.f, 8.f, 22.f, 8.f))
+		.OnClicked(FOnClicked::CreateLambda([this]() { Show(EScreen::Account); return FReply::Handled(); }))
 		[
-			SNew(SButton)
-			.ButtonStyle(FCoreStyle::Get(), "NoBorder")
-			.OnClicked_Lambda([this]() { Show(EScreen::Account); return FReply::Handled(); })
+			SNew(SHorizontalBox)
+			// Avatar: a clipped-corner plate with the level number, until there are portraits.
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 14.f, 0.f)
 			[
-				SNew(SBorder).BorderImage(PanelBrush()).Padding(FMargin(20.f, 10.f))
+				SNew(SBox).WidthOverride(54.f).HeightOverride(54.f)
 				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight()[Label(FText::FromString(Name), 22)]
-					+ SVerticalBox::Slot().AutoHeight()
+					SNew(SCampusAngularPanel)
+					.Shape(FCampusShape::Clipped(12.f))
+					.Fill(FLinearColor(0.10f, 0.08f, 0.03f, 0.95f))
+					.Border(CampusAngular::Accent)
+					.BorderWidth(2.f)
 					[
-						Label(Api && Api->bGuest ? LOCTEXT("GuestTag", "GUEST  ·  tap to save progress") : LOCTEXT("AccTag", "ACCOUNT"), 13, Api && Api->bGuest ? Card : Muted)
+						SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
+						[
+							SNew(STextBlock).Text(FText::AsNumber(Level)).Font(CampusAngular::Display(26)).ColorAndOpacity(Accent)
+						]
 					]
 				]
 			]
-		]
-		+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer).Visibility(EVisibility::HitTestInvisible)]
-		+ SHorizontalBox::Slot().AutoWidth().Padding(6.f, 0.f)[Currency(LOCTEXT("Cards", "ROOM CARDS"), Api ? Api->RoomCards : 0, Card)]
-		+ SHorizontalBox::Slot().AutoWidth().Padding(6.f, 0.f)[Currency(LOCTEXT("Diamonds", "DIAMONDS"), Api ? Api->Diamonds : 0, Diamond)]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.f, 0.f, 0.f, 0.f)
-		[
-			Button(LOCTEXT("Plus", "+"), FOnClicked::CreateLambda([this]() { StoreTab = EStoreTab::Packs; Show(EScreen::Store); return FReply::Handled(); }), EButton::Accent, 24, FVector2D(60.f, 56.f))
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						SNew(STextBlock).Text(FText::FromString(Name.ToUpper())).Font(CampusAngular::Display(24)).ColorAndOpacity(FLinearColor::White)
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(10.f, 0.f, 0.f, 0.f)
+					[
+						SNew(SCampusAngularPanel)
+						.Shape(FCampusShape::Slanted(8.f))
+						.Fill(Api && Api->bGuest ? FLinearColor(0.35f, 0.26f, 0.02f, 0.9f) : FLinearColor(0.08f, 0.26f, 0.14f, 0.9f))
+						.ContentPadding(FMargin(9.f, 2.f))
+						[
+							SNew(STextBlock)
+							.Text(Api && Api->bGuest ? LOCTEXT("GuestTag", "GUEST") : LOCTEXT("AccTag", "ACCOUNT"))
+							.Font(CampusAngular::Display(12))
+							.ColorAndOpacity(Api && Api->bGuest ? CardGold : FLinearColor::White)
+						]
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+				[
+					// XP to the next level: a flat sliver, no rounded ends.
+					SNew(SBox).WidthOverride(160.f).HeightOverride(6.f)
+					[
+						SNew(SOverlay)
+						+ SOverlay::Slot()[SNew(SCampusAngularPanel).Fill(FLinearColor(1.f, 1.f, 1.f, 0.14f))]
+						+ SOverlay::Slot().HAlign(HAlign_Left)
+						[
+							SNew(SBox).WidthOverride(FMath::Max(4.f, 160.f * LevelProgress))
+							[
+								SNew(SCampusAngularPanel).Fill(Accent)
+							]
+						]
+					]
+				]
+			]
 		];
+
+	return SNew(SHorizontalBox).Visibility(EVisibility::SelfHitTestInvisible)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top)[Identity]
+		+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer).Visibility(EVisibility::HitTestInvisible)]
+		// Coin (Room Cards) and gem (Diamonds) counters, each with a "+" to the store.
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(6.f, 2.f, 0.f, 0.f)
+		[
+			CampusStyle::Counter(CampusAngular::EGlyph::Coin, CardGold, FText::AsNumber(Api ? Api->RoomCards : 0),
+				FOnClicked::CreateLambda([this]() { StoreTab = EStoreTab::Packs; Show(EScreen::Store); return FReply::Handled(); }))
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(10.f, 2.f, 0.f, 0.f)
+		[
+			CampusStyle::Counter(CampusAngular::EGlyph::Gem, Diamond, FText::AsNumber(Api ? Api->Diamonds : 0),
+				FOnClicked::CreateLambda([this]() { StoreTab = EStoreTab::Packs; Show(EScreen::Store); return FReply::Handled(); }))
+		]
+		// Friends, mail, settings gear - the Free Fire corner cluster.
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(18.f, 0.f, 0.f, 0.f)
+		[
+			CampusStyle::IconButton(CampusAngular::EGlyph::Friends, FOnClicked::CreateLambda([this]()
+			{
+				// No friends list in the API yet; the room code is the real invite channel.
+				Toast(TEXT("Friends list is coming. Invite with a room code for now."));
+				Show(EScreen::Rooms);
+				return FReply::Handled();
+			}), 58.f)
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(8.f, 0.f, 0.f, 0.f)
+		[
+			CampusStyle::IconButton(CampusAngular::EGlyph::Mail, FOnClicked::CreateLambda([this]()
+			{
+				Show(EScreen::Event);
+				return FReply::Handled();
+			}), 58.f)
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(8.f, 0.f, 0.f, 0.f)
+		[
+			CampusStyle::IconButton(CampusAngular::EGlyph::Gear, FOnClicked::CreateLambda([this]()
+			{
+				Show(EScreen::Settings);
+				return FReply::Handled();
+			}), 58.f, Accent)
+		];
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildMenuColumn()
+{
+	const UCampusBackend* Api = Backend();
+	const bool bDailyReady = Api && Api->bDailyCardAvailable;
+
+	// Opening the store needs the catalogue, so those two tabs fetch first.
+	auto OpenStore = [this](EStoreTab Tab)
+	{
+		return FOnClicked::CreateLambda([this, Tab]()
+		{
+			StoreTab = Tab;
+			if (UCampusBackend* Api2 = Backend())
+			{
+				Busy(TEXT("Opening store..."));
+				Api2->LoadStore([this](bool bOk, const FString& Error) { Done(bOk, Error, [this]() { Show(EScreen::Store); }); });
+			}
+			return FReply::Handled();
+		});
+	};
+	auto OpenScreen = [this](EScreen Screen)
+	{
+		return FOnClicked::CreateLambda([this, Screen]() { Show(Screen); return FReply::Handled(); });
+	};
+
+	TSharedRef<SVerticalBox> Column = SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible);
+	for (const FTabDef& Def : Tabs)
+	{
+		FOnClicked Action;
+		bool bHighlighted = false;
+		switch (Def.Tab)
+		{
+		case ELobbyTab::Store:     Action = OpenStore(EStoreTab::Offers); break;
+		case ELobbyTab::Weapons:   Action = OpenStore(EStoreTab::Guns); break;
+		case ELobbyTab::Character: Action = OpenScreen(EScreen::Account); break;
+		case ELobbyTab::Vault:     Action = OpenScreen(EScreen::Daily); bHighlighted = bDailyReady; break;
+		case ELobbyTab::Events:    Action = OpenScreen(EScreen::Event); break;
+		}
+		Column->AddSlot().AutoHeight().Padding(0.f, 5.f)
+		[
+			CampusStyle::MenuTab(FText::FromString(Def.Label), Def.Glyph, Action, bHighlighted)
+		];
+	}
+	return Column;
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildNamePlate(const FCampusPartyMember& Member)
+{
+	const FLinearColor Edge = Member.bLeader ? Accent : FLinearColor(1.f, 1.f, 1.f, 0.3f);
+	TSharedRef<SHorizontalBox> Badges = SNew(SHorizontalBox);
+	// Small rank pip, then the "friend" mark that says this plate is somebody you played with.
+	if (Member.Rank > 0)
+	{
+		Badges->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 6.f, 0.f)
+		[
+			SNew(SBox).WidthOverride(16.f).HeightOverride(16.f)
+			[
+				SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Rank).Size(16.f).Color(Accent)
+			]
+		];
+	}
+	if (Member.bLeader)
+	{
+		Badges->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 6.f, 0.f)
+		[
+			SNew(SBox).WidthOverride(16.f).HeightOverride(16.f)
+			[
+				SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Crown).Size(16.f).Color(Accent)
+			]
+		];
+	}
+	else
+	{
+		Badges->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 6.f, 0.f)
+		[
+			SNew(SBox).WidthOverride(16.f).HeightOverride(16.f)
+			[
+				SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Friends).Size(16.f).Color(FLinearColor(1.f, 1.f, 1.f, 0.7f))
+			]
+		];
+	}
+
+	return SNew(SCampusAngularPanel)
+		.Shape(FCampusShape::Wedge(14.f, 10.f))
+		.Fill(Member.bAccepted ? FLinearColor(0.015f, 0.02f, 0.03f, 0.88f) : FLinearColor(0.015f, 0.02f, 0.03f, 0.45f))
+		.Border(Edge)
+		.BorderWidth(Member.bLeader ? 2.f : 1.f)
+		.AccentEdge(Edge)
+		.AccentEdgeWidth(4.f)
+		.ContentPadding(FMargin(18.f, 7.f, 14.f, 7.f))
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(Member.Name.ToUpper()))
+				.Font(CampusAngular::Display(19))
+				.ColorAndOpacity(Member.bAccepted ? FLinearColor::White : FLinearColor(1.f, 1.f, 1.f, 0.5f))
+			]
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 2.f, 0.f, 0.f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[Badges]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(Member.bAccepted
+						? FText::Format(LOCTEXT("PlateLevel", "LV {0}"), FText::AsNumber(Member.Level))
+						: LOCTEXT("PlateWaiting", "INVITED"))
+					.Font(CampusAngular::Display(13))
+					.ColorAndOpacity(CampusAngular::TextMuted)
+				]
+			]
+		];
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildInvitePlate()
+{
+	// An empty slot: tap to invite. Room codes are the only invite channel the API has today.
+	return SNew(SCampusAngularButton)
+		.Shape(FCampusShape::Wedge(14.f, 10.f))
+		.Fill(FLinearColor(0.f, 0.f, 0.f, 0.35f))
+		.Border(FLinearColor(1.f, 1.f, 1.f, 0.22f))
+		.BorderWidth(1.f)
+		.ContentPadding(FMargin(14.f, 10.f))
+		.OnClicked(FOnClicked::CreateLambda([this]() { Show(EScreen::Rooms); return FReply::Handled(); }))
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+			[
+				SNew(SBox).WidthOverride(22.f).HeightOverride(22.f)
+				[
+					SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Plus).Size(22.f).Color(Accent)
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 3.f, 0.f, 0.f)
+			[
+				SNew(STextBlock).Text(LOCTEXT("InviteSlot", "INVITE")).Font(CampusAngular::Display(14)).ColorAndOpacity(CampusAngular::TextMuted)
+			]
+		];
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildSquadRow()
+{
+	UCampusParty* Squad = Party();
+	if (!Squad)
+	{
+		return SNullWidget::NullWidget;
+	}
+	const TArray<FCampusPartyMember>& Members = Squad->GetMembers();
+	const int32 Capacity = Squad->GetCapacity();
+	// Solo: no row at all. Zero footprint beats an empty frame.
+	if (Capacity <= 1)
+	{
+		return SNullWidget::NullWidget;
+	}
+
+	TArray<int32> Order;
+	UCampusParty::BuildFillOrder(Capacity, Order);
+
+	// Anchor each plate at the same screen fraction the controller used for its character, so a
+	// plate sits under its own character at any resolution.
+	TSharedRef<SConstraintCanvas> Canvas = SNew(SConstraintCanvas).Visibility(EVisibility::SelfHitTestInvisible);
+	for (int32 Index = 0; Index < Capacity; ++Index)
+	{
+		const int32 Slot = Order.IsValidIndex(Index) ? Order[Index] : Index;
+		const float Fraction = 0.5f + UCampusParty::SlotStep(Slot, Capacity) * SquadSlotFraction;
+		TSharedRef<SWidget> Plate = Members.IsValidIndex(Index) ? BuildNamePlate(Members[Index]) : BuildInvitePlate();
+		Canvas->AddSlot()
+			.Anchors(FAnchors(Fraction, 1.f))
+			.Alignment(FVector2D(0.5f, 1.f))
+			.AutoSize(true)
+			[
+				Plate
+			];
+	}
+	// A fixed height means adding or losing a squad member never shifts the rest of the lobby.
+	return SNew(SBox).HeightOverride(78.f)[Canvas];
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
@@ -672,19 +1043,30 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
 	for (int32 Index = 0; Index < UE_ARRAY_COUNT(Maps); ++Index)
 	{
 		const bool bSelected = SelectedMap == Index;
-		MapRow->AddSlot().AutoWidth().Padding(5.f, 0.f)
+		MapRow->AddSlot().AutoWidth().Padding(4.f, 0.f)
 		[
-			SNew(SBox).WidthOverride(230.f).HeightOverride(86.f)
+			SNew(SBox).WidthOverride(226.f).HeightOverride(80.f)
 			[
-				SNew(SButton)
-				.ButtonStyle(FCoreStyle::Get(), "NoBorder")
-				.OnClicked_Lambda([this, Index]() { SelectedMap = Index; SaveMatchChoice(); Refresh(); return FReply::Handled(); })
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Wedge(22.f, 14.f))
+				.Fill(bSelected ? FLinearColor(0.12f, 0.10f, 0.03f, 0.94f) : FLinearColor(0.02f, 0.03f, 0.04f, 0.82f))
+				.Border(bSelected ? Accent : CampusAngular::Hairline)
+				.BorderWidth(bSelected ? 2.f : 1.f)
+				.AccentEdge(bSelected ? Accent : FLinearColor::Transparent)
+				.AccentEdgeWidth(bSelected ? 5.f : 0.f)
+				.ContentPadding(FMargin(26.f, 6.f, 18.f, 6.f))
+				.OnClicked(FOnClicked::CreateLambda([this, Index]() { SelectedMap = Index; SaveMatchChoice(); Refresh(); return FReply::Handled(); }))
 				[
-					SNew(SBorder).BorderImage(CardBrush(bSelected)).HAlign(HAlign_Center).VAlign(VAlign_Center)
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
 					[
-						SNew(SVerticalBox)
-						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)[Label(FText::FromString(Maps[Index].Name), 22)]
-						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)[Label(FText::FromString(Maps[Index].Detail), 13, bSelected ? FLinearColor::White : Muted, false)]
+						SNew(STextBlock).Text(FText::FromString(FString(Maps[Index].Name).ToUpper()))
+						.Font(CampusAngular::Display(23)).ColorAndOpacity(bSelected ? Accent : FLinearColor::White)
+					]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock).Text(FText::FromString(Maps[Index].Detail))
+						.Font(CampusAngular::Body(12)).ColorAndOpacity(bSelected ? FLinearColor(1.f, 1.f, 1.f, 0.85f) : Muted)
 					]
 				]
 			]
@@ -694,37 +1076,28 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
 	for (const FTeamDef& Team : Teams)
 	{
 		const int32 Size = Team.Size;
-		TeamRow->AddSlot().AutoWidth().Padding(5.f, 0.f)
+		TeamRow->AddSlot().AutoWidth().Padding(4.f, 0.f)
 		[
-			Button(FText::FromString(Team.Name), FOnClicked::CreateLambda([this, Size]() { SelectedTeamSize = Size; SaveMatchChoice(); Refresh(); return FReply::Handled(); }),
-				SelectedTeamSize == Size ? EButton::Accent : EButton::Dark, 18, FVector2D(150.f, 48.f))
+			CampusStyle::Pill(FText::FromString(FString(Team.Name).ToUpper()), SelectedTeamSize == Size,
+				FOnClicked::CreateLambda([this, Size]()
+				{
+					SelectedTeamSize = Size;
+					SaveMatchChoice();
+					// The squad row and the 3D line-up follow the chosen size straight away.
+					SyncParty();
+					Refresh();
+					return FReply::Handled();
+				}), FVector2D(136.f, 46.f))
 		];
 	}
 	return SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
-		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 0.f, 0.f, 8.f)[TeamRow]
-		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)[MapRow];
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 8.f)[TeamRow]
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)[MapRow];
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 {
-	const UCampusBackend* Api = Backend();
-	auto Side = [this](const FText& Text, EScreen Screen, EButton Kind = EButton::Dark)
-	{
-		return Button(Text, FOnClicked::CreateLambda([this, Screen]() { Show(Screen); return FReply::Handled(); }), Kind, 20, FVector2D(230.f, 64.f));
-	};
-	auto StoreButton = [this](const FText& Text, EStoreTab Tab)
-	{
-		return Button(Text, FOnClicked::CreateLambda([this, Tab]()
-		{
-			StoreTab = Tab;
-			if (UCampusBackend* Api2 = Backend())
-			{
-				Busy(TEXT("Opening store..."));
-				Api2->LoadStore([this](bool bOk, const FString& Error) { Done(bOk, Error, [this]() { Show(EScreen::Store); }); });
-			}
-			return FReply::Handled();
-		}), EButton::Dark, 20, FVector2D(230.f, 64.f));
-	};
+	SyncParty();
 
 	return SNew(SOverlay)
 		.Visibility(EVisibility::SelfHitTestInvisible)
@@ -734,42 +1107,50 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 		]
 		+ SOverlay::Slot()
 		[
-			SNew(SSafeZone).Visibility(EVisibility::SelfHitTestInvisible).Padding(FMargin(24.f, 18.f))
+			SNew(SSafeZone).Visibility(EVisibility::SelfHitTestInvisible).Padding(FMargin(24.f, 16.f))
 			[
 				SNew(SOverlay).Visibility(EVisibility::SelfHitTestInvisible)
+				// Top bar: avatar + name + level, coin and gem counters, friends / mail / gear.
 				+ SOverlay::Slot().VAlign(VAlign_Top)[BuildTopBar()]
-				+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center)
+				// The logo sits under the corner icon cluster, right-aligned.
+				+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(0.f, 86.f, 4.f, 0.f)
 				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)[StoreButton(LOCTEXT("Guns", "Guns & upgrades"), EStoreTab::Guns)]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)[Side(LOCTEXT("AccountBtn", "Profile"), EScreen::Account)]
+					SNew(SBox).Visibility(EVisibility::HitTestInvisible)[CampusAngular::Logo(40)]
 				]
-				+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Center)
+				// Slanted menu tabs down the left.
+				+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(0.f, 30.f, 0.f, 0.f)
 				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)[StoreButton(LOCTEXT("StoreBtn", "Store"), EStoreTab::Offers)]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)
+					BuildMenuColumn()
+				]
+				// Squad name plates, under the characters.
+				+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 108.f)
+				[
+					BuildSquadRow()
+				]
+				+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 86.f)
+				[
+					Label(LOCTEXT("DragHint", "DRAG TO TURN"), 14, FLinearColor(1.f, 1.f, 1.f, 0.35f))
+				]
+				// Bottom right: mode chips above the yellow slanted START.
+				+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom)
+				[
+					SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 12.f)[BuildModeSelect()]
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
 					[
-						Side(Api && Api->bDailyCardAvailable ? LOCTEXT("DailyReady", "Free Room Card!") : LOCTEXT("DailyBtn", "Daily reward"), EScreen::Daily,
-							Api && Api->bDailyCardAvailable ? EButton::Accent : EButton::Dark)
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f)[Side(LOCTEXT("EventsBtn", "Events"), EScreen::Event)]
-				]
-				+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 150.f)
-				[
-					Label(LOCTEXT("DragHint", "drag to turn"), 16, Muted, false)
-				]
-				+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Bottom)
-				[
-					SNew(SHorizontalBox).Visibility(EVisibility::SelfHitTestInvisible)
-					+ SHorizontalBox::Slot().FillWidth(1.f).HAlign(HAlign_Center)[BuildModeSelect()]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-					[
-						Button(LOCTEXT("Start", "START"), FOnClicked::CreateLambda([this]() { Show(EScreen::Rooms); return FReply::Handled(); }), EButton::Go, 34, FVector2D(260.f, 96.f))
+						CampusStyle::StartButton(LOCTEXT("Start", "START"),
+							FOnClicked::CreateLambda([this]() { Show(EScreen::Rooms); return FReply::Handled(); }), FVector2D(300.f, 96.f))
 					]
 				]
 			]
 		];
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildSettings()
+{
+	UCampusSave* Save = Profile();
+	return Dialog(LOCTEXT("SettingsTitle", "SETTINGS"),
+		CampusOptions::Body(Save, [this]() { Refresh(); }), 900.f, true, EScreen::Lobby);
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildDaily()
@@ -895,7 +1276,14 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildGunCard(int32 Index)
 	}
 	return SNew(SBox).WidthOverride(420.f)
 		[
-			SNew(SBorder).BorderImage(CardBrush(bEquipped)).Padding(FMargin(18.f, 12.f))
+			SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Notched(16.f))
+			.Fill(bEquipped ? FLinearColor(0.10f, 0.08f, 0.03f, 0.94f) : FLinearColor(0.03f, 0.04f, 0.06f, 0.9f))
+			.Border(bEquipped ? Accent : CampusAngular::Hairline)
+			.BorderWidth(bEquipped ? 2.f : 1.f)
+			.AccentEdge(bEquipped ? Accent : FLinearColor::Transparent)
+			.AccentEdgeWidth(bEquipped ? 5.f : 0.f)
+			.ContentPadding(FMargin(22.f, 12.f, 18.f, 12.f))
 			[
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot().AutoHeight()
@@ -922,7 +1310,14 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildOfferCard(const FCampusOffer& Offer
 	const FString Id = Offer.Id;
 	return SNew(SBox).WidthOverride(330.f)
 		[
-			SNew(SBorder).BorderImage(CardBrush(!Offer.Badge.IsEmpty())).Padding(FMargin(18.f, 12.f))
+			SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Notched(16.f))
+			.Fill(Offer.Badge.IsEmpty() ? FLinearColor(0.03f, 0.04f, 0.06f, 0.9f) : FLinearColor(0.10f, 0.08f, 0.03f, 0.94f))
+			.Border(Offer.Badge.IsEmpty() ? CampusAngular::Hairline : Accent)
+			.BorderWidth(Offer.Badge.IsEmpty() ? 1.f : 2.f)
+			.AccentEdge(Offer.Badge.IsEmpty() ? FLinearColor::Transparent : Accent)
+			.AccentEdgeWidth(Offer.Badge.IsEmpty() ? 0.f : 5.f)
+			.ContentPadding(FMargin(22.f, 12.f, 18.f, 12.f))
 			[
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot().AutoHeight()[Label(FText::FromString(Offer.Badge), 14, Accent)]
@@ -950,8 +1345,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStore()
 	UCampusBackend* Api = Backend();
 	auto Tab = [this](const FText& Text, EStoreTab Which)
 	{
-		return Button(Text, FOnClicked::CreateLambda([this, Which]() { StoreTab = Which; Refresh(); return FReply::Handled(); }),
-			StoreTab == Which ? EButton::Accent : EButton::Dark, 18, FVector2D(170.f, 52.f));
+		return CampusStyle::Pill(Text, StoreTab == Which,
+			FOnClicked::CreateLambda([this, Which]() { StoreTab = Which; Refresh(); return FReply::Handled(); }), FVector2D(186.f, 52.f));
 	};
 
 	TSharedRef<SScrollBox> Row = SNew(SScrollBox).Orientation(Orient_Horizontal);
@@ -983,18 +1378,34 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStore()
 				+ SVerticalBox::Slot().AutoHeight()
 				[
 					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 20.f, 0.f)[Label(LOCTEXT("StoreTitle", "STORE"), 34, Accent)]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 14.f, 0.f)
+					[
+						SNew(SCampusAngularPanel).Shape(FCampusShape::Slanted(10.f)).Fill(Accent)
+						[
+							SNew(SBox).WidthOverride(16.f).HeightOverride(34.f)
+						]
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 20.f, 0.f)[Label(LOCTEXT("StoreTitle", "STORE"), 34, FLinearColor::White)]
 					+ SHorizontalBox::Slot().AutoWidth().Padding(4.f, 0.f)[Tab(LOCTEXT("TabGuns", "GUNS"), EStoreTab::Guns)]
 					+ SHorizontalBox::Slot().AutoWidth().Padding(4.f, 0.f)[Tab(LOCTEXT("TabOffers", "OFFERS"), EStoreTab::Offers)]
 					+ SHorizontalBox::Slot().AutoWidth().Padding(4.f, 0.f)[Tab(LOCTEXT("TabPacks", "DIAMONDS & CARDS"), EStoreTab::Packs)]
 					+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer)]
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 16.f, 0.f)
 					[
-						Label(FText::FromString(FString::Printf(TEXT("%d Room Cards   %d Diamonds"), Api ? Api->RoomCards : 0, Api ? Api->Diamonds : 0)), 20, Diamond)
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 10.f, 0.f)
+						[
+							CampusStyle::Counter(CampusAngular::EGlyph::Coin, CardGold, FText::AsNumber(Api ? Api->RoomCards : 0))
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							CampusStyle::Counter(CampusAngular::EGlyph::Gem, Diamond, FText::AsNumber(Api ? Api->Diamonds : 0))
+						]
 					]
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
-						Button(LOCTEXT("CloseStore", "X"), FOnClicked::CreateLambda([this]() { Show(EScreen::Lobby); return FReply::Handled(); }), EButton::Ghost, 22, FVector2D(64.f, 64.f))
+						CampusStyle::IconButton(CampusAngular::EGlyph::Close,
+							FOnClicked::CreateLambda([this]() { Show(EScreen::Lobby); return FReply::Handled(); }), 64.f)
 					]
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
@@ -1015,7 +1426,12 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildRooms()
 	const UCampusBackend* Api = Backend();
 	auto Option = [](const FText& Title, const FText& Detail, TSharedRef<SWidget> Action)
 	{
-		return SNew(SBorder).BorderImage(CardBrush(false)).Padding(FMargin(22.f, 14.f))
+		return SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Notched(16.f))
+			.Fill(FLinearColor(0.03f, 0.04f, 0.06f, 0.9f))
+			.Border(CampusAngular::Hairline)
+			.BorderWidth(1.f)
+			.ContentPadding(FMargin(26.f, 14.f, 20.f, 14.f))
 			[
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
@@ -1091,7 +1507,12 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildRooms()
 		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f)
 		[
-			SNew(SBorder).BorderImage(CardBrush(false)).Padding(FMargin(22.f, 14.f))
+			SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Notched(16.f))
+			.Fill(FLinearColor(0.03f, 0.04f, 0.06f, 0.9f))
+			.Border(CampusAngular::Hairline)
+			.BorderWidth(1.f)
+			.ContentPadding(FMargin(26.f, 14.f, 20.f, 14.f))
 			[
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center).Padding(0.f, 0.f, 12.f, 0.f)
