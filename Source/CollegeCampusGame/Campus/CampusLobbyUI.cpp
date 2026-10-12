@@ -8,6 +8,7 @@
 #include "Campus/CampusAngular.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusGameInstance.h"
+#include "Campus/CampusMapArt.h"
 #include "Campus/CampusParty.h"
 #include "Campus/CampusPlayBilling.h"
 #include "Campus/CampusPlayerControllers.h"
@@ -34,17 +35,8 @@ using namespace CampusStyle;
 
 namespace
 {
-	struct FMapDef
-	{
-		const TCHAR* Id;
-		const TCHAR* Name;
-		const TCHAR* Detail;
-	};
-	// GAME_PLAN 1.2
-	const FMapDef Maps[] = {
-		{ TEXT("Classic"), TEXT("Classic"), TEXT("College  ·  4 rounds  ·  first to 3") },
-		{ TEXT("RealMap"), TEXT("Real Map"), TEXT("Battle royale  ·  up to 50") },
-	};
+	// GAME_PLAN 1.2 - the map and mode lists now live in Campus/CampusMapArt.h (CampusCatalog), so
+	// the lobby plate, the map-select screen and the room dialog cannot drift apart.
 	struct FTeamDef
 	{
 		int32 Size;
@@ -131,10 +123,10 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 	Controller = InArgs._Controller;
 	if (const UCampusSave* Save = Profile())
 	{
-		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Maps); ++Index)
-		{
-			SelectedMap = Save->MatchMap == FName(Maps[Index].Id) ? Index : SelectedMap;
-		}
+		// A save written before this screen existed can name a map or mode that was never built;
+		// PlayableMap / PlayableMode drop those back to the campus and Team Clash.
+		SelectedMap = CampusCatalog::PlayableMap(Save->MatchMap);
+		SelectedMode = CampusCatalog::PlayableMode(Save->MatchMode);
 		SelectedTeamSize = Save->TeamSize;
 	}
 	CampusOptions::ApplyGraphics(Profile());
@@ -349,6 +341,7 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	case EScreen::Streak: Body = BuildStreak(); break;
 	case EScreen::AdultConfirm: Body = BuildAdultConfirm(); break;
 	case EScreen::CollegePick: Body = BuildCollegePick(); break;
+	case EScreen::MapSelect: Body = BuildMapSelect(); break;
 	}
 	Content->SetContent(Body);
 }
@@ -453,7 +446,8 @@ void SCampusLobbyWidget::SaveMatchChoice()
 {
 	if (UCampusSave* Save = Profile())
 	{
-		Save->MatchMap = FName(Maps[SelectedMap].Id);
+		Save->MatchMap = FName(CampusCatalog::Map(SelectedMap).Id);
+		Save->MatchMode = FName(CampusCatalog::Mode(SelectedMode).Id);
 		Save->TeamSize = SelectedTeamSize;
 		Save->Persist();
 	}
@@ -1236,39 +1230,6 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSquadRow()
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
 {
-	TSharedRef<SHorizontalBox> MapRow = SNew(SHorizontalBox);
-	for (int32 Index = 0; Index < UE_ARRAY_COUNT(Maps); ++Index)
-	{
-		const bool bSelected = SelectedMap == Index;
-		MapRow->AddSlot().AutoWidth().Padding(4.f, 0.f)
-		[
-			SNew(SBox).WidthOverride(226.f).HeightOverride(80.f)
-			[
-				SNew(SCampusAngularButton)
-				.Shape(FCampusShape::Wedge(22.f, 14.f))
-				.Fill(bSelected ? FLinearColor(0.12f, 0.10f, 0.03f, 0.94f) : FLinearColor(0.02f, 0.03f, 0.04f, 0.82f))
-				.Border(bSelected ? Accent : CampusAngular::Hairline)
-				.BorderWidth(bSelected ? 2.f : 1.f)
-				.AccentEdge(bSelected ? Accent : FLinearColor::Transparent)
-				.AccentEdgeWidth(bSelected ? 5.f : 0.f)
-				.ContentPadding(FMargin(26.f, 6.f, 18.f, 6.f))
-				.OnClicked(FOnClicked::CreateLambda([this, Index]() { SelectedMap = Index; SaveMatchChoice(); Refresh(); return FReply::Handled(); }))
-				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight()
-					[
-						SNew(STextBlock).Text(FText::FromString(FString(Maps[Index].Name).ToUpper()))
-						.Font(CampusAngular::Display(23)).ColorAndOpacity(bSelected ? Accent : FLinearColor::White)
-					]
-					+ SVerticalBox::Slot().AutoHeight()
-					[
-						SNew(STextBlock).Text(FText::FromString(Maps[Index].Detail))
-						.Font(CampusAngular::Body(12)).ColorAndOpacity(bSelected ? FLinearColor(1.f, 1.f, 1.f, 0.85f) : Muted)
-					]
-				]
-			]
-		];
-	}
 	TSharedRef<SHorizontalBox> TeamRow = SNew(SHorizontalBox);
 	for (const FTeamDef& Team : Teams)
 	{
@@ -1289,7 +1250,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
 	}
 	return SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
 		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 8.f)[TeamRow]
-		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)[MapRow];
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)[BuildModePlate()];
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
@@ -2426,9 +2387,14 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildRooms()
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[Action]
 			];
 	};
-	const FString Mode = FString::Printf(TEXT("%s  ·  %s"), Maps[SelectedMap].Name,
+	const FString Mode = FString::Printf(TEXT("%s  ·  %s  ·  %s"),
+		*FString(CampusCatalog::Mode(SelectedMode).Name).ToUpper(),
+		CampusCatalog::Map(SelectedMap).Name,
 		SelectedTeamSize == 1 ? TEXT("Solo") : (SelectedTeamSize == 2 ? TEXT("Duo") : TEXT("Squad")));
 	const int32 Cards = Api ? Api->RoomCards : 0;
+	// The mode picked on the map-select screen decides which route this dialog pushes: Quick Match
+	// gets the green PLAY, Team Clash gets the accent CREATE. The other button still works.
+	const bool bQuick = FName(CampusCatalog::Mode(SelectedMode).Id) == FName(TEXT("QuickMatch"));
 
 	// Custom Room options (three.js lobby): rounds per match and minutes per round, one tap each, remembered
 	UCampusSave* Save = Profile();
@@ -2471,7 +2437,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildRooms()
 				{
 					if (Controller.IsValid()) { Toast(TEXT("Joining...")); Controller->JoinRoom(); }
 					return FReply::Handled();
-				}), EButton::Go, 20, FVector2D(160.f, 58.f)))
+				}), bQuick ? EButton::Go : EButton::Dark, 20, FVector2D(160.f, 58.f)))
 		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 8.f, 0.f, 2.f)[RoundRow]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f)
@@ -2486,7 +2452,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildRooms()
 						Controller->HostRoom([this](const FString& Error) { Done(false, Error); });
 					}
 					return FReply::Handled();
-				}), EButton::Accent, 20, FVector2D(160.f, 58.f), Cards > 0))
+				}), bQuick ? EButton::Dark : EButton::Accent, 20, FVector2D(160.f, 58.f), Cards > 0))
 		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f)
 		[

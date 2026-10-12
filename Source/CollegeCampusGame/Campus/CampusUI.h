@@ -130,7 +130,7 @@ private:
 	// Free Fire / PUBG style flow: Splash -> (first time) Agreement -> Login choice -> Email login / Register ->
 	// (first time) Nickname -> Lobby. The lobby opens the Store, Rooms (quick / create / join by code), Account.
 	enum class EScreen : uint8 { Splash, Agreement, LoginChoice, EmailLogin, Register, Nickname, Lobby, Store, Rooms,
-		Account, Event, Daily, Settings, Missions, Streak, AdultConfirm, CollegePick };
+		Account, Event, Daily, Settings, Missions, Streak, AdultConfirm, CollegePick, MapSelect };
 	enum class EStoreTab : uint8 { Guns, Offers, Packs };
 	enum class EMissionTab : uint8 { Daily, Weekly, Weekend };
 
@@ -167,6 +167,20 @@ private:
 	TSharedRef<SWidget> BuildNamePlate(const FCampusPartyMember& Member);
 	TSharedRef<SWidget> BuildInvitePlate();
 	TSharedRef<SWidget> BuildModeSelect();
+
+	// ---- map / mode select (Campus/CampusMapSelect.cpp). Opened from the lobby plate above START.
+	/** The lobby plate next to START: the chosen mode over the chosen map, tap to change. */
+	TSharedRef<SWidget> BuildModePlate();
+	/** The full screen: map banners on the left, mode cards on the right, CONFIRM bottom-right. */
+	TSharedRef<SWidget> BuildMapSelect();
+	/** One left-hand map banner. */
+	TSharedRef<SWidget> BuildMapBanner(int32 Index);
+	/** One right-hand mode card, with its green "?" badge and any lock / time row. */
+	TSharedRef<SWidget> BuildModeCard(int32 Index);
+	/** Opens the map-select screen with the saved choice loaded as the pending one. */
+	void OpenMapSelect();
+	/** CONFIRM: writes the pending choice to the profile and goes back to the lobby. */
+	void ConfirmMapSelect();
 	TSharedRef<SWidget> BuildStore();
 	TSharedRef<SWidget> BuildGunCard(int32 Index);
 	TSharedRef<SWidget> BuildOfferCard(const FCampusOffer& Offer);
@@ -203,8 +217,16 @@ private:
 	TSharedPtr<SBox> Content;
 	EScreen Current = EScreen::Splash;
 	EStoreTab StoreTab = EStoreTab::Guns;
+	/** The confirmed choice, mirrored from UCampusSave; indices into CampusCatalog. */
 	int32 SelectedMap = 0;
+	int32 SelectedMode = 0;
 	int32 SelectedTeamSize = 4;
+	/** What the map-select screen is showing before CONFIRM; closing with X throws it away. */
+	int32 PendingMap = 0;
+	int32 PendingMode = 0;
+	bool bPendingRandomMap = false;
+	/** Mode whose "?" rules sheet is open, or INDEX_NONE. */
+	int32 HelpMode = INDEX_NONE;
 	float SplashTime = 0.f;
 	int32 SplashTip = 0;
 	bool bSplashReady = false;

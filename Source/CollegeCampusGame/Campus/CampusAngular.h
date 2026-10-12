@@ -127,8 +127,21 @@ namespace CampusAngular
 	void DrawAccentEdge(FSlateWindowElementList& Out, int32 Layer, const FGeometry& Geometry,
 		const FVector2f& Min, const FVector2f& Size, const FCampusShape& Shape, const FLinearColor& Color, float Width);
 
+	/** Fills Shape with a texture instead of a colour, cropped "cover" so the art keeps its aspect
+	 *  however the card is stretched. FocusY 0 keeps the top of the picture, 1 the bottom.
+	 *  The caller owns the resource handle so nothing is looked up per frame. */
+	void DrawShapedImage(FSlateWindowElementList& Out, int32 Layer, const FGeometry& Geometry,
+		const FVector2f& Min, const FVector2f& Size, const FCampusShape& Shape,
+		const FSlateResourceHandle& Handle, const FVector2f& ImageSize, const FLinearColor& Tint, float FocusY = 0.5f);
+
+	/** Fills Shape with a top-to-bottom two-colour ramp: the scrim that keeps a title legible over
+	 *  art, and the stand-in when a picture is missing. One draw element. */
+	void DrawVerticalFade(FSlateWindowElementList& Out, int32 Layer, const FGeometry& Geometry,
+		const FVector2f& Min, const FVector2f& Size, const FCampusShape& Shape,
+		const FLinearColor& Top, const FLinearColor& Bottom);
+
 	/** Small vector icons; no texture assets, so they never fail to load. */
-	enum class EGlyph : uint8 { Gear, Mail, Friends, Plus, Rank, Coin, Gem, Wifi, Crown, Close, Chevron };
+	enum class EGlyph : uint8 { Gear, Mail, Friends, Plus, Rank, Coin, Gem, Wifi, Crown, Close, Chevron, Lock, Clock, Tick };
 
 	void DrawGlyph(FSlateWindowElementList& Out, int32 Layer, const FGeometry& Geometry, EGlyph Glyph,
 		const FVector2f& Center, float Radius, const FLinearColor& Color, float Thickness = 0.f);

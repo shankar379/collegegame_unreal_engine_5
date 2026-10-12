@@ -27,6 +27,10 @@ public class CollegeCampusGame : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "OnlineSubsystem", "OnlineSubsystemUtils" });
 
+		// Campus/CampusMapArt.cpp decodes the map-select banner PNGs at runtime (they ship as loose
+		// UFS files, see DefaultGame.ini) instead of cooking a texture asset per picture.
+		PrivateDependencyModuleNames.Add("ImageWrapper");
+
 		// Internet play (Campus/CampusEOS.cpp): EOS Connect device-id login, so a match hosted on a
 		// phone can be reached over EOS P2P instead of a LAN address. OnlineServicesInterface is the
 		// v2 online stack (it owns the device-id login AND registers the EOS socket subsystem that

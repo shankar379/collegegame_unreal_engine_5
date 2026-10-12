@@ -328,7 +328,110 @@ namespace CampusAngular
 			Line(Out, Layer, Geometry, { At(-R * 0.4f, -R * 0.6f), At(R * 0.4f, 0.f), At(-R * 0.4f, R * 0.6f) }, Color, T * 1.3f);
 			break;
 		}
+		case EGlyph::Lock:
+		{
+			// Shackle over a body: the "not yours yet" mark on a locked map or mode.
+			Arc(Out, Layer, Geometry, At(0.f, -R * 0.18f), R * 0.46f, UE_PI, UE_TWO_PI, 10, Color, T);
+			Line(Out, Layer, Geometry, { At(-R * 0.68f, -R * 0.14f), At(R * 0.68f, -R * 0.14f), At(R * 0.68f, R * 0.72f),
+				At(-R * 0.68f, R * 0.72f), At(-R * 0.68f, -R * 0.14f) }, Color, T);
+			Line(Out, Layer, Geometry, { At(0.f, R * 0.14f), At(0.f, R * 0.42f) }, Color, T * 1.1f);
+			break;
 		}
+		case EGlyph::Clock:
+		{
+			Arc(Out, Layer, Geometry, Center, R * 0.82f, 0.f, UE_TWO_PI, 16, Color, T);
+			Line(Out, Layer, Geometry, { At(0.f, -R * 0.46f), At(0.f, 0.f), At(R * 0.4f, R * 0.1f) }, Color, T);
+			break;
+		}
+		case EGlyph::Tick:
+		{
+			Line(Out, Layer, Geometry, { At(-R * 0.6f, 0.f), At(-R * 0.16f, R * 0.46f), At(R * 0.64f, -R * 0.5f) }, Color, T * 1.5f);
+			break;
+		}
+		}
+	}
+
+	void DrawShapedImage(FSlateWindowElementList& Out, int32 Layer, const FGeometry& Geometry,
+		const FVector2f& Min, const FVector2f& Size, const FCampusShape& Shape,
+		const FSlateResourceHandle& Handle, const FVector2f& ImageSize, const FLinearColor& Tint, float FocusY)
+	{
+		if (Size.X <= 0.f || Size.Y <= 0.f || !Handle.IsValid() || ImageSize.X <= 0.f || ImageSize.Y <= 0.f || Tint.A <= 0.f)
+		{
+			return;
+		}
+		TArray<FVector2f>& Points = ScratchOutline();
+		BuildOutline(Min, Size, Shape, Points);
+		if (Points.Num() < 3)
+		{
+			return;
+		}
+		// "Cover": the shorter side of the picture fills the card and the longer one is cropped,
+		// so a 3:1 banner squeezed into a 5:1 slot loses sky, never stretches.
+		const float BoxAspect = Size.X / Size.Y;
+		const float ArtAspect = ImageSize.X / ImageSize.Y;
+		const float USpan = BoxAspect > ArtAspect ? 1.f : ArtAspect / BoxAspect;
+		const float VSpan = BoxAspect > ArtAspect ? BoxAspect / ArtAspect : 1.f;
+		const float U0 = (1.f - USpan) * 0.5f;
+		const float V0 = (1.f - VSpan) * FMath::Clamp(FocusY, 0.f, 1.f);
+
+		const FSlateRenderTransform Transform = Geometry.ToPaintGeometry().GetAccumulatedRenderTransform();
+		const FColor Color = Tint.ToFColor(false);
+		TArray<FSlateVertex>& Verts = ScratchVerts();
+		TArray<SlateIndex>& Indices = ScratchIndices();
+		Verts.Reset(Points.Num());
+		Indices.Reset((Points.Num() - 2) * 3);
+		for (const FVector2f& Point : Points)
+		{
+			const FVector2f Uv(U0 + USpan * (Point.X - Min.X) / Size.X, V0 + VSpan * (Point.Y - Min.Y) / Size.Y);
+			Verts.Add(FSlateVertex::Make(Transform, Point, Uv, Color));
+		}
+		for (int32 Index = 1; Index + 1 < Points.Num(); ++Index)
+		{
+			Indices.Add(0);
+			Indices.Add(SlateIndex(Index));
+			Indices.Add(SlateIndex(Index + 1));
+		}
+		FSlateDrawElement::MakeCustomVerts(Out, Layer, Handle, Verts, Indices, nullptr, 0, 0);
+	}
+
+	void DrawVerticalFade(FSlateWindowElementList& Out, int32 Layer, const FGeometry& Geometry,
+		const FVector2f& Min, const FVector2f& Size, const FCampusShape& Shape,
+		const FLinearColor& Top, const FLinearColor& Bottom)
+	{
+		if (Size.X <= 0.f || Size.Y <= 0.f || (Top.A <= 0.f && Bottom.A <= 0.f))
+		{
+			return;
+		}
+		TArray<FVector2f>& Points = ScratchOutline();
+		BuildOutline(Min, Size, Shape, Points);
+		if (Points.Num() < 3)
+		{
+			return;
+		}
+		const FSlateRenderTransform Transform = Geometry.ToPaintGeometry().GetAccumulatedRenderTransform();
+		TArray<FSlateVertex>& Verts = ScratchVerts();
+		TArray<SlateIndex>& Indices = ScratchIndices();
+		Verts.Reset(Points.Num());
+		Indices.Reset((Points.Num() - 2) * 3);
+		for (const FVector2f& Point : Points)
+		{
+			// Per-vertex colour: the ramp costs the same one draw element as a flat fill.
+			const float Alpha = FMath::Clamp((Point.Y - Min.Y) / Size.Y, 0.f, 1.f);
+			Verts.Add(FSlateVertex::Make(Transform, Point, FVector2f(0.5f, 0.5f),
+				FMath::Lerp(Top, Bottom, Alpha).ToFColor(false)));
+		}
+		for (int32 Index = 1; Index + 1 < Points.Num(); ++Index)
+		{
+			Indices.Add(0);
+			Indices.Add(SlateIndex(Index));
+			Indices.Add(SlateIndex(Index + 1));
+		}
+		static FSlateResourceHandle Handle;
+		if (!Handle.IsValid())
+		{
+			Handle = FSlateApplication::Get().GetRenderer()->GetResourceHandle(*WhiteBrush());
+		}
+		FSlateDrawElement::MakeCustomVerts(Out, Layer, Handle, Verts, Indices, nullptr, 0, 0);
 	}
 
 	TSharedRef<SWidget> Logo(int32 Size)

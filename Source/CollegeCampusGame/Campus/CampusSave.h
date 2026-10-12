@@ -59,9 +59,18 @@ public:
 	UPROPERTY()
 	FString LastDailyClaim;
 
-	/** Lobby choice: "Classic" (college, 4 rounds) or "RealMap" (up to 50 players). */
+	/** Map chosen on the map-select screen; the id from CampusCatalog::Maps. "Classic" is the
+	 *  college campus (L_Match) and the only one built, so an older "RealMap" save falls back to it. */
 	UPROPERTY()
 	FName MatchMap = TEXT("Classic");
+
+	/** Mode chosen on the same screen; the id from CampusCatalog::Modes. */
+	UPROPERTY()
+	FName MatchMode = TEXT("TeamClash");
+
+	/** "Random map" ticked on the map-select screen. Parked until there is more than one map. */
+	UPROPERTY()
+	bool bRandomMap = false;
 
 	/** Lobby choice: 1 solo, 2 duo, 4 squad. */
 	UPROPERTY()
