@@ -29,9 +29,25 @@ public:
 	UPROPERTY(Config)
 	FString ApiBaseOverride;
 
+	/** Same API as host + path with NO "//" (e.g. my-tunnel.ngrok-free.dev/v1), always served over https.
+	 *  Unreal's ini reader cuts unquoted values at "//" (comment), so this key cannot be truncated. */
+	UPROPERTY(Config)
+	FString ApiHost;
+
 	FString ApiBaseUrl() const
 	{
-		return ApiBaseOverride.IsEmpty() ? FString::Printf(TEXT("http://%s:%d/v1"), *ServerHost, ApiPort) : ApiBaseOverride;
+		FString Base = ApiBaseOverride.TrimStartAndEnd();
+		Base.RemoveFromStart(TEXT("\""));
+		Base.RemoveFromEnd(TEXT("\""));
+		// a value cut at "//" reads back as "https:" - rebuild it from the slash-free host instead
+		if (!Base.Contains(TEXT("://")) || Base.EndsWith(TEXT("://")))
+		{
+			const FString Host = ApiHost.TrimStartAndEnd();
+			Base = Host.IsEmpty() ? FString() : TEXT("https://") + Host;
+		}
+		Base.RemoveFromEnd(TEXT("/"));
+		return Base.IsEmpty() ? FString::Printf(TEXT("http://%s:%d/v1"), *ServerHost, ApiPort) : Base;
 	}
+
 	FString GameAddress() const { return FString::Printf(TEXT("%s:%d"), *ServerHost, GamePort); }
 };
