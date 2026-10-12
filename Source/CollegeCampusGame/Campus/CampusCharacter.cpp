@@ -6,9 +6,16 @@
 #include "Campus/CampusZipline.h"
 #include "EngineUtils.h"
 #include "Campus/CampusFx.h"
+#include "Campus/CampusBRGameMode.h"
+#include "Campus/CampusBRPlane.h"
+#include "Campus/CampusBackend.h"
 #include "Campus/CampusDoor.h"
 #include "Campus/CampusGameMode.h"
+#include "Campus/CampusLoot.h"
+#include "Campus/CampusWeapons.h"
+#include "Engine/GameInstance.h"
 #include "Campus/CampusMatchState.h"
+#include "Campus/CampusVehicle.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -18,6 +25,8 @@
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/GameModeBase.h"
+#include "GameFramework/GameSession.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "InputAction.h"
@@ -32,6 +41,15 @@
 #include "Sound/SoundAttenuation.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Animation/AnimSequence.h"
+
+namespace CampusLootRules
+{
+	/** The vest soaks this share of every hit until its points run out. */
+	constexpr float ArmorAbsorbShare = 0.4f;
+	constexpr float MaxArmor = 100.f;
+	/** A medkit pays its health out over three seconds (the commitment Free Fire asks for). */
+	constexpr float MedkitSeconds = 3.f;
+}
 
 ACampusCharacter::ACampusCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UCampusMovementComponent>(ACharacter::CharacterMovementComponentName))
@@ -129,6 +147,10 @@ ACampusCharacter::ACampusCharacter(const FObjectInitializer& ObjectInitializer)
 	Gun->SetUsingAbsoluteLocation(true);
 	Gun->SetUsingAbsoluteRotation(true);
 
+	// Two weapon slots, both empty until BeginPlay / the loadout fills them.
+	WeaponSlots.Init(NAME_None, 2);
+	WeaponLevels.Init(0, 2);
+
 	FollowCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FollowCamera"));
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FollowCamera->bUsePawnControlRotation = false;
@@ -164,6 +186,17 @@ void ACampusCharacter::BeginPlay()
 	{
 		Gun->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Weapons/Rifle/Meshes/SM_Rifle.SM_Rifle")));
 	}
+	// Weapons: slot 0 starts with the starter rifle (the host owns the slots), then the owner's phone asks for
+	// whatever its backend loadout has equipped. Every machine applies the row of whichever id it sees.
+	if (HasAuthority() && !HasWeapon(0))
+	{
+		GiveWeapon(CampusWeapons::Starter().Id, 0);
+	}
+	ApplyWeapon();
+	if (IsLocallyControlled())
+	{
+		ApplyBackendLoadout();
+	}
 	// Place the gun after the final pose of every frame, so it never trails the hands.
 	GetMesh()->RegisterOnBoneTransformsFinalizedDelegate(FOnBoneTransformsFinalizedMultiCast::FDelegate::CreateUObject(this, &ACampusCharacter::UpdateGun));
 }
@@ -176,6 +209,15 @@ void ACampusCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME_CONDITION(ACampusCharacter, bProne, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACampusCharacter, bSliding, COND_SkipOwner);
 	DOREPLIFETIME(ACampusCharacter, Health);
+	// Unconditional on purpose: everyone draws and aims at seated players, the owner included.
+	DOREPLIFETIME(ACampusCharacter, Vehicle);
+	DOREPLIFETIME(ACampusCharacter, Seat);
+	// Same reason: the gun in someone's hands is drawn (and sounds) differently on every phone, and the
+	// owner's own HUD paints both slots from these two values.
+	DOREPLIFETIME(ACampusCharacter, WeaponSlots);
+	DOREPLIFETIME(ACampusCharacter, CurrentSlot);
+	DOREPLIFETIME(ACampusCharacter, Armor);
+	DOREPLIFETIME(ACampusCharacter, bHelmet);
 }
 
 void ACampusCharacter::Tick(float DeltaSeconds)
@@ -185,6 +227,7 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	if (HasAuthority())
 	{
 		RecordHitbox();
+		TickMedkit(DeltaSeconds);
 		// fall damage: remember the top of every fall (zipline / vault moves are not falls)
 		const bool bFalling = GetCharacterMovement()->IsFalling() && !bTraversing && !Zip;
 		if (bFalling)
@@ -234,6 +277,12 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 		{
 			TryFire();
 		}
+		// The stick is the wheel while driving: ApplyMove parked its axis here instead of walking.
+		if (IsDriving())
+		{
+			SendDriveInput();
+		}
+		DriveAxis = FVector2D::ZeroVector; // released keys / lifted thumb read as zero next frame
 	}
 	// The listen-server host's own pawn never sends ServerMove, so the engine never fills RemoteViewPitch for it and
 	// every joined phone would see the host aiming level forever. Feed it here (replicated to others by APawn).
@@ -250,7 +299,10 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	// character per frame, was the most expensive thing the host did for pawns with no camera - and it is the
 	// host's frame time that decides whether the smoothing windows set in the constructor have any time to work.
 	// Checked every frame (cheaply) because possession changes after spawn.
-	const bool bNeedsCameraRig = IsLocallyControlled();
+	// IsLocalPlayerPawn, not IsLocallyControlled: an AI bot on the host is locally controlled as well, and
+	// ten bots dragging ten 320 cm spring-arm sweeps through the level is exactly the cost this check exists
+	// to avoid (Campus/CampusBot.h).
+	const bool bNeedsCameraRig = IsLocalPlayerPawn();
 	if (bCameraRigActive != bNeedsCameraRig)
 	{
 		bCameraRigActive = bNeedsCameraRig;
@@ -271,7 +323,7 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 
 	// FOV: three.js uses a 70 deg VERTICAL FOV, divided by the eased zoom. Unreal's FOV is horizontal,
 	// so convert with this viewport's aspect (a 20:9 phone gets a wide view, like the web game).
-	if (IsLocallyControlled())
+	if (IsLocalPlayerPawn())
 	{
 		float Aspect = 16.f / 9.f;
 		if (const APlayerController* PC = Cast<APlayerController>(Controller))
@@ -302,7 +354,7 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	// Everything below drives the camera rig, so it is for the local pawn only. On a phone host this ran for every
 	// replicated character: a head socket query, two boom transform writes and the spring arm's sweep, per
 	// character per frame, for a camera nobody will ever look through.
-	if (!IsLocallyControlled())
+	if (!IsLocalPlayerPawn())
 	{
 		return;
 	}
@@ -468,6 +520,12 @@ void ACampusCharacter::ApplyMove(const FVector2D& Axis)
 	{
 		return;
 	}
+	if (Vehicle)
+	{
+		// Seated: the same stick is the wheel (Y throttle, X steer) and a passenger cannot walk out.
+		DriveAxis = Axis;
+		return;
+	}
 	const FRotator YawRotation(0.f, Controller->GetControlRotation().Yaw, 0.f);
 	AddMovementInput(FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X), Axis.Y);
 	AddMovementInput(FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y), Axis.X);
@@ -509,6 +567,10 @@ void ACampusCharacter::ApplyLook(float YawDegrees, float PitchUpDegrees)
 	Rotation.Pitch = FMath::Clamp(FRotator::NormalizeAxis(Rotation.Pitch) + PitchUpDegrees, -MaxPitch, MaxPitch);
 	Rotation.Roll = 0.f;
 	Controller->SetControlRotation(Rotation);
+	if (Vehicle)
+	{
+		ClampLookToSeat();
+	}
 }
 
 void ACampusCharacter::SprintPressed()
@@ -542,6 +604,10 @@ void ACampusCharacter::ToggleSprint()
 
 void ACampusCharacter::ToggleCrouch()
 {
+	if (Vehicle)
+	{
+		return; // a seated character is already crouched, by the seat
+	}
 	if (bSliding)
 	{
 		SetSliding(false);
@@ -718,7 +784,7 @@ void ACampusCharacter::ToggleProne()
 		UnCrouch();
 		return;
 	}
-	if (bTraversing || !GetCharacterMovement()->IsMovingOnGround())
+	if (bTraversing || Vehicle || !GetCharacterMovement()->IsMovingOnGround())
 	{
 		return;
 	}
@@ -810,9 +876,9 @@ void ACampusCharacter::AddFreeLook(float YawDegrees, float PitchDegrees)
 
 void ACampusCharacter::SetAiming(bool bAim)
 {
-	if (bAim && bFreeLookHeld)
+	if (bAim && (bFreeLookHeld || IsDriving()))
 	{
-		return;
+		return; // a driver never aims: one thumb cannot steer and aim on a phone
 	}
 	if (bAim && !bArmed)
 	{
@@ -826,7 +892,7 @@ void ACampusCharacter::SetAiming(bool bAim)
 void ACampusCharacter::TryFire()
 {
 	const float Now = GetWorld()->GetTimeSeconds();
-	if (!bArmed || bDead || bTraversing || IsFreeLooking() || Now < NextFireTime || Now < ReloadEndTime)
+	if (!bArmed || bDead || bTraversing || IsFreeLooking() || Now < NextFireTime || Now < ReloadEndTime || IsDriving())
 	{
 		return;
 	}
@@ -848,7 +914,8 @@ void ACampusCharacter::TryFire()
 	--AmmoInMag;
 	if (ShotSound)
 	{
-		UGameplayStatics::PlaySound2D(this, ShotSound);
+		// One recording, pitched per gun: the hand cannon booms, the SMG cracks.
+		UGameplayStatics::PlaySound2D(this, ShotSound, 1.f, ShotPitch);
 	}
 	if (UCampusAnimInstance* Anim = GetCampusAnim())
 	{
@@ -856,9 +923,12 @@ void ACampusCharacter::TryFire()
 	}
 
 	const float Pose = bIsCrouched ? 0.85f : 1.f;
-	const float Kick = RecoilUpDeg * (1.f - 0.5f * AimBlend) * Pose;
+	// Shooting out of a moving car is chaotic on purpose: a drive-by must not be a free headshot platform.
+	const bool bRolling = Vehicle && FMath::Abs(Vehicle->GetSpeed()) > 300.f;
+	const float Kick = RecoilUpDeg * (bRolling ? 1.35f : 1.f) * (1.f - 0.5f * AimBlend) * Pose;
+	const float Sideways = RecoilSideDeg * (bRolling ? 1.6f : 1.f);
 	// Kick goes up, then most of it settles back down by itself.
-	ApplyLook(FMath::FRandRange(-RecoilSideDeg, RecoilSideDeg), Kick);
+	ApplyLook(FMath::FRandRange(-Sideways, Sideways), Kick);
 	RecoilToRecover += Kick * RecoilRecoverShare;
 
 	FVector ViewLocation;
@@ -866,7 +936,10 @@ void ACampusCharacter::TryFire()
 	if (Controller)
 	{
 		Controller->GetPlayerViewPoint(ViewLocation, ViewRotation);
-		ServerFire(ViewLocation, ViewRotation.Vector());
+		// The gun's cone, rolled once and used for BOTH the shot we send and the tracer we draw: the
+		// line on screen is the line the server judges.
+		const FVector Shot = SpreadDirection(ViewRotation.Vector());
+		ServerFire(ViewLocation, Shot);
 
 		// Instant local feedback (three.js draws its own marks and tracer the same frame).
 		FCollisionObjectQueryParams Objects;
@@ -874,7 +947,7 @@ void ACampusCharacter::TryFire()
 		Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
 		Objects.AddObjectTypesToQuery(ECC_Pawn);
 		FHitResult Hit;
-		const FVector End = ViewLocation + ViewRotation.Vector() * Range;
+		const FVector End = ViewLocation + Shot * Range;
 		const bool bHit = GetWorld()->LineTraceSingleByObjectType(Hit, ViewLocation, End, Objects, FCollisionQueryParams(SCENE_QUERY_STAT(CampusFireFx), false, this));
 		SpawnShotFx(bHit ? Hit.ImpactPoint : End, bHit ? Hit.ImpactNormal : FVector::UpVector, bHit && !Cast<ACampusCharacter>(Hit.GetActor()));
 	}
@@ -922,7 +995,8 @@ void ACampusCharacter::Reload()
 			UGameplayStatics::PlaySound2D(this, ReloadSound);
 		}
 		ReloadStartTime = Now;
-		ReloadEndTime = Now + Anim->GetReloadDuration();
+		// The gun's own reload time (the LMG's box takes six seconds); the clip is cosmetic.
+		ReloadEndTime = Now + ReloadSeconds;
 	}
 	const int32 Taken = FMath::Min(MagazineSize - AmmoInMag, AmmoReserve);
 	AmmoInMag += Taken;
@@ -967,9 +1041,8 @@ void ACampusCharacter::ServerReload_Implementation()
 	{
 		return;
 	}
-	const UCampusAnimInstance* Anim = GetCampusAnim();
-	// a little shorter than the clip: the phone's own clock and the RPC delay never make a legit shot look early
-	ServerReloadEndTime = Now + (Anim ? Anim->GetReloadDuration() : 2.f) * 0.8f;
+	// a little shorter than the gun's time: the phone's own clock and the RPC delay never make a legit shot look early
+	ServerReloadEndTime = Now + ReloadSeconds * 0.8f;
 	const int32 Taken = FMath::Min(MagazineSize - ServerAmmoInMag, ServerAmmoReserve);
 	ServerAmmoInMag += Taken;
 	ServerAmmoReserve -= Taken;
@@ -991,6 +1064,11 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	{
 		return;
 	}
+	// A seated shooter fires out of an aperture, or not at all. Driver: never.
+	if (Vehicle && !SeatAllowsFire(FVector(Direction)))
+	{
+		return;
+	}
 	ServerShotCredit -= 1.f;
 	--ServerAmmoInMag;
 	// The world blocks where it is now; players are checked where the shooter saw them (lag compensation).
@@ -1001,12 +1079,70 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	FHitResult Hit;
 	const FVector End = FVector(Start) + FVector(Direction) * Range;
 	const bool bWall = GetWorld()->LineTraceSingleByObjectType(Hit, Start, End, Objects, Params);
+
+	// Cars are invisible to the trace above (ECC_Vehicle is not in Objects) and are tested ONLY here, at
+	// the same instant the occupants are rewound to - otherwise a 300 cm-displaced car and the rewound
+	// player would disagree about whether a shot went through a window or into a door pillar.
+	// With no car in the level this loop is empty and everything below is the old behaviour exactly.
+	ACampusVehicle* HitCar = nullptr;
+	float CarDistance = Range;
+	ECampusVehiclePart CarPart = ECampusVehiclePart::None;
+	int32 CarWheel = INDEX_NONE;
+	bool bCarBlocks = false;
+	if (ACampusVehicle::VehiclesEnabled())
+	{
+		const double CarWhen = ShotRewindTime(ACampusVehicle::PlayoutDelay);
+		for (const TWeakObjectPtr<ACampusVehicle>& Candidate : ACampusVehicle::All())
+		{
+			ACampusVehicle* Car = Candidate.Get();
+			if (!Car || Car->GetWorld() != GetWorld() || Car == Vehicle)
+			{
+				continue; // never your own car: your muzzle is inside it
+			}
+			float Distance = CarDistance;
+			ECampusVehiclePart Part = ECampusVehiclePart::None;
+			int32 Wheel = INDEX_NONE;
+			bool bBlocks = false;
+			if (Car->RewoundTrace(Start, Direction, CarDistance, CarWhen, Distance, Part, Wheel, bBlocks) && Distance < CarDistance)
+			{
+				HitCar = Car;
+				CarDistance = Distance;
+				CarPart = Part;
+				CarWheel = Wheel;
+				bCarBlocks = bBlocks;
+			}
+		}
+	}
+	// Glass never raises BlockDistance: that is the whole mechanic, and it falls straight out of here.
+	float BlockDistance = bWall ? Hit.Distance : Range;
+	if (bCarBlocks && CarDistance < BlockDistance)
+	{
+		BlockDistance = CarDistance;
+	}
+
 	FVector VictimPoint;
 	uint8 Zone = 0;
-	ACampusCharacter* Victim = RewoundVictim(Start, Direction, bWall ? Hit.Distance : Range, VictimPoint, Zone);
+	ACampusCharacter* Victim = RewoundVictim(Start, Direction, BlockDistance, VictimPoint, Zone);
+	// A glass hit does BOTH: it chips the car and lets the occupant behind it be hit.
+	const bool bCarNearest = HitCar && CarDistance <= (bWall ? Hit.Distance : Range)
+		&& (!Victim || CarDistance <= FVector::Dist(FVector(Start), VictimPoint));
+	if (bCarNearest)
+	{
+		const float CarFalloff = FMath::GetMappedRangeValueClamped(FVector2D(FalloffStart, FMath::Max(FalloffEnd, FalloffStart + 1.f)),
+			FVector2D(1.f, FalloffMinShare), CarDistance);
+		// A tyre takes no falloff and no zone multiplier; everything else is zoned like PUBG's.
+		const bool bWheel = CarPart == ECampusVehiclePart::Wheel;
+		const float CarDealt = bWheel ? Damage : Damage * ACampusVehicle::PartMultiplier(CarPart) * CarFalloff;
+		HitCar->ApplyPartDamage(CarPart, CarWheel, CarDealt, GetController());
+	}
 	if (Victim)
 	{
 		MulticastFire(VictimPoint, -FVector(Direction), false);
+	}
+	else if (bCarNearest)
+	{
+		MulticastFire(FVector(Start) + FVector(Direction) * CarDistance, -FVector(Direction), true);
+		return;
 	}
 	else
 	{
@@ -1022,12 +1158,21 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	}
 	const ACampusPlayerState* MyState = GetPlayerState<ACampusPlayerState>();
 	const ACampusPlayerState* VictimState = Victim->GetPlayerState<ACampusPlayerState>();
-	if (MyState && VictimState && MyState->Team == VictimState->Team)
+	// Battle royale numbers its squads on the game mode (which also knows the bot squads, and that
+	// nobody can be hurt before the drop); TDM keeps using the two player-state colours.
+	if (const ACampusBRGameMode* BattleRoyale = GetWorld()->GetAuthGameMode<ACampusBRGameMode>())
+	{
+		if (BattleRoyale->AreFriendly(GetController(), Victim->GetController()))
+		{
+			return;
+		}
+	}
+	else if (MyState && VictimState && MyState->Team == VictimState->Team)
 	{
 		return;
 	}
-	// zone (1 head, 2 arms / legs) and distance falloff
-	const float ZoneScale = Zone == 1 ? HeadMultiplier : (Zone == 2 ? LimbMultiplier : 1.f);
+	// zone (1 head, 2 arms / legs) and distance falloff; a helmet on the victim takes the edge off a headshot
+	const float ZoneScale = Zone == 1 ? HeadMultiplier * Victim->HeadDamageShare() : (Zone == 2 ? LimbMultiplier : 1.f);
 	const float Distance = FVector::Dist(FVector(Start), VictimPoint);
 	const float Falloff = FMath::GetMappedRangeValueClamped(FVector2D(FalloffStart, FMath::Max(FalloffEnd, FalloffStart + 1.f)),
 		FVector2D(1.f, FalloffMinShare), Distance);
@@ -1047,6 +1192,36 @@ namespace CampusLagComp
 	 *  smoothing windows set on the movement component: the mesh the shooter aimed at trails its capsule by
 	 *  roughly this much, so the rewind has to account for it or close-range shots would miss high. */
 	constexpr double ViewDelay = 0.08;
+}
+
+bool ACampusCharacter::IsLocalPlayerPawn() const
+{
+	// A bot's AIController is local AND authoritative on a listen server, so it passes
+	// IsLocallyControlled(); only a player controller on this machine passes this.
+	return Controller != nullptr && Controller->IsLocalController() && Controller->IsPlayerController();
+}
+
+double ACampusCharacter::ViewDelaySeconds() const
+{
+	// A seated character's mesh is drawn by the car's 100 ms playout buffer, not by movement smoothing,
+	// so its view delay IS the car's. 0.02 s of disagreement is 24 cm at top speed - the difference
+	// between "through the window" and "into the door pillar".
+	return Vehicle ? ACampusVehicle::PlayoutDelay : CampusLagComp::ViewDelay;
+}
+
+double ACampusCharacter::ShotRewindTime(double ViewDelay) const
+{
+	// The shot left the phone half a ping ago, and what it aimed at was already half a ping old there.
+	if (IsLocallyControlled())
+	{
+		return GetWorld()->GetTimeSeconds(); // the host's own shots see the server's world directly
+	}
+	double Rewind = ViewDelay;
+	if (const APlayerState* State = GetPlayerState())
+	{
+		Rewind += State->GetPingInMilliseconds() * 0.001;
+	}
+	return GetWorld()->GetTimeSeconds() - FMath::Min(Rewind, CampusLagComp::MaxRewind);
 }
 
 void ACampusCharacter::RecordHitbox()
@@ -1105,17 +1280,6 @@ ACampusCharacter* ACampusCharacter::RewoundVictim(const FVector& Start, const FV
 {
 	OutZone = 0;
 	FHitboxFrame BestBox;
-	// The shot left the phone half a ping ago, and what it aimed at was already half a ping old there.
-	double Rewind = CampusLagComp::ViewDelay;
-	if (const APlayerState* State = GetPlayerState())
-	{
-		Rewind += State->GetPingInMilliseconds() * 0.001;
-	}
-	if (IsLocallyControlled())
-	{
-		Rewind = 0.0; // the host's own shots see the server's world directly
-	}
-	const double When = GetWorld()->GetTimeSeconds() - FMath::Min(Rewind, CampusLagComp::MaxRewind);
 	const FVector End = Start + Direction * BlockDistance;
 
 	ACampusCharacter* Best = nullptr;
@@ -1131,7 +1295,9 @@ ACampusCharacter* ACampusCharacter::RewoundVictim(const FVector& Start, const FV
 		{
 			continue;
 		}
-		const FHitboxFrame Box = Other->HitboxAt(When);
+		// Per candidate, not once for the whole loop: a player in a car is drawn 0.10 s behind, on foot
+		// 0.08 s. On foot this is byte-for-byte the old single constant.
+		const FHitboxFrame Box = Other->HitboxAt(ShotRewindTime(Other->ViewDelaySeconds()));
 		const FVector Half(0.f, 0.f, FMath::Max(Box.HalfHeight - Box.Radius, 0.f));
 		FVector OnShot, OnAxis;
 		FMath::SegmentDistToSegmentSafe(Start, End, Box.Center - Half, Box.Center + Half, OnShot, OnAxis);
@@ -1163,8 +1329,9 @@ ACampusCharacter* ACampusCharacter::RewoundVictim(const FVector& Start, const FV
 
 void ACampusCharacter::MulticastFire_Implementation(FVector_NetQuantize End, FVector_NetQuantizeNormal Normal, bool bMark)
 {
-	// The shooter already played its own anim and effects when it fired.
-	if (IsLocallyControlled())
+	// The shooter already played its own anim and effects when it fired. A bot did not: it fires straight
+	// into ServerFire with no local TryFire, so the host plays its muzzle anim and 3D shot from here.
+	if (IsLocalPlayerPawn())
 	{
 		return;
 	}
@@ -1174,7 +1341,7 @@ void ACampusCharacter::MulticastFire_Implementation(FVector_NetQuantize End, FVe
 	}
 	if (RemoteShotSound)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, RemoteShotSound, GunPoint(), 1.f, 1.f, 0.f, ShotAttenuation);
+		UGameplayStatics::PlaySoundAtLocation(this, RemoteShotSound, GunPoint(), 1.f, ShotPitch, 0.f, ShotAttenuation);
 	}
 	SpawnShotFx(End, Normal, bMark);
 }
@@ -1195,6 +1362,12 @@ void ACampusCharacter::ClientConfirmHit_Implementation(bool bKill, bool bHead, i
 void ACampusCharacter::Landed(const FHitResult& Hit)
 {
 	Super::Landed(Hit);
+	// A battle royale drop lands from 100 m by design: the chute, not the health bar, pays for it.
+	if (ACampusBRPlane::IsFallDamageSuppressed(this))
+	{
+		bTrackingFall = false;
+		return;
+	}
 	if (!HasAuthority() || !bTrackingFall)
 	{
 		return;
@@ -1322,7 +1495,15 @@ namespace CampusTraversal
 
 void ACampusCharacter::JumpPressed()
 {
-	if (bTraversing || Zip)
+	// Battle royale: in the plane Jump is the drop, in freefall it is the chute. Checked first - while
+	// you are in the air at 40 m/s there is nothing else the button could possibly mean.
+	if (ACampusBRPlane::HandleJumpPressed(this))
+	{
+		return;
+	}
+	// Seated: Jump does nothing. Getting out of a car is a multi-second commitment and it has its own
+	// button - vaulting a railing when you meant to stay in the car is a rage-quit bug.
+	if (bTraversing || Zip || Vehicle)
 	{
 		return;
 	}
@@ -1737,7 +1918,8 @@ void ACampusCharacter::EndTraversal()
 
 void ACampusCharacter::MulticastUpperBody_Implementation(bool bReload)
 {
-	if (IsLocallyControlled())
+	// Same reason as MulticastFire: an AI bot plays its reload / equip from here, the host included.
+	if (IsLocalPlayerPawn())
 	{
 		return;
 	}
@@ -1753,6 +1935,13 @@ void ACampusCharacter::ApplyHit(float InDamage, AController* InstigatorControlle
 	{
 		return;
 	}
+	// The vest eats its share first and wears out doing it; what is left reaches the body.
+	if (Armor > 0.f && InDamage > 0.f)
+	{
+		const float Soaked = FMath::Min(Armor, InDamage * CampusLootRules::ArmorAbsorbShare);
+		Armor -= Soaked;
+		InDamage -= Soaked;
+	}
 	// scoreboard: damage actually taken (capped at what was left) and dealt by the shooter (kill plane = nobody)
 	const float Taken = FMath::Min(Health, InDamage);
 	if (ACampusPlayerState* VictimState = GetPlayerState<ACampusPlayerState>())
@@ -1767,7 +1956,12 @@ void ACampusCharacter::ApplyHit(float InDamage, AController* InstigatorControlle
 	if (Health <= 0.f)
 	{
 		bDead = true;
-		if (ACampusMatchGameMode* GameMode = GetWorld()->GetAuthGameMode<ACampusMatchGameMode>())
+		// Two modes, two bookkeepers: BR eliminates and places, TDM scores the round.
+		if (ACampusBRGameMode* BattleRoyale = GetWorld()->GetAuthGameMode<ACampusBRGameMode>())
+		{
+			BattleRoyale->OnKilled(GetController(), InstigatorController);
+		}
+		else if (ACampusMatchGameMode* GameMode = GetWorld()->GetAuthGameMode<ACampusMatchGameMode>())
 		{
 			GameMode->OnKilled(GetController(), InstigatorController);
 		}
@@ -1834,4 +2028,666 @@ bool ACampusCharacter::CanSprintNow() const
 UCampusAnimInstance* ACampusCharacter::GetCampusAnim() const
 {
 	return Cast<UCampusAnimInstance>(GetMesh()->GetAnimInstance());
+}
+
+float ACampusCharacter::GetZoom() const
+{
+	// The gun's own ceiling: only rifles offer the 4x step, an SMG or a pistol stops at 2x.
+	const float Zoom = FMath::Min(ZoomLevels[ZoomIndex], WeaponMaxZoom);
+	// Part of the in-vehicle accuracy penalty: no 4x scope out of a moving car.
+	return Vehicle && FMath::Abs(Vehicle->GetSpeed()) > 300.f ? FMath::Min(Zoom, 2.f) : Zoom;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Vehicles. Nothing here re-possesses anything: the pawn is attached to a seat and every other
+// system (camera, touch controls, scoring, hits, respawn, lag comp) carries on untouched.
+
+ACampusVehicle* ACampusCharacter::FindNearbyVehicle(ECampusSeat& OutSeat) const
+{
+	OutSeat = ECampusSeat::None;
+	if (Vehicle || Zip || bTraversing || bDead || !ACampusVehicle::VehiclesEnabled())
+	{
+		return nullptr;
+	}
+	const FVector Feet = GetActorLocation() - FVector(0.f, 0.f, GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+	ACampusVehicle* Best = nullptr;
+	float BestDistance = UE_BIG_NUMBER;
+	for (const TWeakObjectPtr<ACampusVehicle>& Candidate : ACampusVehicle::All())
+	{
+		ACampusVehicle* Car = Candidate.Get();
+		if (!Car || Car->GetWorld() != GetWorld())
+		{
+			continue;
+		}
+		const ECampusSeat Free = Car->FindFreeSeat(Feet);
+		const float Distance = FVector::Dist(Feet, Car->GetActorLocation());
+		if (Free != ECampusSeat::None && Distance < BestDistance)
+		{
+			BestDistance = Distance;
+			Best = Car;
+			OutSeat = Free;
+		}
+	}
+	return Best;
+}
+
+void ACampusCharacter::VehiclePressed()
+{
+	if (!ACampusVehicle::VehiclesEnabled() || bDead)
+	{
+		return;
+	}
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (Vehicle)
+	{
+		if (Now - SeatRequestTime < 0.3f)
+		{
+			return; // enter / exit spam is a hitbox dodge
+		}
+		SeatRequestTime = Now;
+		HasAuthority() ? Vehicle->ServerExit(this) : ServerRequestExit();
+		return;
+	}
+	ECampusSeat Free = ECampusSeat::None;
+	ACampusVehicle* Car = FindNearbyVehicle(Free);
+	if (!Car || Free == ECampusSeat::None || Now - SeatRequestTime < 0.5f)
+	{
+		return;
+	}
+	SeatRequestTime = Now;
+	if (HasAuthority())
+	{
+		Car->ServerTryEnter(this, Free);
+	}
+	else
+	{
+		ServerRequestSeat(Car, Free);
+	}
+}
+
+void ACampusCharacter::VehicleLongPressed()
+{
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (!Vehicle || Now - SeatRequestTime < 0.5f)
+	{
+		return;
+	}
+	SeatRequestTime = Now;
+	const ECampusSeat Next = Vehicle->NextFreeSeat(Seat);
+	if (Next == ECampusSeat::None)
+	{
+		return;
+	}
+	if (HasAuthority())
+	{
+		Vehicle->ServerTrySwitch(this, Next);
+	}
+	else
+	{
+		ServerRequestSwitchSeat();
+	}
+}
+
+void ACampusCharacter::SetSeated(ACampusVehicle* InVehicle, ECampusSeat InSeat)
+{
+	Vehicle = InVehicle;
+	Seat = InSeat;
+	ApplySeatedState();
+}
+
+void ACampusCharacter::OnRep_Vehicle()
+{
+	// The attachment itself replicates (AActor::AttachmentReplication); this is the local side of it.
+	ApplySeatedState();
+}
+
+void ACampusCharacter::ApplySeatedState()
+{
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	if (Vehicle)
+	{
+		// Crouch FIRST: the movement component refuses to crouch once the movement mode is None, and the
+		// standing capsule (166 cm) is taller than the car. Authority and the owner do it themselves;
+		// simulated proxies get it from ACharacter's own bIsCrouched replication.
+		if (!bIsCrouched && (HasAuthority() || IsLocallyControlled()))
+		{
+			Movement->Crouch(false);
+			bCrouchedForSeat = bIsCrouched;
+		}
+		Movement->StopMovementImmediately();
+		Movement->DisableMovement();
+		// Still hit-testable (that is the whole point of staying a pawn), no physics.
+		GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		// Passengers face where they aim (drive-bys); the driver faces where the car points.
+		bUseControllerRotationYaw = !IsDriving();
+		bFireHeld = false;
+		bAiming = false;
+		bRunHeld = false;
+		bSprinting = false;
+		TouchMove = FVector2D::ZeroVector;
+		if (HasAuthority())
+		{
+			// Not optional: leave it on and the character's own movement replication fights the parent
+			// transform - the classic "passenger vibrates inside the car".
+			SetReplicateMovement(false);
+		}
+		UpdateMovementSettings();
+		return;
+	}
+	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	bUseControllerRotationYaw = true;
+	// Walking again before standing up: UnCrouch also refuses with the movement mode at None.
+	Movement->SetMovementMode(MOVE_Falling);
+	if (bCrouchedForSeat)
+	{
+		Movement->UnCrouch(false);
+		bCrouchedForSeat = false;
+	}
+	bBrakeHeld = false;
+	DriveAxis = FVector2D::ZeroVector;
+	if (HasAuthority())
+	{
+		SetReplicateMovement(true);
+	}
+	UpdateMovementSettings();
+}
+
+void ACampusCharacter::ClampLookToSeat()
+{
+	if (!Vehicle || !Controller || !IsLocallyControlled())
+	{
+		return;
+	}
+	// Named ...Deg so they never shadow this class's own MaxPitch (the camera's pitch clamp).
+	FVector LocalForward = FVector::ForwardVector;
+	float HalfYawDeg = 0.f;
+	float MinPitchDeg = 0.f;
+	float MaxPitchDeg = 0.f;
+	Vehicle->SeatAperture(Seat, LocalForward, HalfYawDeg, MinPitchDeg, MaxPitchDeg);
+	if (HalfYawDeg <= 0.f)
+	{
+		return; // the driver cannot shoot, so the driver's camera stays free to look around
+	}
+	const FRotator Control = Controller->GetControlRotation();
+	const float CentreYaw = Vehicle->GetActorRotation().Yaw + FMath::RadiansToDegrees(FMath::Atan2(LocalForward.Y, LocalForward.X));
+	const float Offset = FMath::Clamp(FRotator::NormalizeAxis(Control.Yaw - CentreYaw), -HalfYawDeg, HalfYawDeg);
+	Controller->SetControlRotation(FRotator(FMath::Clamp(FRotator::NormalizeAxis(Control.Pitch), MinPitchDeg, MaxPitchDeg),
+		FRotator::NormalizeAxis(CentreYaw + Offset), 0.f));
+}
+
+bool ACampusCharacter::SeatAllowsFire(const FVector& Direction) const
+{
+	if (!Vehicle)
+	{
+		return true;
+	}
+	if (Seat == ECampusSeat::Driver)
+	{
+		return false; // a driver never fires
+	}
+	FVector LocalForward = FVector::ForwardVector;
+	float HalfYawDeg = 0.f;
+	float MinPitchDeg = 0.f;
+	float MaxPitchDeg = 0.f;
+	Vehicle->SeatAperture(Seat, LocalForward, HalfYawDeg, MinPitchDeg, MaxPitchDeg);
+	// Without this a cheating client shoots through its own car body - and the solid boxes in
+	// RewoundTrace would not stop it, because the shot originates inside them.
+	const FVector Local = Vehicle->GetActorTransform().InverseTransformVectorNoScale(Direction);
+	if (FVector::DotProduct(Local.GetSafeNormal2D(), LocalForward) < FMath::Cos(FMath::DegreesToRadians(HalfYawDeg)))
+	{
+		return false;
+	}
+	const float PitchDegrees = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(Local.GetSafeNormal().Z, -1.f, 1.f)));
+	return PitchDegrees >= MinPitchDeg && PitchDegrees <= MaxPitchDeg;
+}
+
+void ACampusCharacter::SendDriveInput()
+{
+	if (!Vehicle || Seat != ECampusSeat::Driver)
+	{
+		return;
+	}
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (Now < NextDriveSendTime)
+	{
+		return;
+	}
+	// The Fire slot is BRAKE while driving; Sprint is the handbrake.
+	const float Throttle = bBrakeHeld ? -1.f : FMath::Clamp(DriveAxis.Y, -1.f, 1.f);
+	const int8 PackedThrottle = int8(FMath::Clamp(FMath::RoundToInt(Throttle * 127.f), -127, 127));
+	const int8 PackedSteer = int8(FMath::Clamp(FMath::RoundToInt(DriveAxis.X * 127.f), -127, 127));
+	const bool bHandbrake = bRunHeld;
+	const bool bMoved = FMath::Abs(int32(PackedThrottle) - int32(LastDriveThrottle)) > 8
+		|| FMath::Abs(int32(PackedSteer) - int32(LastDriveSteer)) > 8
+		|| bHandbrake != bLastDriveHandbrake;
+	if (!bMoved && Now < LastDriveSendTime + 0.25f)
+	{
+		return; // nothing moved: one keepalive every 250 ms is enough
+	}
+	NextDriveSendTime = Now + 1.f / 20.f;
+	LastDriveSendTime = Now;
+	LastDriveThrottle = PackedThrottle;
+	LastDriveSteer = PackedSteer;
+	bLastDriveHandbrake = bHandbrake;
+	if (HasAuthority())
+	{
+		Vehicle->ServerSetDriveInput(this, float(PackedThrottle) / 127.f, float(PackedSteer) / 127.f, bHandbrake);
+		return;
+	}
+	ServerDriveInput(PackedThrottle, PackedSteer, bHandbrake);
+	// The driver's own phone predicts with the identical intent, so the integrator agrees with the host's.
+	Vehicle->SetPredictedDriveInput(float(PackedThrottle) / 127.f, float(PackedSteer) / 127.f, bHandbrake);
+}
+
+void ACampusCharacter::CountVehicleViolation()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (Now - ViolationWindowStart > 10.f)
+	{
+		ViolationWindowStart = Now;
+		VehicleViolations = 0;
+	}
+	if (++VehicleViolations < 10)
+	{
+		return;
+	}
+	// Log, never silently correct: ten refused vehicle RPCs in ten seconds is not a bad connection.
+	UE_LOG(LogTemp, Warning, TEXT("Campus: kicking %s, %d refused vehicle RPCs in 10 s"),
+		GetPlayerState() ? *GetPlayerState()->GetPlayerName() : TEXT("?"), VehicleViolations);
+	if (const AGameModeBase* GameMode = GetWorld()->GetAuthGameMode())
+	{
+		if (APlayerController* Player = Cast<APlayerController>(GetController()); Player && GameMode->GameSession)
+		{
+			GameMode->GameSession->KickPlayer(Player, FText::FromString(TEXT("Vehicle input refused too often.")));
+		}
+	}
+}
+
+void ACampusCharacter::ServerRequestSeat_Implementation(ACampusVehicle* Car, ECampusSeat WantedSeat)
+{
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (!Car || Car->GetWorld() != GetWorld() || Vehicle || Zip || bTraversing || bDead || Now - SeatRequestTime < 0.5f)
+	{
+		CountVehicleViolation();
+		return;
+	}
+	SeatRequestTime = Now;
+	// A lost race for the same seat in the same frame is not cheating: the loser simply stays out.
+	Car->ServerTryEnter(this, WantedSeat);
+}
+
+void ACampusCharacter::ServerRequestExit_Implementation()
+{
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (!Vehicle || Now - SeatRequestTime < 0.3f)
+	{
+		CountVehicleViolation();
+		return;
+	}
+	SeatRequestTime = Now;
+	Vehicle->ServerExit(this);
+}
+
+void ACampusCharacter::ServerRequestSwitchSeat_Implementation()
+{
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (!Vehicle || Now - SeatRequestTime < 0.5f)
+	{
+		CountVehicleViolation();
+		return;
+	}
+	SeatRequestTime = Now;
+	Vehicle->ServerTrySwitch(this, Vehicle->NextFreeSeat(Seat));
+}
+
+void ACampusCharacter::ServerDriveInput_Implementation(int8 Throttle, int8 Steer, bool bHandbrake)
+{
+	if (!Vehicle || Seat != ECampusSeat::Driver)
+	{
+		CountVehicleViolation();
+		return;
+	}
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (Now - DriveWindowStart >= 1.f)
+	{
+		DriveWindowStart = Now;
+		DriveInputsThisSecond = 0;
+	}
+	if (++DriveInputsThisSecond > 30)
+	{
+		CountVehicleViolation(); // 20 Hz is the design rate; 30/s is the ceiling, the rest is dropped
+		return;
+	}
+	Vehicle->ServerSetDriveInput(this, float(Throttle) / 127.f, float(Steer) / 127.f, bHandbrake);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Weapons and ground loot. Two slots, one current. Equipping copies the gun's row (CampusWeapons,
+// ids shared with the backend catalogue) into the combat fields this class already fired with, so
+// ServerFire, the falloff, the lag compensation and the HUD all keep working unchanged and simply
+// read whatever is in hand. Only the ids and the upgrade levels travel on the wire.
+
+FName ACampusCharacter::GetWeaponId(int32 Slot) const
+{
+	return WeaponSlots.IsValidIndex(Slot) ? WeaponSlots[Slot] : NAME_None;
+}
+
+const FCampusWeaponDef& ACampusCharacter::GetCurrentWeapon() const
+{
+	return CurrentDef;
+}
+
+int32 ACampusCharacter::GetSlotAmmo(int32 Slot) const
+{
+	if (!WeaponSlots.IsValidIndex(Slot))
+	{
+		return 0;
+	}
+	return Slot == int32(CurrentSlot) ? AmmoInMag : StashMag[Slot];
+}
+
+void ACampusCharacter::ApplyWeapon()
+{
+	const int32 Slot = FMath::Clamp(int32(CurrentSlot), 0, 1);
+	const uint8 Level = WeaponLevels.IsValidIndex(Slot) ? WeaponLevels[Slot] : 0;
+	// Base row off the floor; store bonuses only for a gun the loadout brought in (level 2 and up).
+	CurrentDef = CampusWeapons::WithMods(CampusWeapons::FindOrStarter(GetWeaponId(Slot)), CampusWeapons::ModsForLevel(GetWeaponId(Slot), Level));
+
+	Damage = CurrentDef.Damage;
+	FireInterval = 60.f / FMath::Max(CurrentDef.Rpm, 1.f);
+	MagazineSize = CurrentDef.Magazine;
+	RecoilUpDeg = CurrentDef.RecoilUpDeg;
+	RecoilSideDeg = CurrentDef.RecoilSideDeg;
+	FalloffStart = CurrentDef.FalloffStart;
+	FalloffEnd = CurrentDef.FalloffEnd;
+	FalloffMinShare = CurrentDef.FalloffMinShare;
+	Range = CurrentDef.Range;
+	HeadMultiplier = CurrentDef.HeadMultiplier;
+	LimbMultiplier = CurrentDef.LimbMultiplier;
+	ReloadSeconds = CurrentDef.ReloadSeconds;
+	SpreadDeg = CurrentDef.SpreadDeg;
+	AdsSpreadShare = CurrentDef.AdsSpreadShare;
+	WeaponMaxZoom = CurrentDef.MaxZoom;
+	ShotPitch = CurrentDef.SoundPitch;
+
+	// The per-gun low-poly mesh when it is cooked, else the shared rifle at this gun's scale and tint.
+	if (Gun)
+	{
+		UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *CampusWeapons::MeshPathFor(CurrentDef.Id), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (!Mesh)
+		{
+			Mesh = LoadObject<UStaticMesh>(nullptr, CampusWeapons::RifleMeshPath());
+		}
+		if (Mesh && Gun->GetStaticMesh() != Mesh)
+		{
+			Gun->SetStaticMesh(Mesh);
+		}
+		Gun->SetRelativeScale3D(FVector(CurrentDef.MeshScale));
+		// A no-op on materials without the parameter; the tint is how the guns read apart until then.
+		Gun->SetVectorParameterValueOnMaterials(TEXT("Tint"), FVector(CurrentDef.Tint.R, CurrentDef.Tint.G, CurrentDef.Tint.B));
+		Gun->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(CurrentDef.Tint.R, CurrentDef.Tint.G, CurrentDef.Tint.B));
+	}
+}
+
+void ACampusCharacter::OnRep_Weapons()
+{
+	ApplyWeapon();
+}
+
+FVector ACampusCharacter::SpreadDirection(const FVector& Aim) const
+{
+	// Hip fire opens the gun's cone; aiming down the sight closes it to AdsSpreadShare of it.
+	const float Cone = SpreadDeg * FMath::Lerp(1.f, AdsSpreadShare, FMath::Clamp(AimBlend, 0.f, 1.f));
+	if (Cone <= KINDA_SMALL_NUMBER)
+	{
+		return Aim;
+	}
+	return FMath::VRandCone(Aim, FMath::DegreesToRadians(Cone));
+}
+
+void ACampusCharacter::GiveWeapon(FName WeaponId, int32 Slot)
+{
+	if (!HasAuthority() || !CampusWeapons::Find(WeaponId))
+	{
+		return;
+	}
+	if (WeaponSlots.Num() < 2)
+	{
+		WeaponSlots.Init(NAME_None, 2);
+	}
+	if (WeaponLevels.Num() < 2)
+	{
+		WeaponLevels.Init(0, 2);
+	}
+	int32 Target = Slot;
+	if (Target < 0)
+	{
+		// An empty slot first, otherwise the one in hand: picking a third gun up replaces what you hold.
+		Target = !HasWeapon(0) ? 0 : (!HasWeapon(1) ? 1 : int32(CurrentSlot));
+	}
+	Target = FMath::Clamp(Target, 0, 1);
+	const FCampusWeaponDef& Def = CampusWeapons::FindOrStarter(WeaponId);
+	WeaponSlots[Target] = WeaponId;
+	WeaponLevels[Target] = 0; // loot and the starter are base guns; the loadout sets its own level
+	if (Target == int32(CurrentSlot))
+	{
+		ServerAmmoInMag = Def.Magazine;
+		ServerAmmoReserve = Def.Reserve;
+		AmmoInMag = Def.Magazine;
+		AmmoReserve = Def.Reserve;
+		ServerReloadEndTime = 0.f;
+		ReloadEndTime = 0.f;
+	}
+	else
+	{
+		ServerStashMag[Target] = Def.Magazine;
+		ServerStashReserve[Target] = Def.Reserve;
+		StashMag[Target] = Def.Magazine;
+		StashReserve[Target] = Def.Reserve;
+	}
+	ApplyWeapon();
+}
+
+void ACampusCharacter::SwitchWeapon(int32 Slot)
+{
+	const int32 Target = FMath::Clamp(Slot, 0, 1);
+	if (Target == int32(CurrentSlot) || !HasWeapon(Target) || bDead)
+	{
+		return;
+	}
+	// The owner swaps at once and each slot keeps its own magazine; the server does the same on its copy.
+	StashMag[CurrentSlot] = AmmoInMag;
+	StashReserve[CurrentSlot] = AmmoReserve;
+	AmmoInMag = StashMag[Target];
+	AmmoReserve = StashReserve[Target];
+	ReloadEndTime = 0.f;
+	CurrentSlot = uint8(Target);
+	ApplyWeapon();
+	if (UCampusAnimInstance* Anim = GetCampusAnim())
+	{
+		Anim->PlayEquip();
+	}
+	if (!HasAuthority())
+	{
+		ServerSwitchWeapon(uint8(Target));
+	}
+}
+
+void ACampusCharacter::ServerSwitchWeapon_Implementation(uint8 Slot)
+{
+	const int32 Target = FMath::Clamp(int32(Slot), 0, 1);
+	if (Target == int32(CurrentSlot) || !HasWeapon(Target) || bDead)
+	{
+		return;
+	}
+	ServerStashMag[CurrentSlot] = ServerAmmoInMag;
+	ServerStashReserve[CurrentSlot] = ServerAmmoReserve;
+	ServerAmmoInMag = ServerStashMag[Target];
+	ServerAmmoReserve = ServerStashReserve[Target];
+	ServerReloadEndTime = 0.f;
+	CurrentSlot = uint8(Target);
+	ApplyWeapon();
+	MulticastUpperBody(false);
+}
+
+void ACampusCharacter::ApplyBackendLoadout()
+{
+	// The phone reads its own profile (already cached by the lobby) and asks the host for that gun. The host
+	// validates the id against the gun table and clamps the level.
+	const UGameInstance* GameInstance = GetGameInstance();
+	const UCampusBackend* Backend = GameInstance ? GameInstance->GetSubsystem<UCampusBackend>() : nullptr;
+	if (!Backend || Backend->EquippedGun.IsEmpty())
+	{
+		return;
+	}
+	const FName Id(*Backend->EquippedGun);
+	if (!CampusWeapons::Find(Id))
+	{
+		return; // a store gun this build's table does not know yet: keep the starter
+	}
+	const FCampusGun* Owned = Backend->FindGun(Backend->EquippedGun);
+	const uint8 Level = uint8(FMath::Clamp(Owned ? Owned->Level : 0, 0, 10));
+	if (HasAuthority())
+	{
+		ServerSetLoadout_Implementation(Id, Level);
+	}
+	else
+	{
+		ServerSetLoadout(Id, Level);
+	}
+}
+
+void ACampusCharacter::ServerSetLoadout_Implementation(FName WeaponId, uint8 Level)
+{
+	if (!CampusWeapons::Find(WeaponId))
+	{
+		return;
+	}
+	GiveWeapon(WeaponId, 0);
+	if (WeaponLevels.IsValidIndex(0))
+	{
+		WeaponLevels[0] = uint8(FMath::Clamp(int32(Level), 0, 10));
+	}
+	ApplyWeapon();
+}
+
+ACampusPickup* ACampusCharacter::FindNearbyPickup() const
+{
+	if (bDead || Vehicle || !ACampusPickup::LootEnabled())
+	{
+		return nullptr;
+	}
+	ACampusPickup* Best = nullptr;
+	float BestDistance = UE_BIG_NUMBER;
+	for (const TWeakObjectPtr<ACampusPickup>& Candidate : ACampusPickup::All())
+	{
+		ACampusPickup* Pickup = Candidate.Get();
+		if (!Pickup || Pickup->GetWorld() != GetWorld())
+		{
+			continue;
+		}
+		const float Distance = FVector::Dist(Pickup->GetActorLocation(), GetActorLocation());
+		if (Distance < ACampusPickup::ReachDistance && Distance < BestDistance)
+		{
+			Best = Pickup;
+			BestDistance = Distance;
+		}
+	}
+	return Best;
+}
+
+void ACampusCharacter::PickupPressed()
+{
+	ACampusPickup* Pickup = FindNearbyPickup();
+	if (!Pickup)
+	{
+		return;
+	}
+	if (HasAuthority())
+	{
+		Pickup->ServerTake(this);
+	}
+	else
+	{
+		ServerTakePickup(Pickup);
+	}
+}
+
+void ACampusCharacter::ServerTakePickup_Implementation(ACampusPickup* Pickup)
+{
+	if (Pickup)
+	{
+		Pickup->ServerTake(this); // the pickup re-checks the distance itself
+	}
+}
+
+bool ACampusCharacter::ReceivePickup(ECampusPickupKind Kind, FName WeaponId, int32 Amount)
+{
+	if (!HasAuthority() || bDead)
+	{
+		return false;
+	}
+	switch (Kind)
+	{
+	case ECampusPickupKind::Weapon:
+		if (!CampusWeapons::Find(WeaponId))
+		{
+			return false;
+		}
+		GiveWeapon(WeaponId, -1);
+		return true;
+
+	case ECampusPickupKind::Ammo:
+	{
+		const int32 Cap = CurrentDef.Reserve * 2;
+		if (ServerAmmoReserve >= Cap)
+		{
+			return false;
+		}
+		ServerAmmoReserve = FMath::Min(Cap, ServerAmmoReserve + FMath::Max(1, Amount));
+		AmmoReserve = ServerAmmoReserve;
+		return true;
+	}
+
+	case ECampusPickupKind::Medkit:
+		if (Health >= MaxHealth || MedkitRemaining > 0.f)
+		{
+			return false;
+		}
+		MedkitRemaining = FMath::Min(float(FMath::Max(1, Amount)), MaxHealth - Health);
+		MedkitRate = MedkitRemaining / CampusLootRules::MedkitSeconds;
+		return true;
+
+	case ECampusPickupKind::Armor:
+		if (Armor >= CampusLootRules::MaxArmor)
+		{
+			return false;
+		}
+		Armor = FMath::Min(CampusLootRules::MaxArmor, Armor + float(FMath::Max(1, Amount)));
+		return true;
+
+	case ECampusPickupKind::Helmet:
+		if (bHelmet)
+		{
+			return false;
+		}
+		bHelmet = true;
+		return true;
+	}
+	return false;
+}
+
+void ACampusCharacter::TickMedkit(float DeltaSeconds)
+{
+	if (MedkitRemaining <= 0.f || bDead)
+	{
+		return;
+	}
+	const float Heal = FMath::Min(MedkitRemaining, MedkitRate * DeltaSeconds);
+	MedkitRemaining -= Heal;
+	Health = FMath::Min(MaxHealth, Health + Heal);
 }

@@ -11,6 +11,7 @@
 
 class ACameraActor;
 class ASkeletalMeshActor;
+class SCampusBRHud;
 class SCampusLobbyWidget;
 class SCampusMatchWidget;
 class SCampusTouchControls;
@@ -53,6 +54,13 @@ public:
 
 	/** Resolves a friend's room code through the API and travels to the host phone. */
 	void JoinRoomByCode(const FString& Code, TFunction<void(const FString& Error)> OnFailed);
+
+	/** BATTLE ROYALE: the queue has handed us a match (UCampusBRQueue). Either this phone is the
+	 *  listed host, in which case it OPENS the map as a listen server with
+	 *      ?listen?Mode=BR?Night=0|1?Code=...
+	 *  or it travels to the host over the same EOS / LAN path JoinRoomByCode uses - minus the room
+	 *  lookup, because the queue response already carries the connect object. */
+	void JoinBRMatch(const struct FCampusBRMatch& Match, TFunction<void(const FString& Error)> OnFailed);
 
 	/** Quick Match: joins the room server from CampusNetSettings (the PC on the Wi-Fi today, AWS later). */
 	void JoinRoom();
@@ -148,6 +156,8 @@ private:
 
 	TSharedPtr<SCampusMatchWidget> Widget;
 	TSharedPtr<SCampusTouchControls> TouchControls;
+	/** The BATTLE ROYALE overlay. Present in every match and collapsed in the ones that are not BR. */
+	TSharedPtr<SCampusBRHud> BRHud;
 	int32 AppliedMode = -1;
 
 	bool bResultRecorded = false;

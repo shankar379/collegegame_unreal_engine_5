@@ -136,6 +136,7 @@ void SCampusLobbyWidget::OpenMapSelect()
 	if (const UCampusSave* Save = Profile())
 	{
 		bPendingRandomMap = Save->bRandomMap;
+		bPendingBrNight = Save->bBrNight;
 	}
 	Show(EScreen::MapSelect);
 }
@@ -147,6 +148,7 @@ void SCampusLobbyWidget::ConfirmMapSelect()
 	if (UCampusSave* Save = Profile())
 	{
 		Save->bRandomMap = bPendingRandomMap;
+		Save->bBrNight = bPendingBrNight;
 	}
 	SaveMatchChoice();
 	HelpMode = INDEX_NONE;
@@ -286,6 +288,57 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeCard(int32 Index)
 		];
 	}
 
+	// BATTLE ROYALE carries its own DAY / NIGHT choice. It sits on the card (not in a submenu) because
+	// it is the only per-mode setting there is, and it is drawn ABOVE the card so the tap toggles the
+	// lighting instead of re-selecting the mode - the same trick the green "?" uses.
+	const bool bHasDayNight = !bLocked && FName(Entry.Id) == FName(TEXT("BattleRoyale"));
+	if (bHasDayNight)
+	{
+		const bool bNight = bPendingBrNight;
+		Text->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+		[
+			SNew(SBox).MinDesiredHeight(46.f).HAlign(HAlign_Left)
+			[
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Slanted(10.f))
+				.Fill(bNight ? FLinearColor(0.05f, 0.06f, 0.14f, 0.92f) : FLinearColor(0.12f, 0.09f, 0.02f, 0.92f))
+				.Border(Accent.CopyWithNewOpacity(0.75f))
+				.BorderWidth(1.f)
+				.ContentPadding(FMargin(14.f, 8.f, 16.f, 8.f))
+				.OnClicked(FOnClicked::CreateLambda([this]()
+				{
+					bPendingBrNight = !bPendingBrNight;
+					Refresh();
+					return FReply::Handled();
+				}))
+				[
+					SNew(SHorizontalBox)
+					// Never colour alone: the glyph changes with the words, so this reads at a glance
+					// and still reads for a player who cannot tell the two fills apart.
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 10.f, 0.f)
+					[
+						SNew(SCampusGlyph)
+						.Glyph(bNight ? CampusAngular::EGlyph::Gem : CampusAngular::EGlyph::Coin)
+						.Size(18.f)
+						.Color(bNight ? FLinearColor(0.72f, 0.78f, 1.f, 1.f) : Accent)
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(bNight ? LOCTEXT("BrNight", "NIGHT") : LOCTEXT("BrDay", "DAY"))
+						.Font(CampusAngular::Display(17))
+						.ColorAndOpacity(bNight ? FLinearColor(0.82f, 0.86f, 1.f, 1.f) : Accent)
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(10.f, 2.f, 0.f, 0.f)
+					[
+						SNew(STextBlock).Text(LOCTEXT("BrTapToSwap", "TAP TO SWAP"))
+						.Font(CampusAngular::Display(11)).ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.42f))
+					]
+				]
+			]
+		];
+	}
+
 	TSharedRef<SOverlay> Strip = SNew(SOverlay)
 		+ SOverlay::Slot()
 		[
@@ -389,21 +442,16 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 	{
 		ModeList->AddSlot().Padding(0.f, Index == 0 ? 0.f : 10.f, 0.f, 0.f)
 		[
-			// Fixed height: the list must not reflow when the selection moves between cards.
-			SNew(SBox).HeightOverride(216.f)[BuildModeCard(Index)]
+			// Fixed height: the list must not reflow when the selection moves between cards, and the
+			// tallest card (BATTLE ROYALE, with its DAY / NIGHT chip) sets it for all of them.
+			SNew(SBox).HeightOverride(240.f)[BuildModeCard(Index)]
 		];
 	}
 
-	// Only one map is built, so a random pick has nothing to choose between. Shown, disabled, and
-	// it says why - that is honest, and the plumbing (UCampusSave::bRandomMap) is already here.
-	const bool bRandomPossible = [] {
-		int32 Playable = 0;
-		for (int32 Index = 0; Index < CampusCatalog::NumMaps; ++Index)
-		{
-			Playable += CampusCatalog::Map(Index).bPlayable ? 1 : 0;
-		}
-		return Playable > 1;
-	}();
+	// There are two built maps now, but each MODE still runs on exactly one of them (FModeEntry::MapId),
+	// so a random pick has nothing to choose between for whatever mode is selected. Shown, disabled,
+	// and it says why - that is honest, and the plumbing (UCampusSave::bRandomMap) is already here.
+	const bool bRandomPossible = false;
 	const bool bRandomOn = bRandomPossible && bPendingRandomMap;
 
 	TSharedRef<SWidget> RandomToggle = SNew(SHorizontalBox)
@@ -457,7 +505,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 			bRandomPossible
 				? SNullWidget::NullWidget
 				: StaticCastSharedRef<SWidget>(SNew(STextBlock)
-					.Text(LOCTEXT("RandomSoon", "needs more than one map"))
+					.Text(LOCTEXT("RandomSoon", "each mode has its own map"))
 					.Font(CampusAngular::Body(14))
 					.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.38f)))
 		];

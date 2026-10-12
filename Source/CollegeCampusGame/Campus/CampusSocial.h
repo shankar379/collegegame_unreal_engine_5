@@ -318,6 +318,9 @@ struct FCampusRoster
 
 /** The push side of the channel. Declared outside the class so UHT never has to parse it. */
 DECLARE_MULTICAST_DELEGATE_OneParam(FCampusSocialString, const FString&);
+/** An event whose payload is a whole object (br.matched), handed over as-is so the subsystem that
+ *  owns that feature parses its own shape and this file does not grow a second match struct. */
+DECLARE_MULTICAST_DELEGATE_OneParam(FCampusSocialJson, const TSharedPtr<FJsonObject>&);
 
 UCLASS()
 class UCampusSocial : public UGameInstanceSubsystem
@@ -428,6 +431,8 @@ public:
 	FCampusSocialString OnRoomReady;
 	/** match.summary_ready: open the player-of-the-match screen for this room code. */
 	FCampusSocialString OnSummaryReady;
+	/** br.matched: the BATTLE ROYALE queue found a match. UCampusBRQueue reads the object. */
+	FCampusSocialJson OnBRMatched;
 	/** Something the player should simply be told: a milestone, a kick, a disband. */
 	FCampusSocialString OnNotice;
 

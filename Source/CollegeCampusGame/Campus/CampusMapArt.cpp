@@ -19,10 +19,12 @@
 
 namespace CampusCatalog
 {
-	// One real level (L_Match, the college campus). The other two are deliberately empty plates,
-	// not faked screenshots - see Scripts/render_map_art.py.
+	// Two real levels: L_Match (the college campus) and L_VarsityValley (the open BATTLE ROYALE map,
+	// /Game/Maps/L_VarsityValley - see CampusBR::LevelForMap). The rest are deliberately empty
+	// plates, not faked screenshots - see Scripts/render_map_art.py.
 	const FMapEntry Maps[] = {
 		{ TEXT("Classic"), TEXT("Campus"),      TEXT("The college  ·  quad, corridors and rooftops"), TEXT("map_campus"), true },
+		{ TEXT("VarsityValley"), TEXT("Varsity Valley"), TEXT("Open valley  ·  50 players, one circle"), TEXT("map_valley"), true },
 		{ TEXT("Hostel"),  TEXT("Hostel Block"), TEXT("Coming soon"),                                  TEXT("map_hostel"), false },
 		{ TEXT("Arena"),   TEXT("Sports Arena"), TEXT("Coming soon"),                                  TEXT("map_arena"),  false },
 	};
@@ -43,9 +45,11 @@ namespace CampusCatalog
 			TEXT("Not live yet. Team Clash after dark, on a shorter clock. The daily window below is a placeholder "
 			     "until the rotation is switched on."),
 			TEXT("Opens daily 18:00 - 22:00"), false },
-		{ TEXT("BattleRoyale"), TEXT("Battle Royale"), TEXT("Arena"), TEXT("mode_locked"),
-			TEXT("Not live yet. Up to 50 players on one open map, last squad standing. Needs a map we have not built."),
-			nullptr, false },
+		{ TEXT("BattleRoyale"), TEXT("Battle Royale"), TEXT("VarsityValley"), TEXT("mode_br"),
+			TEXT("Fifty players drop into Varsity Valley and the circle closes until one squad is left. No Room Card: "
+			     "tap START and the server puts you in the next match, solo / duo / squad as you picked. The DAY / "
+			     "NIGHT chip is your preference - the match you are given says which it is."),
+			nullptr, true },
 	};
 	const int32 NumModes = UE_ARRAY_COUNT(Modes);
 

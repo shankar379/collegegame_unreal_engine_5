@@ -6,6 +6,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Campus/CampusLoot.h"
+#include "Campus/CampusVehicle.h"
+#include "Campus/CampusWeapons.h"
 #include "GameFramework/Character.h"
 #include "CampusCharacter.generated.h"
 
@@ -24,10 +27,20 @@ class ACampusCharacter : public ACharacter
 {
 	GENERATED_BODY()
 
+	/** AI bot soldiers (Campus/CampusBot.h) drive this pawn through its OWN server-side functions -
+	 *  ServerFire, ServerReload, ServerSetArmed - so a bot's bullet takes the identical path to a
+	 *  phone's. Server-only, and the alternative was five new public methods on this header. */
+	friend class ACampusBotController;
+
 public:
 	ACampusCharacter(const FObjectInitializer& ObjectInitializer);
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	/** "This pawn is the one a person on THIS machine looks through." IsLocallyControlled() is not that
+	 *  test any more: on a listen-server host an AI-possessed bot is locally controlled too, and the
+	 *  camera rig, the own-shot FX skip and the FOV maths are all for the human's pawn alone. */
+	bool IsLocalPlayerPawn() const;
 
 	bool IsArmed() const { return bArmed; }
 	bool IsAiming() const { return bAiming; }
@@ -46,8 +59,8 @@ public:
 	bool IsReloading() const;
 	/** 0..1 while reloading, for the reload ring. */
 	float GetReloadProgress() const;
-	/** Current scope zoom (1x, 2x, 4x), used while aiming. */
-	float GetZoom() const { return ZoomLevels[ZoomIndex]; }
+	/** Current scope zoom (1x, 2x, 4x), used while aiming. Capped at 2x from a moving car. */
+	float GetZoom() const;
 	/** 0 hip .. 1 fully aimed (eases in over the ADS time). */
 	float GetAimBlend() const { return CameraAimBlend; }
 	/** Look speed multiplier while zoomed: 1 / (1 + (zoom - 1) * aim). */
@@ -78,8 +91,64 @@ public:
 	/** Jump button: climbs onto a ledge in front when there is one (mantle), otherwise jumps. */
 	void JumpPressed();
 
+	// ---- vehicles (Docs/VEHICLES_DESIGN.md Section 6.2). The character is never re-possessed: it is
+	// attached to a seat component and keeps every other system exactly as it was on foot.
+	ACampusVehicle* GetVehicle() const { return Vehicle; }
+	ECampusSeat GetSeat() const { return Seat; }
+	bool IsSeated() const { return Vehicle != nullptr; }
+	bool IsDriving() const { return Vehicle != nullptr && Seat == ECampusSeat::Driver; }
+	/** A free seat within ACampusVehicle::UseDistance, for the touch button. Mirrors CanUseZipline(). */
+	ACampusVehicle* FindNearbyVehicle(ECampusSeat& OutSeat) const;
+	/** ENTER / EXIT button: take the nearest free seat, or get out if already seated. */
+	void VehiclePressed();
+	/** SWITCH SEAT: move to the next free seat in the same car. */
+	void VehicleLongPressed();
+	/** While driving, the Fire slot becomes BRAKE (held). */
+	void SetBrakeHeld(bool bHeld) { bBrakeHeld = bHeld; }
+	bool IsBrakeHeld() const { return bBrakeHeld; }
+	/** Seat bookkeeping. Called by ACampusVehicle (authority) and by OnRep on every other machine. */
+	void SetSeated(ACampusVehicle* InVehicle, ECampusSeat InSeat);
+
+	/** 0.10 s while seated (the car's playout buffer draws this mesh), 0.08 s on foot.
+	 *  Read PER CANDIDATE inside RewoundVictim: get this wrong and drive-by hit registration breaks. */
+	double ViewDelaySeconds() const;
+
 	/** True while climbing; the anim instance plays the mantle clip at this time. Kind: 0 stand, 1 walk, 2 run. */
 	bool GetTraversal(int32& OutKind, float& OutTime) const;
+
+	// ---- weapons (CampusWeapons.h). Two slots, one of them current. Equipping COPIES the gun's row into the
+	// combat fields below (Damage, FireInterval, MagazineSize, recoil, falloff, ...), so the whole existing
+	// fire / reload / lag-comp path keeps working and simply shoots whatever is in hand.
+	FName GetWeaponId(int32 Slot) const;
+	FName GetCurrentWeaponId() const { return GetWeaponId(CurrentSlot); }
+	int32 GetCurrentSlot() const { return CurrentSlot; }
+	const FCampusWeaponDef& GetCurrentWeapon() const;
+	bool HasWeapon(int32 Slot) const { return !GetWeaponId(Slot).IsNone(); }
+	/** Rounds left in the slot we are not holding (the HUD's second plate). */
+	int32 GetSlotAmmo(int32 Slot) const;
+	/** Tap the other slot plate: the owner switches at once and the server confirms. */
+	void SwitchWeapon(int32 Slot);
+	void NextWeapon() { SwitchWeapon(CurrentSlot == 0 ? 1 : 0); }
+	/** Server: put this gun in a slot. Slot < 0 fills an empty slot, else replaces the one in hand. */
+	void GiveWeapon(FName WeaponId, int32 Slot = -1);
+	/** Owner: equip whatever gun the player's backend loadout says is equipped (/v1/me -> EquippedGun). */
+	void ApplyBackendLoadout();
+
+	// ---- battle-royale body gear
+	float GetArmor() const { return Armor; }
+	bool HasHelmet() const { return bHelmet; }
+	/** A helmet cuts headshot damage; the shooter's ServerFire reads this off the victim. */
+	float HeadDamageShare() const { return bHelmet ? 0.65f : 1.f; }
+	/** True while a medkit is still healing (the HUD shows the heal). */
+	bool IsHealing() const { return MedkitRemaining > 0.f; }
+
+	// ---- ground loot (CampusLoot.h)
+	/** The pickup the PICK UP button would take (nearest one in reach), or nullptr. Mirrors FindNearbyVehicle(). */
+	ACampusPickup* FindNearbyPickup() const;
+	/** PICK UP button: ask the server for the nearest pickup. */
+	void PickupPressed();
+	/** Server only: hand this over. False when it cannot be used (helmet already on, nothing to top up). */
+	bool ReceivePickup(ECampusPickupKind Kind, FName WeaponId, int32 Amount);
 
 	/** World time of the last hit the server confirmed for this shooter (HUD hit-marker). */
 	float GetLastHitConfirmTime() const { return LastHitConfirmTime; }
@@ -157,7 +226,60 @@ private:
 	void ServerFire(FVector_NetQuantize Start, FVector_NetQuantizeNormal Direction);
 
 	UFUNCTION(Server, Reliable)
+	void ServerRequestSeat(ACampusVehicle* Car, ECampusSeat WantedSeat);
+
+	UFUNCTION(Server, Reliable)
+	void ServerRequestExit();
+
+	UFUNCTION(Server, Reliable)
+	void ServerRequestSwitchSeat();
+
+	/** 20 Hz, only when a value moves by more than 8/255 or every 250 ms. int8 keeps it at 4 bytes. */
+	UFUNCTION(Server, Unreliable)
+	void ServerDriveInput(int8 Throttle, int8 Steer, bool bHandbrake);
+
+	UFUNCTION()
+	void OnRep_Vehicle();
+
+	/** Movement, collision, capsule and trigger state for sitting in / getting out of a car. */
+	void ApplySeatedState();
+	void SendDriveInput();
+	/** Keep the camera inside the seat's firing cone, so it never shows an angle you cannot shoot. */
+	void ClampLookToSeat();
+	/** Server: is this direction inside the seat's aperture? A driver never passes. */
+	bool SeatAllowsFire(const FVector& Direction) const;
+	/** The instant a shot should be judged at, for a target drawn ViewDelay behind its own updates. */
+	double ShotRewindTime(double ViewDelay) const;
+	/** Server: a refused vehicle RPC. Ten in ten seconds and the connection goes. */
+	void CountVehicleViolation();
+
+	UFUNCTION(Server, Reliable)
 	void ServerReload();
+
+	// ---- weapons / loot plumbing
+	UFUNCTION(Server, Reliable)
+	void ServerSwitchWeapon(uint8 Slot);
+
+	/** The owner's backend loadout: which gun and what upgrade level it is.
+	 *  INTERIM TRUST GAP: the level arrives from the owning client. The host only clamps it (and the mod cap
+	 *  bounds the damage); it cannot yet verify ownership. The real fix is the admit response / travel options
+	 *  carrying the API's own answer - see the report. campus.GunStatsEnabled 0 removes mods entirely. */
+	UFUNCTION(Server, Reliable)
+	void ServerSetLoadout(FName WeaponId, uint8 Level);
+
+	UFUNCTION(Server, Reliable)
+	void ServerTakePickup(ACampusPickup* Pickup);
+
+	UFUNCTION()
+	void OnRep_Weapons();
+
+	/** Copies the current slot's row into the combat fields, and rescales / tints the rifle mesh for it. */
+	void ApplyWeapon();
+	/** Server: the medkit's health, paid out over MedkitSeconds. */
+	void TickMedkit(float DeltaSeconds);
+	/** A shot leaves the muzzle inside the gun's cone (tight while aiming). Owner side; the server
+	 *  judges the direction it is sent, as it always has. */
+	FVector SpreadDirection(const FVector& Aim) const;
 
 	/** Remote players see the shot: anim, tracer, and the mark where it hit the world. */
 	UFUNCTION(NetMulticast, Unreliable)
@@ -492,6 +614,74 @@ private:
 		float HalfHeight = 0.f;
 		float Radius = 0.f;
 	};
+	// ---- vehicle state. Unconditional replication, NOT COND_SkipOwner: every client needs to know who
+	// is in which seat to draw them and to aim at them.
+	UPROPERTY(ReplicatedUsing=OnRep_Vehicle)
+	TObjectPtr<ACampusVehicle> Vehicle = nullptr;
+
+	/** Same notify as Vehicle: a SEAT SWITCH leaves Vehicle untouched, so without this no other machine
+	 *  (nor the owning client) would re-run ApplySeatedState and the driver's bUseControllerRotationYaw,
+	 *  seat chip and firing aperture would stay on the seat they left. */
+	UPROPERTY(ReplicatedUsing=OnRep_Vehicle)
+	ECampusSeat Seat = ECampusSeat::None;
+
+	/** Driver intent this frame, from the move stick / WASD: Y throttle, X steer. */
+	FVector2D DriveAxis = FVector2D::ZeroVector;
+	bool bBrakeHeld = false;
+	/** We crouched this character to seat it, so we know to stand it back up on the way out. */
+	bool bCrouchedForSeat = false;
+	float NextDriveSendTime = 0.f;
+	float LastDriveSendTime = -1.f;
+	int8 LastDriveThrottle = 0;
+	int8 LastDriveSteer = 0;
+	bool bLastDriveHandbrake = false;
+	float SeatRequestTime = -10.f;
+	// Server-side only: the drive-input rate window and the refused-RPC counter.
+	float DriveWindowStart = 0.f;
+	int32 DriveInputsThisSecond = 0;
+	float ViolationWindowStart = 0.f;
+	int32 VehicleViolations = 0;
+
+	// ---- weapon state. The ids replicate (everyone draws the right gun and the HUD reads both plates);
+	// the stats do not: every machine looks the id up in the same CampusWeapons table.
+	UPROPERTY(ReplicatedUsing=OnRep_Weapons)
+	TArray<FName> WeaponSlots;
+
+	UPROPERTY(ReplicatedUsing=OnRep_Weapons)
+	uint8 CurrentSlot = 0;
+
+	/** Store upgrade level per slot (0 / 1 = base). Ground loot is always 0: a floor gun has no bonuses. */
+	UPROPERTY(ReplicatedUsing=OnRep_Weapons)
+	TArray<uint8> WeaponLevels;
+
+	/** The current gun's row with its store mods already folded in (ApplyWeapon rebuilds it). */
+	FCampusWeaponDef CurrentDef;
+
+	/** Vest points left; absorbs ArmorAbsorbShare of every hit until they are gone. */
+	UPROPERTY(Replicated)
+	float Armor = 0.f;
+
+	UPROPERTY(Replicated)
+	bool bHelmet = false;
+
+	/** Ammo of the slot that is not in hand: [slot] mag / reserve. The owner predicts its own, the
+	 *  server keeps the real one, exactly like AmmoInMag vs ServerAmmoInMag. */
+	int32 StashMag[2] = { 0, 0 };
+	int32 StashReserve[2] = { 0, 0 };
+	int32 ServerStashMag[2] = { 0, 0 };
+	int32 ServerStashReserve[2] = { 0, 0 };
+
+	/** Server: health a medkit still owes, and the rate it pays at. */
+	float MedkitRemaining = 0.f;
+	float MedkitRate = 0.f;
+
+	// Copied from the current gun's row by ApplyWeapon (the rest lands in the Combat fields above).
+	float ReloadSeconds = 2.1f;
+	float SpreadDeg = 2.5f;
+	float AdsSpreadShare = 0.25f;
+	float WeaponMaxZoom = 4.f;
+	float ShotPitch = 1.f;
+
 	TArray<FHitboxFrame> HitboxHistory;
 	void RecordHitbox();
 	/** The capsule as it was at Time (interpolated between recorded frames). */

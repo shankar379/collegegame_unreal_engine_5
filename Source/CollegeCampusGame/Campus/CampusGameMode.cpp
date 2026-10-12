@@ -1,8 +1,10 @@
 #include "Campus/CampusGameMode.h"
 
 #include "Campus/CampusBackend.h"
+#include "Campus/CampusBot.h"
 #include "Campus/CampusCharacter.h"
 #include "Campus/CampusDoor.h"
+#include "Campus/CampusVehicle.h"
 #include "EngineUtils.h"
 #include "Campus/CampusMatchState.h"
 #include "Campus/CampusPlayerControllers.h"
@@ -270,6 +272,9 @@ void ACampusMatchGameMode::RequestStart(APlayerController* Requester)
 	State->BlueScore = 0;
 	State->Winner = -1;
 	StartRound(1, false);
+	// Optional, off by default (campus.FillBotsTDM 1): empty slots become AI bots. They spawn themselves
+	// into this round like players - ACampusBotController::TickRespawn is the bots' half of StartRound.
+	ACampusBotController::FillTeamDeathmatch(GetWorld());
 	GetWorldTimerManager().SetTimer(ClockTimer, this, &ACampusMatchGameMode::CheckClock, 0.5f, true);
 }
 
@@ -381,10 +386,14 @@ void ACampusMatchGameMode::EndRound()
 
 void ACampusMatchGameMode::StartRound(int32 Round, bool bDecider)
 {
-	// every round starts with all doors whole
+	// every round starts with all doors whole and every car back at its spot
 	for (TActorIterator<ACampusDoor> It(GetWorld()); It; ++It)
 	{
 		It->Repair();
+	}
+	for (TActorIterator<ACampusVehicle> It(GetWorld()); It; ++It)
+	{
+		It->ResetForRound();
 	}
 	ACampusGameState* State = GetCampusState();
 	if (!State)

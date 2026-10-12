@@ -6,6 +6,7 @@
 #include "Campus/CampusUI.h"
 
 #include "Campus/CampusAngular.h"
+#include "Campus/CampusBR.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusGameInstance.h"
 #include "Campus/CampusMapArt.h"
@@ -202,6 +203,8 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 				Refresh();
 			});
 		});
+		// br.matched arrives on the same socket, but the BR queue owns the parsing, so the lobby
+		// listens to the queue and not to the channel - see Campus/CampusBR.h.
 		SocialSummaryHandle = Live->OnSummaryReady.AddLambda([this](const FString& Code)
 		{
 			// Mid-match this only records the code; the lobby's Tick opens the screen on arrival.
@@ -209,6 +212,25 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 			{
 				OpenSummary(Code);
 			}
+		});
+	}
+
+	// The BATTLE ROYALE queue. OnChanged is already coalesced to once a second by the subsystem, and
+	// it only repaints the overlay - never the lobby behind it.
+	if (UCampusBRQueue* Queue = BRQueue())
+	{
+		BRChangedHandle = Queue->OnChanged.AddLambda([this]()
+		{
+			if (Current == EScreen::Matchmaking)
+			{
+				Refresh();
+			}
+		});
+		BRMatchedHandle = Queue->OnMatched.AddLambda([this](const FCampusBRMatch& Match)
+		{
+			// Fires exactly once per match (socket and fallback poll are deduped on the code), so this
+			// cannot travel twice and tear the level down mid-load.
+			EnterBRMatch(Match);
 		});
 	}
 
@@ -361,6 +383,14 @@ SCampusLobbyWidget::~SCampusLobbyWidget()
 		Live->OnNotice.Remove(SocialNoticeHandle);
 		Live->OnRoomReady.Remove(SocialRoomHandle);
 		Live->OnSummaryReady.Remove(SocialSummaryHandle);
+	}
+	// Same reason: the queue survives level travel and this widget does not. The QUEUE ITSELF is left
+	// running on purpose - a player who taps away mid-queue is still queued, and the overlay picks the
+	// state back up when the lobby rebuilds.
+	if (UCampusBRQueue* Queue = BRQueue())
+	{
+		Queue->OnChanged.Remove(BRChangedHandle);
+		Queue->OnMatched.Remove(BRMatchedHandle);
 	}
 }
 
@@ -558,7 +588,7 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	case EScreen::Register: Body = BuildRegister(); break;
 	case EScreen::Nickname: Body = BuildNickname(); break;
 	case EScreen::Lobby: Body = BuildLobby(); break;
-	case EScreen::Store: Body = BuildStore(); break;
+	case EScreen::Store: Body = BuildStoreV2(); break;   // CampusStoreUI.cpp
 	case EScreen::Rooms: Body = BuildRooms(); break;
 	case EScreen::Account: Body = BuildAccount(); break;
 	case EScreen::Event: Body = BuildEvent(); break;
@@ -569,6 +599,7 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	case EScreen::AdultConfirm: Body = BuildAdultConfirm(); break;
 	case EScreen::CollegePick: Body = BuildCollegePick(); break;
 	case EScreen::MapSelect: Body = BuildMapSelect(); break;
+	case EScreen::Matchmaking: Body = BuildMatchmaking(); break;
 	case EScreen::Friends: Body = BuildFriends(); break;
 	case EScreen::FriendPick: Body = BuildFriendPick(); break;
 	case EScreen::InviteTray: Body = BuildInviteTray(); break;
@@ -1338,7 +1369,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMenuColumn()
 		int32 Badge = 0;
 		switch (Def.Tab)
 		{
-		case ELobbyTab::Store:     Action = OpenStore(EStoreTab::Offers); break;
+		case ELobbyTab::Store:     Action = OpenStore(EStoreTab::Packs); break;   // STORE lands on DIAMONDS; OFFERS can be empty
 		case ELobbyTab::Weapons:   Action = OpenStore(EStoreTab::Guns); break;
 		case ELobbyTab::Character: Action = OpenScreen(EScreen::Account); break;
 		case ELobbyTab::Vault:     Action = OpenScreen(EScreen::Daily); bHighlighted = bDailyReady; break;
@@ -1724,8 +1755,19 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStartButton()
 				]
 			];
 	}
+	// BATTLE ROYALE has no Room Card, no code and no sheet to pick settings in: START *is* the queue.
+	// Every other mode still opens the Custom Room / Quick Match sheet.
 	return CampusStyle::StartButton(LOCTEXT("Start", "START"),
-		FOnClicked::CreateLambda([this]() { Show(EScreen::Rooms); return FReply::Handled(); }), FVector2D(300.f, 96.f));
+		FOnClicked::CreateLambda([this]()
+		{
+			if (IsBattleRoyaleSelected())
+			{
+				StartBattleRoyale();
+				return FReply::Handled();
+			}
+			Show(EScreen::Rooms);
+			return FReply::Handled();
+		}), FVector2D(300.f, 96.f));
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()

@@ -311,7 +311,7 @@ void UCampusPlayBilling::SendToBackend(const FString& ProductId, const FString& 
 
 	TWeakObjectPtr<UCampusPlayBilling> WeakThis(this);
 	Api->VerifyGooglePurchase(ProductId, PurchaseToken,
-		[WeakThis, ProductId, PurchaseToken, ValidationInfo, Done](bool bOk, const FString& Error, TSharedPtr<FJsonObject> /*Json*/)
+		[WeakThis, ProductId, PurchaseToken, ValidationInfo, Done](bool bOk, const FString& Error, TSharedPtr<FJsonObject> Json)
 		{
 			UCampusPlayBilling* const Self = WeakThis.Get();
 			if (!bOk)
@@ -322,6 +322,18 @@ void UCampusPlayBilling::SendToBackend(const FString& ProductId, const FString& 
 				Done(ECampusPurchaseResult::Failed, Error.IsEmpty()
 					? TEXT("Payment received. We could not reach the server to credit it - it will arrive shortly.")
 					: Error);
+				return;
+			}
+			// 202 {"status":"pending"}: Google has not settled it yet (UPI collect). Keep the token pending and do NOT
+			// finalize - a later restore re-sends it, and RTDN completes it server-side meanwhile.
+			FString VerifyStatus;
+			if (Json.IsValid() && Json->TryGetStringField(TEXT("status"), VerifyStatus) && VerifyStatus == TEXT("pending"))
+			{
+				if (Self)
+				{
+					Self->PendingTokens.Add(PurchaseToken);
+				}
+				Done(ECampusPurchaseResult::Pending, TEXT("Google is still processing this payment."));
 				return;
 			}
 			if (Self)

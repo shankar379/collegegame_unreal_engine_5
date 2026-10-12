@@ -241,6 +241,8 @@ private:
 	// (first time) Nickname -> Lobby. The lobby opens the Store, Rooms (quick / create / join by code), Account.
 	enum class EScreen : uint8 { Splash, Agreement, LoginChoice, EmailLogin, Register, Nickname, Lobby, Store, Rooms,
 		Account, Event, Daily, Settings, Missions, Streak, AdultConfirm, CollegePick, MapSelect,
+		/** BATTLE ROYALE queue overlay (Campus/CampusBRUI.cpp): MATCHING..., the timer, big CANCEL. */
+		Matchmaking,
 		// migration 012 / 013: the friends list, the invite picker opened from a "+ INVITE" plate, the
 		// stacked invite tray, the full-screen profile, and the player-of-the-match screen.
 		Friends, FriendPick, InviteTray, Profile, Summary };
@@ -311,6 +313,20 @@ private:
 	void OpenMapSelect();
 	/** CONFIRM: writes the pending choice to the profile and goes back to the lobby. */
 	void ConfirmMapSelect();
+
+	// ---- BATTLE ROYALE matchmaking (Campus/CampusBRUI.cpp). The queue itself lives in UCampusBRQueue.
+	/** True when the confirmed mode is Battle Royale, which is what makes START queue instead of
+	 *  opening the Custom Room sheet. */
+	bool IsBattleRoyaleSelected() const;
+	/** START with BR selected: POST /v1/br/queue and show the overlay. */
+	void StartBattleRoyale();
+	/** The overlay's one big button: DELETE /v1/br/queue and back to the lobby. */
+	void CancelMatchmaking();
+	/** MATCHING... / timer / players found / big CANCEL, Free Fire's queue screen. */
+	TSharedRef<SWidget> BuildMatchmaking();
+	/** br.matched (or the fallback poll): host the map, or travel to the host. */
+	void EnterBRMatch(const struct FCampusBRMatch& Match);
+	class UCampusBRQueue* BRQueue() const;
 	TSharedRef<SWidget> BuildStore();
 	TSharedRef<SWidget> BuildGunCard(int32 Index);
 	TSharedRef<SWidget> BuildOfferCard(const FCampusOffer& Offer);
@@ -318,6 +334,26 @@ private:
 	TSharedRef<SWidget> MoneyButton(const FString& ItemId, const FString& ItemName, float PriceInr, FVector2D Size);
 	/** Play Billing for this game instance, or null off Android / when IAP is not packaged. */
 	UCampusPlayBilling* Billing() const;
+
+	// ---- the store screen (CampusStoreUI.cpp). Left tab rail, wallet strip, wrapping card grid.
+	//      Diamonds are bought from Google Play; guns are bought with Diamonds from our backend.
+	TSharedRef<SWidget> BuildStoreV2();
+	TSharedRef<SWidget> BuildStoreWallet();
+	TSharedRef<SWidget> BuildStoreSideTabs();
+	TSharedRef<SWidget> BuildStoreGunGrid();
+	TSharedRef<SWidget> BuildStoreGunTile(int32 Index);
+	TSharedRef<SWidget> BuildStoreDiamondGrid();
+	TSharedRef<SWidget> BuildStoreOfferGrid();
+	/** A money card (diamond pack or bundle). Amount 0 = not a plain diamond pack, so show its name. */
+	TSharedRef<SWidget> BuildStorePackTile(const FCampusOffer& Pack, int32 Amount, bool bFeatured);
+	TSharedRef<SWidget> BuildStoreEmpty(const FText& Title, const FText& Hint);
+	/** Asks Play once per store visit for its localized prices, and re-offers anything it still holds. */
+	void StoreQueryPlayPrices();
+	void StoreBuyProduct(const FString& ProductId, const FString& ItemName);
+	void StoreBuyGun(int32 Index);
+	void StoreEquipGun(int32 Index);
+	UCampusPlayBilling* StoreBilling() const;
+
 	TSharedRef<SWidget> BuildRooms();
 	TSharedRef<SWidget> BuildAccount();
 	TSharedRef<SWidget> BuildDaily();
@@ -411,6 +447,8 @@ private:
 	int32 PendingMap = 0;
 	int32 PendingMode = 0;
 	bool bPendingRandomMap = false;
+	/** The DAY / NIGHT chip on the BATTLE ROYALE card, before CONFIRM writes it to the profile. */
+	bool bPendingBrNight = false;
 	/** Mode whose "?" rules sheet is open, or INDEX_NONE. */
 	int32 HelpMode = INDEX_NONE;
 	float SplashTime = 0.f;
@@ -468,6 +506,10 @@ private:
 	FDelegateHandle SocialNoticeHandle;
 	FDelegateHandle SocialRoomHandle;
 	FDelegateHandle SocialSummaryHandle;
+	/** UCampusBRQueue outlives this widget (it survives level travel), so both come off in the
+	 *  destructor exactly like the social handles above. */
+	FDelegateHandle BRChangedHandle;
+	FDelegateHandle BRMatchedHandle;
 
 	// form fields
 	FString EmailText;

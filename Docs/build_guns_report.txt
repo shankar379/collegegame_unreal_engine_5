@@ -1,0 +1,2 @@
+preview C:\UE\Projects\CampusCombat\CollegeCampusGame\Docs\guns_preview.png (614 x 2642)  red ring = Muzzle, blue ring = Grip
+DONE

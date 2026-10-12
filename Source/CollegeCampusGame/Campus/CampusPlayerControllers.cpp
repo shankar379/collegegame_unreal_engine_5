@@ -4,6 +4,8 @@
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Campus/CampusAnimInstance.h"
+#include "Campus/CampusBR.h"
+#include "Campus/CampusBRHud.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusEOS.h"
 #include "Campus/CampusGameInstance.h"
@@ -527,6 +529,88 @@ void ACampusLobbyPlayerController::JoinRoomByCode(const FString& Code, TFunction
 	});
 }
 
+void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFunction<void(const FString& Error)> OnFailed)
+{
+	if (!Match.IsValid())
+	{
+		OnFailed(TEXT("That match is no longer available."));
+		return;
+	}
+	const UCampusBRQueue* Queue = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBRQueue>() : nullptr;
+	const bool bHost = Queue && Queue->AmHost();
+	const FString Level = CampusBR::LevelForMap(Match.Map);
+	const FString Code = Match.Code;
+	// The SERVER's day_night is what the match runs on, not the chip in the lobby: two phones in the
+	// same match must light the same map.
+	const int32 Night = Match.bNight ? 1 : 0;
+	TWeakObjectPtr<ACampusLobbyPlayerController> WeakThis(this);
+
+	if (bHost)
+	{
+		// Mirrors HostRoom: with no puid we tell the net driver to use plain IP sockets, so a LAN
+		// match is hosted on 7777 even when EOS is configured but this phone could not log in.
+		auto OpenAsListen = [WeakThis, Level, Code, Night](const FString& EosPuid)
+		{
+			ACampusLobbyPlayerController* Self = WeakThis.Get();
+			if (!Self)
+			{
+				return;
+			}
+			const TCHAR* Transport = EosPuid.IsEmpty() ? TEXT("?bUseIPSockets") : TEXT("");
+			const FString Options = FString::Printf(TEXT("listen%s?Mode=BR?Night=%d?Code=%s"), Transport, Night, *Code);
+			UGameplayStatics::OpenLevel(Self, FName(*Level), true, Options);
+		};
+		UCampusEOS* Eos = GetEos();
+		if (!Eos || !Eos->IsConfigured() || !Match.IsEos())
+		{
+			OpenAsListen(FString());
+			return;
+		}
+		// The listen server needs the same login the joiners will dial before it can bind its P2P
+		// socket. A failure is not fatal: we host on the LAN instead, exactly as a Custom Room does.
+		TWeakObjectPtr<UCampusEOS> WeakEos(Eos);
+		Eos->EnsureLogin([OpenAsListen, WeakEos](bool bOk)
+		{
+			OpenAsListen(bOk && WeakEos.IsValid() ? WeakEos->GetLocalPuid() : FString());
+		});
+		return;
+	}
+
+	// A joiner. The code rides along as a URL option so the host's game mode can check it with the
+	// API, the same way a Custom Room's ticket does.
+	if (!Match.IsEos())
+	{
+		if (!Match.HasLan())
+		{
+			OnFailed(TEXT("That match has no address this build can reach."));
+			return;
+		}
+		ClientTravel(FString::Printf(TEXT("%s:%d?Code=%s"), *Match.Address, Match.Port, *Code), TRAVEL_Absolute);
+		return;
+	}
+	UCampusEOS* Eos = GetEos();
+	if (!Eos || !Eos->IsConfigured())
+	{
+		OnFailed(TEXT("That match is an internet match; this build can only join matches on your Wi-Fi."));
+		return;
+	}
+	const FString HostPuid = Match.HostPuid;
+	Eos->EnsureLogin([WeakThis, HostPuid, Code, OnFailed](bool bLoggedIn)
+	{
+		ACampusLobbyPlayerController* Me = WeakThis.Get();
+		if (!Me)
+		{
+			return;
+		}
+		if (!bLoggedIn)
+		{
+			OnFailed(TEXT("Could not reach the match network. Check your connection and try again."));
+			return;
+		}
+		Me->ClientTravel(FString::Printf(TEXT("%s?Code=%s"), *UCampusEOS::ConnectUrlFor(HostPuid), *Code), TRAVEL_Absolute);
+	});
+}
+
 void ACampusLobbyPlayerController::JoinRoom()
 {
 	const FString Address = GetDefault<UCampusNetSettings>()->GameAddress();
@@ -573,6 +657,11 @@ void ACampusMatchPlayerController::BeginPlay()
 	{
 		TouchControls = SNew(SCampusTouchControls).Controller(this).ShowButtons(IsTouchDevice());
 		GEngine->GameViewport->AddViewportWidgetContent(TouchControls.ToSharedRef(), 5);
+		// The BATTLE ROYALE pieces sit between the controls and the match screens: above the stick and
+		// the fire button, below the waiting room and the gear panel. In a Team Clash match it finds no
+		// BR state and collapses to nothing, so it costs one collapsed widget and no taps.
+		BRHud = SNew(SCampusBRHud).Controller(this);
+		GEngine->GameViewport->AddViewportWidgetContent(BRHud.ToSharedRef(), 8);
 		Widget = SNew(SCampusMatchWidget).Controller(this);
 		GEngine->GameViewport->AddViewportWidgetContent(Widget.ToSharedRef(), 10);
 	}
@@ -590,9 +679,14 @@ void ACampusMatchPlayerController::EndPlay(const EEndPlayReason::Type EndPlayRea
 		{
 			GEngine->GameViewport->RemoveViewportWidgetContent(TouchControls.ToSharedRef());
 		}
+		if (BRHud.IsValid())
+		{
+			GEngine->GameViewport->RemoveViewportWidgetContent(BRHud.ToSharedRef());
+		}
 	}
 	Widget.Reset();
 	TouchControls.Reset();
+	BRHud.Reset();
 	Super::EndPlay(EndPlayReason);
 }
 

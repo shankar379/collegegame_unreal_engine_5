@@ -1,9 +1,13 @@
 #include "Campus/CampusTouchControls.h"
 
 #include "Campus/CampusAngular.h"
+#include "Campus/CampusBRGameMode.h"
+#include "Campus/CampusBRPlane.h"
+#include "Campus/CampusBRZone.h"
 #include "Campus/CampusCharacter.h"
 #include "Campus/CampusMatchState.h"
 #include "Campus/CampusSave.h"
+#include "Campus/CampusVehicle.h"
 #include "Engine/World.h"
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
@@ -220,6 +224,11 @@ SCampusTouchControls::FLayout SCampusTouchControls::MakeLayout(const FVector2D& 
 	L.Jump = FromRight(L.W * 0.056f, 0.55f, 7.5f * U);
 	L.CrouchR = 3.75f * U;
 	L.Crouch = FromRight(L.W * 0.056f, 0.78f, 7.5f * U);
+	// ENTER / EXIT sits immediately above Jump, same radius as Crouch; SWITCH SEAT to its left, smaller.
+	L.VehicleR = 3.75f * U;
+	L.Vehicle = FromRight(L.W * 0.056f, 0.32f, 7.5f * U);
+	L.SeatSwitchR = 3.f * U;
+	L.SeatSwitch = L.Vehicle - FVector2D(8.5f * U, 0.f);
 	L.ProneR = 3.5f * U;
 	L.Prone = FromRight(L.W * 0.275f, 0.84f, 7.f * U);
 	// Eye: left 21u, top 12.6u, 4.2u across (min 34 CSS px).
@@ -247,9 +256,13 @@ SCampusTouchControls::FLayout SCampusTouchControls::MakeLayout(const FVector2D& 
 	// the team roster now lives in the scoreboard (tap the timer), so the minimap takes its corner
 	L.MapMin = L.TeamMin;
 
-	// Weapons panel, top right, pushed below the gear row.
+	// Weapons panel, top right, pushed below the gear row. It holds both slots: the top half is the gun
+	// in hand, the bottom half the one on your back. Tapping a half takes that gun.
 	L.WeaponSize = FVector2D(L.W * 0.17f, L.H * 0.13f);
 	L.WeaponMin = FVector2D(L.W - L.WeaponSize.X - L.W * 0.012f, L.Gear.Y + L.GearR + 1.4f * U);
+	// PICK UP sits above ENTER, in the same column: both are "act on the thing next to you" buttons.
+	L.PickupR = 3.4f * U;
+	L.Pickup = L.Vehicle - FVector2D(0.f, L.VehicleR + L.PickupR + 1.6f * U);
 	return L;
 }
 
@@ -257,16 +270,23 @@ SCampusTouchControls::EControl SCampusTouchControls::HitTest(const FLayout& L, c
 {
 	const ACampusCharacter* Holder = GetCharacter();
 	const bool bArmed = Holder && Holder->IsArmed();
+	const bool bSeated = Holder && Holder->IsSeated();
+	const bool bDriving = Holder && Holder->IsDriving();
+	ECampusSeat NearSeat = ECampusSeat::None;
+	const bool bCarNear = Holder && Holder->FindNearbyVehicle(NearSeat) != nullptr;
 	auto In = [&P](const FVector2D& C, float R) { return FVector2D::DistSquared(P, C) <= R * R; };
 	// Slightly generous hit areas for thumbs.
 	const float Pad = 1.15f;
 	// The gear is checked first: it must stay reachable even if a control creeps near the corner.
 	if (In(L.Gear, L.GearR * 1.25f)) return EControl::Settings;
-	if (In(L.Fire, L.FireR * Pad)) return EControl::Fire;
-	if (bLeftFireButton && In(L.FireLeft, L.FireLeftR * 1.6f)) return EControl::FireLeft;
-	if (In(L.Reload, L.ReloadR * Pad)) return EControl::Reload;
-	if (bArmed && In(L.Scope, L.ScopeR * Pad)) return EControl::Scope;
-	if (bAiming && FMath::Abs(P.X - L.Zoom.X) <= L.ZoomSize.X * 0.6f && FMath::Abs(P.Y - L.Zoom.Y) <= L.ZoomSize.Y * 0.6f) return EControl::Zoom;
+	// Only hit-testable when drawn: ENTER near a car, EXIT / SWITCH SEAT while seated.
+	if ((bCarNear || bSeated) && In(L.Vehicle, L.VehicleR * Pad)) return EControl::Vehicle;
+	if (bSeated && In(L.SeatSwitch, L.SeatSwitchR * Pad)) return EControl::SeatSwitch;
+	if (In(L.Fire, L.FireR * Pad)) return EControl::Fire; // BRAKE while driving (see PressControl)
+	if (!bDriving && bLeftFireButton && In(L.FireLeft, L.FireLeftR * 1.6f)) return EControl::FireLeft;
+	if (!bDriving && In(L.Reload, L.ReloadR * Pad)) return EControl::Reload;
+	if (!bDriving && bArmed && In(L.Scope, L.ScopeR * Pad)) return EControl::Scope;
+	if (!bDriving && bAiming && FMath::Abs(P.X - L.Zoom.X) <= L.ZoomSize.X * 0.6f && FMath::Abs(P.Y - L.Zoom.Y) <= L.ZoomSize.Y * 0.6f) return EControl::Zoom;
 	if (In(L.Jump, L.JumpR * Pad)) return EControl::Jump;
 	if (In(L.Crouch, L.CrouchR * Pad)) return EControl::Crouch;
 	if (In(L.Prone, L.ProneR * Pad)) return EControl::Prone;
@@ -274,7 +294,13 @@ SCampusTouchControls::EControl SCampusTouchControls::HitTest(const FLayout& L, c
 	if (In(L.Eye, L.EyeR * 1.4f)) return EControl::Eye;
 	if (In(L.Mic, L.VoiceR * 1.4f)) return EControl::Mic;
 	if (In(L.Speaker, L.VoiceR * 1.4f)) return EControl::Speaker;
-	if (P.X >= L.WeaponMin.X && P.Y >= L.WeaponMin.Y && P.X <= L.WeaponMin.X + L.WeaponSize.X && P.Y <= L.WeaponMin.Y + L.WeaponSize.Y) return EControl::Weapon;
+	// PICK UP only exists while a box is in reach, like ENTER with a car.
+	if (Holder && !bSeated && Holder->FindNearbyPickup() && In(L.Pickup, L.PickupR * Pad)) return EControl::Pickup;
+	if (P.X >= L.WeaponMin.X && P.Y >= L.WeaponMin.Y && P.X <= L.WeaponMin.X + L.WeaponSize.X && P.Y <= L.WeaponMin.Y + L.WeaponSize.Y)
+	{
+		// Top half: the gun in hand. Bottom half: the second slot.
+		return P.Y <= L.WeaponMin.Y + L.WeaponSize.Y * 0.58f ? EControl::Weapon : EControl::Weapon2;
+	}
 	return EControl::None;
 }
 
@@ -313,7 +339,14 @@ void SCampusTouchControls::PressControl(EControl Control)
 	{
 	case EControl::Fire:
 	case EControl::FireLeft:
-		Character->SetFireHeld(true);
+		// The driver's Fire slot is the brake: a driver never fires.
+		Character->IsDriving() ? Character->SetBrakeHeld(true) : Character->SetFireHeld(true);
+		break;
+	case EControl::Vehicle:
+		Character->VehiclePressed();
+		break;
+	case EControl::SeatSwitch:
+		Character->VehicleLongPressed();
 		break;
 	case EControl::Scope:
 		Character->SetAiming(!Character->IsAiming());
@@ -331,11 +364,32 @@ void SCampusTouchControls::PressControl(EControl Control)
 		Character->ToggleCrouch();
 		break;
 	case EControl::Sprint:
+		if (Character->IsDriving())
+		{
+			Character->SetSprintHeld(true); // at the wheel the same button is a held handbrake
+			break;
+		}
 		bAutoRun = !bAutoRun;
 		Character->SetSprintHeld(bAutoRun);
 		break;
 	case EControl::Weapon:
-		Character->ToggleArmed();
+	case EControl::Weapon2:
+	{
+		// Tapping the plate you already hold arms / unarms you (the old behaviour); tapping the other
+		// plate switches to that gun.
+		const int32 Slot = Control == EControl::Weapon ? 0 : 1;
+		if (Slot == Character->GetCurrentSlot() || !Character->HasWeapon(Slot))
+		{
+			Character->ToggleArmed();
+		}
+		else
+		{
+			Character->SwitchWeapon(Slot);
+		}
+		break;
+	}
+	case EControl::Pickup:
+		Character->PickupPressed();
 		break;
 	case EControl::Mic:
 		if (ACampusMatchPlayerController* Voice = Cast<ACampusMatchPlayerController>(Controller.Get()))
@@ -368,17 +422,28 @@ void SCampusTouchControls::ReleaseControl(EControl Control)
 	}
 	if (Control == EControl::Fire || Control == EControl::FireLeft)
 	{
-		// Keep firing while any finger still holds a fire button.
+		// Keep firing (or braking) while any finger still holds a fire button.
 		bool bStillHeld = false;
 		for (const TPair<int32, FFinger>& Pair : Fingers)
 		{
 			bStillHeld |= Pair.Value.Role == ERole::FireDrag;
 		}
-		Character->SetFireHeld(bStillHeld);
+		if (Character->IsDriving())
+		{
+			Character->SetBrakeHeld(bStillHeld);
+		}
+		else
+		{
+			Character->SetFireHeld(bStillHeld);
+		}
 	}
 	else if (Control == EControl::Jump)
 	{
 		Character->StopJumping();
+	}
+	else if (Control == EControl::Sprint && Character->IsDriving())
+	{
+		Character->SetSprintHeld(false); // handbrake released
 	}
 }
 
@@ -392,6 +457,7 @@ void SCampusTouchControls::ReleaseAll()
 	{
 		Character->SetTouchMove(FVector2D::ZeroVector);
 		Character->SetFireHeld(false);
+		Character->SetBrakeHeld(false);
 		Character->SetFreeLookHeld(false);
 		Character->SetSprintHeld(false);
 		Character->StopJumping();
@@ -503,7 +569,8 @@ FReply SCampusTouchControls::OnTouchMoved(const FGeometry& MyGeometry, const FPo
 		JoyKnob = JoyCenter + Offset;
 		MoveAxis = FVector2D(Offset.X / MaxTravel, -Offset.Y / MaxTravel);
 		// Push to the top edge to sprint, and it locks on (keeps running after release, crouched too).
-		if (ACampusCharacter* Character = GetCharacter())
+		// Not while driving: there the stick is the throttle.
+		if (ACampusCharacter* Character = GetCharacter(); Character && !Character->IsDriving())
 		{
 			bAtRunRim = MoveAxis.Y > 0.95f && Length > MaxTravel * 0.98f;
 			// Steering away from forward while locked turns the lock off.
@@ -614,12 +681,30 @@ void SCampusTouchControls::Tick(const FGeometry& AllottedGeometry, const double 
 	{
 		LagHealth = FMath::FInterpConstantTo(LagHealth, Health, InDeltaTime, 120.f);
 	}
+	// Car HP trails the same way, at the car's own scale (600, not 100).
+	if (const ACampusVehicle* Car = Character->GetVehicle())
+	{
+		const float CarHealth = Car->GetHealth();
+		LagCarHealth = LagCarHealth < 0.f ? CarHealth : FMath::FInterpConstantTo(LagCarHealth, CarHealth, InDeltaTime, 700.f);
+	}
+	else
+	{
+		LagCarHealth = -1.f;
+	}
 
 	if (!bActive || !bShowButtons)
 	{
 		return;
 	}
 
+	// At the wheel the stick is throttle and steering, so the run-rim / RUN LOCK machinery is off:
+	// holding full throttle for two seconds must not slam the handbrake on.
+	if (Character->IsDriving())
+	{
+		bAutoRun = false;
+		bAtRunRim = false;
+		RunRimTime = 0.f;
+	}
 	// Joystick slides home when released.
 	if (JoyFinger == INDEX_NONE)
 	{
@@ -795,6 +880,26 @@ void SCampusTouchControls::DrawIcon(FSlateWindowElementList& Out, int32 Layer, c
 		DrawPolyline(Out, Layer, G, { P(0.f, -S), P(S, 0.f), P(0.f, S) }, Color, T);
 		break;
 	}
+	case EControl::Vehicle:
+	{
+		// A car from the side: cabin line over a body, two wheels under it.
+		const float S = R * 0.5f;
+		DrawPolyline(Out, Layer, G, { P(-S, S * 0.3f), P(-S, -S * 0.1f), P(-S * 0.45f, -S * 0.55f), P(S * 0.35f, -S * 0.55f),
+			P(S, -S * 0.1f), P(S, S * 0.3f), P(-S, S * 0.3f) }, Color, T);
+		DrawCircle(Out, Layer, G, FVector2D(C.X - S * 0.5f, C.Y + S * 0.5f), S * 0.22f, Color);
+		DrawCircle(Out, Layer, G, FVector2D(C.X + S * 0.5f, C.Y + S * 0.5f), S * 0.22f, Color);
+		break;
+	}
+	case EControl::SeatSwitch:
+	{
+		// Two arrows trading places.
+		const float S = R * 0.45f;
+		DrawPolyline(Out, Layer, G, { P(-S, -S * 0.35f), P(S, -S * 0.35f) }, Color, T);
+		DrawPolyline(Out, Layer, G, { P(S * 0.4f, -S * 0.8f), P(S, -S * 0.35f), P(S * 0.4f, S * 0.1f) }, Color, T);
+		DrawPolyline(Out, Layer, G, { P(S, S * 0.55f), P(-S, S * 0.55f) }, Color, T);
+		DrawPolyline(Out, Layer, G, { P(-S * 0.4f, S * 0.1f), P(-S, S * 0.55f), P(-S * 0.4f, S) }, Color, T);
+		break;
+	}
 	default:
 		break;
 	}
@@ -805,6 +910,8 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	const ACampusCharacter* Character = GetCharacter();
 	const bool bAiming = Character && Character->IsAiming();
 	const bool bScoped = bAiming && Character->GetZoom() >= 2.f && Character->GetAimBlend() > 0.5f;
+	// Driver layout swap: Fire / FireLeft / Scope / Zoom / Reload go away, the Fire slot becomes BRAKE.
+	const bool bDriving = Character && Character->IsDriving();
 	auto IsHeld = [this](EControl Control)
 	{
 		for (const TPair<int32, FFinger>& Pair : Fingers)
@@ -875,9 +982,21 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		}
 	}
 
-	// Fire: grey disc, white inner disc that follows the aiming finger.
+	// Fire: grey disc, white inner disc that follows the aiming finger. While driving the same slot is
+	// the brake, so the thumb never has to move and the trigger simply does not exist.
 	const float FireAlpha = bScoped ? 0.7f : 1.f;
 	const bool bFireHeld = IsHeld(EControl::Fire);
+	FLinearColor FireColor = bFireHeld ? TouchStyle::FirePressed : TouchStyle::FireBase;
+	FireColor.A *= FireAlpha;
+	if (bDriving)
+	{
+		const FLinearColor Back = bFireHeld ? TouchStyle::IconOn.CopyWithNewOpacity(0.92f) : TouchStyle::ChipStrong;
+		DrawNotchedBox(Out, Layer, G, L.Fire - FVector2D(L.FireR), FVector2D(L.FireR * 2.f), L.FireR * 0.4f,
+			Back, bFireHeld ? FLinearColor::White : TouchStyle::Hairline, bFireHeld ? 2.f : 1.f);
+		DrawText(Out, Layer + 2, G, TEXT("BRAKE"), L.Fire, FMath::RoundToInt(L.U * 1.9f), FLinearColor::White);
+	}
+	else
+	{
 	FVector2D Inner = L.Fire;
 	for (const TPair<int32, FFinger>& Pair : Fingers)
 	{
@@ -891,8 +1010,6 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 			Inner = L.Fire + Offset;
 		}
 	}
-	FLinearColor FireColor = bFireHeld ? TouchStyle::FirePressed : TouchStyle::FireBase;
-	FireColor.A *= FireAlpha;
 	DrawCircle(Out, Layer, G, L.Fire, L.FireR, FireColor);
 	const float InnerR = L.FireR * 0.48f * (bFireHeld ? 0.94f : 1.f);
 	if (const FSlateBrush* FireIcon = Icon(TEXT("fire")))
@@ -904,9 +1021,10 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		DrawCircle(Out, Layer + 1, G, Inner, InnerR, TouchStyle::FireDisc.CopyWithNewOpacity(FireAlpha));
 		DrawIcon(Out, Layer + 2, G, EControl::Fire, Inner, InnerR, TouchStyle::FireIcon, 0.f);
 	}
+	}
 
 	// Small left fire button: the same artwork. Switchable in the settings gear.
-	if (bLeftFireButton)
+	if (bLeftFireButton && !bDriving)
 	{
 		if (const FSlateBrush* FireIcon = Icon(TEXT("fire")))
 		{
@@ -921,6 +1039,8 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 
 	// Reload: white disc, spinning icon and a filling ring while reloading.
 	const bool bReloading = Character && Character->IsReloading();
+	if (!bDriving)
+	{
 	DrawCircle(Out, Layer, G, L.Reload, L.ReloadR, TouchStyle::ReloadDisc);
 	const float ReloadScale = IsHeld(EControl::Reload) ? 0.92f : 1.f;
 	if (const FSlateBrush* ReloadIcon = Icon(TEXT("reload")))
@@ -942,6 +1062,7 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 			Arc.Add(FVector2f(L.Reload.X + FMath::Cos(A) * (L.ReloadR - 2.f), L.Reload.Y + FMath::Sin(A) * (L.ReloadR - 2.f)));
 		}
 		DrawPolyline(Out, Layer + 2, G, Arc, TouchStyle::ReloadRing, 4.f);
+	}
 	}
 
 	// Plain icon buttons on a faint disc; orange when on.
@@ -972,7 +1093,7 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		const FLinearColor Ic = bActiveNow ? TouchStyle::IconOn : TouchStyle::Icon;
 		DrawIcon(Out, Layer + 1, G, Control, C, Radius, Ic.CopyWithNewOpacity(Ic.A * Opacity), 0.f);
 	};
-	if (Character && Character->IsArmed())
+	if (Character && Character->IsArmed() && !bDriving)
 	{
 		Plain(EControl::Scope, L.Scope, L.ScopeR, bAiming, bScoped ? 0.7f : 1.f);
 	}
@@ -980,6 +1101,42 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	Plain(EControl::Crouch, L.Crouch, L.CrouchR, Character && Character->bIsCrouched && !Character->IsProne(), 1.f);
 	Plain(EControl::Prone, L.Prone, L.ProneR, Character && Character->IsProne(), 1.f);
 	Plain(EControl::Sprint, L.Sprint, L.SprintR, bAutoRun || (Character && Character->IsSprinting()), 1.f);
+	if (bDriving)
+	{
+		// Same button, different job: Sprint is the handbrake at the wheel.
+		DrawText(Out, Layer + 2, G, TEXT("HAND"), L.Sprint + FVector2D(0.f, L.SprintR + 1.f * L.U),
+			FMath::RoundToInt(L.U * 1.05f), FLinearColor::White);
+	}
+
+	// Cars: ENTER appears when one is in reach, EXIT and SWITCH SEAT once you are in it.
+	{
+		ECampusSeat NearSeat = ECampusSeat::None;
+		const bool bSeated = Character && Character->IsSeated();
+		const bool bCarNear = Character && Character->FindNearbyVehicle(NearSeat) != nullptr;
+		if (bSeated || bCarNear)
+		{
+			Plain(EControl::Vehicle, L.Vehicle, L.VehicleR, bSeated, 1.f);
+			DrawText(Out, Layer + 2, G, bSeated ? TEXT("EXIT") : TEXT("ENTER"),
+				L.Vehicle + FVector2D(0.f, L.VehicleR + 1.1f * L.U), FMath::RoundToInt(L.U * 1.15f),
+				bSeated ? TouchStyle::IconOn : FLinearColor::White);
+		}
+		if (bSeated)
+		{
+			Plain(EControl::SeatSwitch, L.SeatSwitch, L.SeatSwitchR, false, 1.f);
+			DrawText(Out, Layer + 2, G, TEXT("SEAT"), L.SeatSwitch + FVector2D(0.f, L.SeatSwitchR + 1.1f * L.U),
+				FMath::RoundToInt(L.U * 1.05f), FLinearColor::White);
+		}
+		// Ground loot: PICK UP with the box's own name on it, so you know what you are taking.
+		const ACampusPickup* Near = (Character && !bSeated) ? Character->FindNearbyPickup() : nullptr;
+		if (Near)
+		{
+			DrawCircle(Out, Layer, G, L.Pickup, L.PickupR, TouchStyle::ButtonBack);
+			DrawRing(Out, Layer + 1, G, L.Pickup, L.PickupR, TouchStyle::Accent);
+			DrawText(Out, Layer + 2, G, TEXT("PICK UP"), L.Pickup, FMath::RoundToInt(L.U * 1.05f), FLinearColor::White);
+			DrawText(Out, Layer + 2, G, Near->Label().ToUpper(), L.Pickup + FVector2D(0.f, L.PickupR + 1.1f * L.U),
+				FMath::RoundToInt(L.U * 1.15f), TouchStyle::IconOn);
+		}
+	}
 
 	// team voice: green when on, grey with a slash when off
 	if (const ACampusMatchPlayerController* Voice = Cast<ACampusMatchPlayerController>(Controller.Get()))
@@ -1045,10 +1202,67 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	}
 
 	// Zoom pill, only while aiming.
-	if (bAiming && Character)
+	if (bAiming && Character && !bDriving)
 	{
 		DrawSlantedPanel(Out, Layer, G, L.Zoom - L.ZoomSize * 0.5f, L.ZoomSize, L.ZoomSize.Y * 0.32f, TouchStyle::Chip, TouchStyle::Hairline, 1.f);
 		DrawText(Out, Layer + 1, G, FString::Printf(TEXT("%dx"), FMath::RoundToInt(Character->GetZoom())), L.Zoom, FMath::RoundToInt(L.U * 1.4f), FLinearColor::White);
+	}
+}
+
+void SCampusTouchControls::DrawVehicleHud(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
+{
+	const ACampusCharacter* Character = GetCharacter();
+	const ACampusVehicle* Car = Character ? Character->GetVehicle() : nullptr;
+	if (!Car)
+	{
+		return;
+	}
+	const float U = L.U;
+	const float BarWidth = FMath::Min(L.W * 0.34f, 380.f * L.H / 400.f * 0.5f);
+	const float BarHeight = FMath::Max(8.f, 0.85f * U);
+	// Directly under the player's health bar, a little narrower so the two never read as one.
+	const FVector2D BarMin(L.W * 0.5f - BarWidth * 0.42f, L.H - 1.75f * U);
+	const FVector2D BarSize(BarWidth * 0.84f, BarHeight);
+	const float Slant = BarHeight * 0.85f;
+	const float Max = FMath::Max(1.f, Car->GetMaxHealth());
+	const float Health = Car->GetHealth();
+	const float LagFraction = FMath::Clamp((LagCarHealth < 0.f ? Health : LagCarHealth) / Max, 0.f, 1.f);
+	const float LiveFraction = FMath::Clamp(Health / Max, 0.f, 1.f);
+	DrawSlantedPanel(Out, Layer, G, BarMin, BarSize, Slant, FLinearColor(0.f, 0.f, 0.f, 0.55f), TouchStyle::Hairline, 1.f);
+	if (LagFraction > 0.f)
+	{
+		DrawSlantedPanel(Out, Layer + 1, G, BarMin, FVector2D(BarSize.X * LagFraction, BarSize.Y), Slant * LagFraction, TouchStyle::LagOrange);
+	}
+	if (LiveFraction > 0.f)
+	{
+		DrawSlantedPanel(Out, Layer + 2, G, BarMin, FVector2D(BarSize.X * LiveFraction, BarSize.Y), Slant * LiveFraction,
+			LiveFraction < 0.3f ? TouchStyle::Red : TouchStyle::Accent);
+	}
+	// Layout along one line: [seat chip] [car HP bar] [4 wheel pips] [HP number].
+	for (int32 Index = 0; Index < 4; ++Index)
+	{
+		const bool bPopped = Car->GetWheelHealth(Index) == 0;
+		const FVector2D Pip(BarMin.X + BarSize.X + (1.1f + Index * 1.1f) * U, BarMin.Y);
+		DrawRect(Out, Layer + 3, G, Pip, FVector2D(0.7f * U, BarSize.Y),
+			bPopped ? FLinearColor(1.f, 1.f, 1.f, 0.18f) : TouchStyle::Accent);
+	}
+	DrawText(Out, Layer + 3, G, FString::FromInt(FMath::RoundToInt(Health)),
+		FVector2D(BarMin.X + BarSize.X + 6.1f * U, BarMin.Y + BarSize.Y * 0.5f),
+		FMath::RoundToInt(U * 1.1f), LiveFraction < 0.3f ? TouchStyle::Red : FLinearColor::White, 0.f, 0.5f);
+
+	// Seat chip: D for the wheel, P1..P3 for the firing seats.
+	const ECampusSeat Seat = Character->GetSeat();
+	const TCHAR* SeatLabel = Seat == ECampusSeat::Driver ? TEXT("D")
+		: (Seat == ECampusSeat::FrontPass ? TEXT("P1") : (Seat == ECampusSeat::RearL ? TEXT("P2") : TEXT("P3")));
+	const FVector2D ChipMin(BarMin.X - 3.f * U, BarMin.Y - 0.35f * U);
+	const FVector2D ChipSize(2.4f * U, BarSize.Y + 0.7f * U);
+	DrawNotchedBox(Out, Layer + 3, G, ChipMin, ChipSize, ChipSize.Y * 0.35f, TouchStyle::ChipStrong, TouchStyle::Hairline, 1.f);
+	DrawText(Out, Layer + 4, G, SeatLabel, ChipMin + ChipSize * 0.5f, FMath::RoundToInt(U * 1.2f), TouchStyle::Accent);
+
+	// Burning: three seconds to get out, and the HUD says so in no uncertain terms.
+	if (Car->GetBurnSecondsLeft() > 0.f && FMath::Sin(SpinAngle * 3.f) > 0.f)
+	{
+		DrawText(Out, Layer + 5, G, TEXT("BAIL OUT"), FVector2D(L.W * 0.5f, L.H * 0.3f), FMath::RoundToInt(U * 3.2f), TouchStyle::Red);
 	}
 }
 
@@ -1245,8 +1459,26 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 	}
 	else
 	{
-		DrawText(Out, Layer + 1, G, bArmed ? TEXT("AK") : TEXT("AK  (tap)"), L.WeaponMin + FVector2D(1.2f * U, 1.4f * U), FMath::RoundToInt(U * 1.3f),
+		const FString Held = FString(Character->GetCurrentWeapon().Short);
+		DrawText(Out, Layer + 1, G, bArmed ? Held : Held + TEXT("  (tap)"), L.WeaponMin + FVector2D(1.2f * U, 1.4f * U), FMath::RoundToInt(U * 1.3f),
 			bArmed ? TouchStyle::IconOn : FLinearColor(1.f, 1.f, 1.f, 0.7f), 0.f, 0.5f);
+	}
+	// The second slot, along the bottom of the same plate: its gun and its magazine, tap to take it.
+	{
+		const int32 Other = Character->GetCurrentSlot() == 0 ? 1 : 0;
+		const FVector2D OtherAnchor = L.WeaponMin + FVector2D(1.2f * U, L.WeaponSize.Y * 0.82f);
+		if (Character->HasWeapon(Other))
+		{
+			const FString Name = FString(CampusWeapons::FindOrStarter(Character->GetWeaponId(Other)).Short);
+			DrawText(Out, Layer + 1, G, Name, OtherAnchor, FMath::RoundToInt(U * 1.15f), FLinearColor(1.f, 1.f, 1.f, 0.78f), 0.f, 0.5f);
+			DrawText(Out, Layer + 1, G, FString::FromInt(Character->GetSlotAmmo(Other)),
+				FVector2D(L.WeaponMin.X + L.WeaponSize.X - 1.2f * U, OtherAnchor.Y), FMath::RoundToInt(U * 1.15f),
+				FLinearColor(1.f, 1.f, 1.f, 0.6f), 1.f, 0.5f);
+		}
+		else
+		{
+			DrawText(Out, Layer + 1, G, TEXT("EMPTY"), OtherAnchor, FMath::RoundToInt(U * 1.05f), FLinearColor(1.f, 1.f, 1.f, 0.35f), 0.f, 0.5f);
+		}
 	}
 	const int32 Mag = Character->GetAmmoInMag();
 	const FVector2D AmmoAnchor = L.WeaponMin + FVector2D(L.WeaponSize.X * 0.55f, L.WeaponSize.Y * 0.62f);
@@ -1278,6 +1510,9 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 		FMath::RoundToInt(U * 1.8f), HealthColor, 0.f, 0.5f);
 	DrawText(Out, Layer + 3, G, FString::Printf(TEXT("/ %d  HP"), FMath::RoundToInt(Max)), BarMin + FVector2D(2.6f * U, -1.5f * U),
 		FMath::RoundToInt(U * 1.1f), FLinearColor(1.f, 1.f, 1.f, 0.7f), 0.f, 0.5f);
+
+	// Car HP, wheels, seat and the bail-out warning sit under the player's own bar.
+	DrawVehicleHud(Out, Layer, G, L);
 
 	// Crosshair (hidden when scoped), red arms while aiming; gap opens when moving.
 	const bool bScoped = Character->IsAiming() && Character->GetZoom() >= 2.f && Character->GetAimBlend() > 0.5f;
@@ -1362,6 +1597,8 @@ int32 SCampusTouchControls::OnPaint(const FPaintArgs& Args, const FGeometry& All
 	}
 	const FLayout L = MakeLayout(FVector2D(AllottedGeometry.GetLocalSize()));
 	DrawHud(OutDrawElements, LayerId, AllottedGeometry, L);
+	// Battle royale only: the circle, its clock, and the alive counter. Draws nothing in TDM.
+	DrawBattleRoyaleHud(OutDrawElements, LayerId + 18, AllottedGeometry, L);
 	if (bShowButtons)
 	{
 		DrawControls(OutDrawElements, LayerId + 5, AllottedGeometry, L);
@@ -1550,4 +1787,113 @@ void SCampusTouchControls::DrawScoreboard(FSlateWindowElementList& Out, int32 La
 		}
 	}
 	DrawText(Out, Layer + 2, G, TEXT("tap anywhere to close"), FVector2D(L.W * 0.5f, Top + BoxH + U * 2.f), FMath::RoundToInt(U * 1.2f), FLinearColor(1.f, 1.f, 1.f, 0.7f));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Battle royale overlay
+
+void SCampusTouchControls::DrawBattleRoyaleHud(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
+{
+	const APlayerController* PC = Controller.Get();
+	const UWorld* World = PC ? PC->GetWorld() : nullptr;
+	const ACampusBRGameState* State = World ? World->GetGameState<ACampusBRGameState>() : nullptr;
+	if (!State)
+	{
+		return; // TDM: there is nothing battle-royale about this match
+	}
+	const float U = L.U;
+	const int32 Big = FMath::RoundToInt(U * 2.6f);
+	const int32 Small = FMath::RoundToInt(U * 1.3f);
+	auto Clock = [](float Seconds)
+	{
+		const int32 Whole = FMath::CeilToInt(FMath::Max(0.f, Seconds));
+		return FString::Printf(TEXT("%d:%02d"), Whole / 60, Whole % 60);
+	};
+
+	// ALIVE out of the full roster, under the score plate: in BR this is the number that matters.
+	DrawText(Out, Layer + 2, G, FString::Printf(TEXT("ALIVE %d / %d  \u00b7  %d SQUADS"),
+		State->AliveCombatants, State->TotalCombatants, State->AliveSquads),
+		FVector2D(L.W * 0.5f, 32.f + U * 7.6f), Small, FLinearColor::White);
+
+	// Phase banner, screen centre-top: the only thing worth reading before the drop.
+	FString Banner;
+	FLinearColor BannerTint = FLinearColor::White;
+	switch (State->BRPhase)
+	{
+	case ECampusBRPhase::Waiting:
+		Banner = FString::Printf(TEXT("WAITING FOR PLAYERS  %d / %d  \u00b7  %s"),
+			State->HumansJoined, State->HumanCap, *Clock(State->BRPhaseEndTime - float(State->GetServerWorldTimeSeconds())));
+		break;
+	case ECampusBRPhase::Countdown:
+		Banner = FString::Printf(TEXT("DROPPING IN %s"), *Clock(State->BRPhaseEndTime - float(State->GetServerWorldTimeSeconds())));
+		BannerTint = TouchStyle::Accent;
+		break;
+	default:
+		break;
+	}
+	if (const ACampusBRDrop* Drop = ACampusBRPlane::FindDrop(GetCharacter()))
+	{
+		if (Drop->GetState() == ECampusBRDive::InPlane)
+		{
+			Banner = TEXT("TAP JUMP TO DROP");
+			BannerTint = TouchStyle::Accent;
+		}
+		else if (Drop->GetState() == ECampusBRDive::Freefall)
+		{
+			Banner = FString::Printf(TEXT("%d m  \u00b7  JUMP TO OPEN CHUTE"), FMath::RoundToInt(Drop->HeightAboveGround() * 0.01f));
+		}
+		else if (Drop->GetState() == ECampusBRDive::Parachute)
+		{
+			Banner = FString::Printf(TEXT("%d m  \u00b7  CHUTE OPEN"), FMath::RoundToInt(Drop->HeightAboveGround() * 0.01f));
+		}
+	}
+	if (State->BRPhase == ECampusBRPhase::Ended)
+	{
+		Banner = State->WinningSquad >= 0 ? FString(TEXT("BOOYAH!")) : FString(TEXT("MATCH OVER"));
+		BannerTint = TouchStyle::Accent;
+	}
+	if (!Banner.IsEmpty())
+	{
+		DrawText(Out, Layer + 2, G, Banner, FVector2D(L.W * 0.5f, L.H * 0.17f),
+			State->BRPhase == ECampusBRPhase::Ended ? FMath::RoundToInt(U * 5.f) : Big, BannerTint);
+	}
+
+	const ACampusBRZone* Zone = State->Zone;
+	if (!Zone || Zone->GetPhase() < 0)
+	{
+		return;
+	}
+
+	// The zone clock. Shrinking reads red, because that is when standing still costs health.
+	const FString ZoneLine = Zone->IsShrinking()
+		? FString::Printf(TEXT("ZONE CLOSING  \u00b7  %s"), *Clock(Zone->SecondsToEvent()))
+		: FString::Printf(TEXT("ZONE SHRINKING IN %s"), *Clock(Zone->SecondsToEvent()));
+	DrawText(Out, Layer + 2, G, ZoneLine, FVector2D(L.W * 0.5f, 32.f + U * 9.6f), Small,
+		Zone->IsShrinking() ? TouchStyle::Red : FLinearColor::White);
+
+	// Outside the circle: the one warning that has to be impossible to miss.
+	const ACampusCharacter* Me = GetCharacter();
+	const float Outside = Me ? Zone->MetresOutside(Me->GetActorLocation()) : 0.f;
+	if (Outside > 0.f)
+	{
+		DrawText(Out, Layer + 2, G, FString::Printf(TEXT("OUTSIDE THE PLAY AREA  \u00b7  %d m  \u00b7  MOVE"), FMath::RoundToInt(Outside)),
+			FVector2D(L.W * 0.5f, L.H * 0.26f), Big, TouchStyle::Red);
+	}
+
+	// The circle on the minimap: where it is now, and (dashed-bright) where it is closing to.
+	if (!bShowMinimap || L.MapSize <= 0.f)
+	{
+		return;
+	}
+	auto ToMap = [&L](const FVector2D& Flat)
+	{
+		const FVector2D UV = CampusBRMap::ToUV(FVector(Flat.X, Flat.Y, 0.f));
+		return L.MapMin + UV * L.MapSize;
+	};
+	const float PerCm = L.MapSize / CampusBRMap::Span;
+	DrawRing(Out, Layer + 6, G, ToMap(Zone->GetCenter()), Zone->GetRadius() * PerCm, FLinearColor(1.f, 1.f, 1.f, 0.85f));
+	if (!Zone->IsShrinking())
+	{
+		DrawRing(Out, Layer + 6, G, ToMap(Zone->GetNextCenter()), Zone->GetNextRadius() * PerCm, TouchStyle::Accent);
+	}
 }

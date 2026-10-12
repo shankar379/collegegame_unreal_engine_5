@@ -77,6 +77,11 @@ public:
 	UPROPERTY()
 	bool bRandomMap = false;
 
+	/** BATTLE ROYALE: the DAY / NIGHT chip on the mode card. A preference only - it rides along on
+	 *  POST /br/queue and the server's `day_night` has the final word on the match that comes back. */
+	UPROPERTY()
+	bool bBrNight = false;
+
 	/** Lobby choice: 1 solo, 2 duo, 4 squad. */
 	UPROPERTY()
 	int32 TeamSize = 4;

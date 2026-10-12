@@ -883,6 +883,14 @@ void UCampusSocial::HandleEphemeral(const TSharedPtr<FJsonObject>& Frame)
 {
 	const FString Type = Str(Frame, TEXT("type"));
 	const TSharedPtr<FJsonObject> Payload = Obj(Frame, TEXT("p"));
+	// The queue match can arrive either way (a producer may treat it as ephemeral, since a match the
+	// player is no longer waiting for is worthless). UCampusBRQueue only ever acts on a NEW code, so
+	// receiving it on both paths is harmless.
+	if (Type == TEXT("br.matched"))
+	{
+		OnBRMatched.Broadcast(Payload);
+		return;
+	}
 	if (Type == TEXT("server.notice"))
 	{
 		const FString Kind = Str(Payload, TEXT("kind"));
@@ -1193,6 +1201,12 @@ void UCampusSocial::ApplyEvent(int64 Seq, const FString& Id, const FString& Type
 				PendingSummary = Code;
 				OnSummaryReady.Broadcast(Code);
 			}
+		}
+		else if (Type == TEXT("br.matched"))
+		{
+			// The BR queue's push channel. Handed over whole: this file knows nothing about match
+			// objects, and UCampusBRQueue is the one place that parses one.
+			OnBRMatched.Broadcast(Payload);
 		}
 		else if (Type == TEXT("profile.milestone"))
 		{
