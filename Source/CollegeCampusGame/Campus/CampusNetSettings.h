@@ -49,5 +49,23 @@ public:
 		return Base.IsEmpty() ? FString::Printf(TEXT("http://%s:%d/v1"), *ServerHost, ApiPort) : Base;
 	}
 
+	/** The social WebSocket (UCampusSocial): the SAME host, port and path prefix as the API, with the
+	 *  scheme swapped, so the upgrade is one ordinary request to the same origin and rides the ngrok
+	 *  tunnel unchanged. Derived from ApiBaseUrl() on purpose - the quote-stripping and the "//"
+	 *  truncation defence above must never be re-implemented anywhere else. */
+	FString WsBaseUrl() const
+	{
+		FString Base = ApiBaseUrl();
+		if (Base.RemoveFromStart(TEXT("https://")))
+		{
+			return TEXT("wss://") + Base;
+		}
+		if (Base.RemoveFromStart(TEXT("http://")))
+		{
+			return TEXT("ws://") + Base;
+		}
+		return Base;
+	}
+
 	FString GameAddress() const { return FString::Printf(TEXT("%s:%d"), *ServerHost, GamePort); }
 };

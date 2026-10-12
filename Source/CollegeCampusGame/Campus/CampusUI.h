@@ -9,6 +9,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Animation/CurveSequence.h"
 #include "Campus/CampusAngular.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/SLeafWidget.h"
@@ -18,12 +19,20 @@ class UCampusBackend;
 class UCampusParty;
 class UCampusPlayBilling;
 class UCampusSave;
+class UCampusSocial;
 struct FCampusOffer;
 struct FCampusMission;
+struct FCampusMilestone;
 struct FCampusPartyMember;
 struct FCampusPlayProduct;
+struct FCampusPlayerCard;
+struct FCampusProfile;
+struct FCampusSummary;
+struct FCampusSummaryRow;
+struct FCampusHistoryRow;
 class ACampusMatchPlayerController;
 class SBox;
+class SVerticalBox;
 
 /** Shared look: colours, fonts, angular buttons, angular panels. */
 namespace CampusStyle
@@ -115,6 +124,107 @@ private:
 	float Velocity = 0.f;
 };
 
+/** Which button on a notice card was tapped; the lobby owns the answer, because it owns dialogs. */
+DECLARE_DELEGATE_OneParam(FOnCampusNoticeAction, FString);
+
+/**
+ * ONE slide-in invite card (Campus/CampusNoticeUI.cpp). 460 x 128, notched, accent left edge, a colour
+ * avatar, the sender's name, a DUO / SQUAD chip, ACCEPT + REJECT at 52 tall, and a countdown bar driven
+ * off the SERVER clock.
+ *
+ * The card body is deliberately NOT tappable: an accidental accept is worse than a missed invite.
+ * Every motion is a RenderTransform, never layout padding - a layout change would re-flow the whole
+ * lobby overlay every frame, which shows up immediately on a budget phone.
+ */
+class SCampusNoticeCard : public SCompoundWidget
+{
+public:
+	SLATE_BEGIN_ARGS(SCampusNoticeCard) {}
+		SLATE_ARGUMENT(TWeakObjectPtr<UCampusSocial>, Social)
+		SLATE_ARGUMENT(FString, Key)
+		SLATE_EVENT(FOnCampusNoticeAction, OnAccept)
+		SLATE_EVENT(FOnCampusNoticeAction, OnReject)
+	SLATE_END_ARGS()
+
+	void Construct(const FArguments& InArgs);
+	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
+
+	const FString& GetKey() const { return Key; }
+	/** Starts the 200 ms slide back out to the right. Idempotent. */
+	void BeginExit();
+	bool IsExiting() const { return bExiting; }
+	/** The exit finished, so the stack may drop this widget. */
+	bool IsGone() const;
+	/** The cards below a departing card rise by one card height over 150 ms. */
+	void PlayReflow(float FromOffsetY);
+
+private:
+	/** The live notice, or null once the subsystem has dropped it. */
+	const struct FCampusNotice* Notice() const;
+
+	TWeakObjectPtr<UCampusSocial> Social;
+	FString Key;
+	FOnCampusNoticeAction OnAccept;
+	FOnCampusNoticeAction OnReject;
+
+	FCurveSequence Enter;
+	FCurveHandle Slide;
+	FCurveHandle Fade;
+	FCurveSequence Exit;
+	FCurveHandle ExitSlide;
+	FCurveSequence Reflow;
+	FCurveHandle Rise;
+	float ReflowFrom = 0.f;
+	bool bExiting = false;
+	/** Cached so the countdown bar's width lambda does no string or date work per frame. */
+	float Remaining = 0.f;
+	float Total = 45.f;
+};
+
+/**
+ * The card stack, above every lobby screen and above the busy scrim (SOCIAL_PARTY §14.1) - an invite
+ * that lands while the Store is open, or while a claim is in flight, must still be answerable. Slate
+ * hit-tests top down, so the card's buttons win while the scrim still blocks everything beneath it.
+ *
+ * At most three cards are drawn; a fourth collapses into a "+N MORE" chip that opens the tray.
+ */
+class SCampusNoticeStack : public SCompoundWidget
+{
+public:
+	SLATE_BEGIN_ARGS(SCampusNoticeStack) {}
+		SLATE_ARGUMENT(TWeakObjectPtr<UCampusSocial>, Social)
+		SLATE_EVENT(FOnCampusNoticeAction, OnAccept)
+		SLATE_EVENT(FOnCampusNoticeAction, OnReject)
+		SLATE_EVENT(FSimpleDelegate, OnOpenTray)
+	SLATE_END_ARGS()
+
+	void Construct(const FArguments& InArgs);
+	/** UCampusSocial survives level travel and this widget does not, so the OnNoticesChanged binding
+	 *  comes off here or the next lobby load fires into a dead `this`. */
+	~SCampusNoticeStack();
+	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
+
+	/** Card geometry, shared with the lobby so the stack never overlaps the top bar or the logo. */
+	static constexpr float CardWidth = 460.f;
+	static constexpr float CardHeight = 128.f;
+	static constexpr float CardGap = 12.f;
+	static constexpr int32 MaxVisible = 3;
+
+private:
+	/** Rebuilds the column only when the set of live keys actually changes. */
+	void Reconcile();
+
+	TWeakObjectPtr<UCampusSocial> Social;
+	FOnCampusNoticeAction OnAccept;
+	FOnCampusNoticeAction OnReject;
+	FSimpleDelegate OnOpenTray;
+	TSharedPtr<SVerticalBox> Column;
+	TArray<TSharedPtr<SCampusNoticeCard>> Cards;
+	int32 Overflow = 0;
+	bool bDirty = true;
+	FDelegateHandle ChangedHandle;
+};
+
 class SCampusLobbyWidget : public SCompoundWidget
 {
 public:
@@ -130,9 +240,17 @@ private:
 	// Free Fire / PUBG style flow: Splash -> (first time) Agreement -> Login choice -> Email login / Register ->
 	// (first time) Nickname -> Lobby. The lobby opens the Store, Rooms (quick / create / join by code), Account.
 	enum class EScreen : uint8 { Splash, Agreement, LoginChoice, EmailLogin, Register, Nickname, Lobby, Store, Rooms,
-		Account, Event, Daily, Settings, Missions, Streak, AdultConfirm, CollegePick, MapSelect };
+		Account, Event, Daily, Settings, Missions, Streak, AdultConfirm, CollegePick, MapSelect,
+		// migration 012 / 013: the friends list, the invite picker opened from a "+ INVITE" plate, the
+		// stacked invite tray, the full-screen profile, and the player-of-the-match screen.
+		Friends, FriendPick, InviteTray, Profile, Summary };
 	enum class EStoreTab : uint8 { Guns, Offers, Packs };
 	enum class EMissionTab : uint8 { Daily, Weekly, Weekend };
+	enum class EFriendTab : uint8 { Friends, Add, Requests };
+	/** Which trailing action a roster row carries - the only thing that differs between the
+	 *  GAME FRIENDS list, the ADD results, the REQUESTS lists and the blocked list. */
+	enum class EFriendRow : uint8 { Game, Add, Incoming, Outgoing, Blocked };
+	enum class EProfileTab : uint8 { Showcase, Profile, History };
 
 	void Show(EScreen Screen);
 	void Refresh();
@@ -147,11 +265,20 @@ private:
 	UCampusBackend* Backend() const;
 	UCampusSave* Profile() const;
 	UCampusParty* Party() const;
-	/** Pushes the local player into the squad roster and keeps the plate row the right width. */
+	UCampusSocial* Social() const;
+	/** Pushes the local player into the squad roster and keeps the plate row the right width.
+	 *  GATED: while a SERVER party exists the roster is the server's, and this returns early -
+	 *  otherwise the local guess would fight ApplyRoster on every repaint. */
 	void SyncParty();
 
 	TSharedRef<SWidget> Backdrop(float Alpha) const;
 	TSharedRef<SWidget> Dialog(const FText& Title, TSharedRef<SWidget> Body, float Width, bool bClose, EScreen CloseTo);
+	/** A panel over whatever screen is showing. Lives in the root overlay, so it works from the lobby,
+	 *  the friends list and the full-screen profile alike - none of which can host a dialog of their own. */
+	void ShowFloating(TSharedRef<SWidget> Content, float Width);
+	/** A yes/no on top of the current screen: leaving a squad for another, removing a member. */
+	void AskConfirm(const FText& Title, const FText& Body, const FText& Yes, TFunction<void()> OnYes);
+	void CloseConfirm();
 	TSharedRef<SWidget> Field(const FText& Hint, FString& Target, bool bPassword = false);
 
 	TSharedRef<SWidget> BuildSplash();
@@ -167,6 +294,9 @@ private:
 	TSharedRef<SWidget> BuildNamePlate(const FCampusPartyMember& Member);
 	TSharedRef<SWidget> BuildInvitePlate();
 	TSharedRef<SWidget> BuildModeSelect();
+	/** START, or "WAITING FOR ARJUN" when somebody else leads: a member cannot start their own room
+	 *  out from under the squad. */
+	TSharedRef<SWidget> BuildStartButton();
 
 	// ---- map / mode select (Campus/CampusMapSelect.cpp). Opened from the lobby plate above START.
 	/** The lobby plate next to START: the chosen mode over the chosen map, tap to change. */
@@ -213,6 +343,62 @@ private:
 	/** The IST game day (YYYYMMDD) by the server clock, for the once-a-day streak popup. */
 	FString ServerGameDay() const;
 
+	// ---- social: friends, the invite picker, the tray (Campus/CampusSocialUI.cpp)
+	/** The full-screen friends page: left tab rail (GAME FRIENDS / ADD), the REQUESTS button in its
+	 *  bottom corner, the counter top-right, and - on ADD - the search bar along the bottom. */
+	TSharedRef<SWidget> BuildFriends();
+	/** One rail tab: active is a SOLID accent plate with dark text, as the reference has it. */
+	TSharedRef<SWidget> BuildFriendTab(EFriendTab Tab, const FText& Label);
+	/** The angular name banner with the level pinned to its far end. */
+	TSharedRef<SWidget> BuildNameBanner(const FCampusPlayerCard& Card, float Width);
+	/** The lobby's right-edge invite strip, collapsed until the player opens it. */
+	TSharedRef<SWidget> BuildLobbyFriends();
+	/** The same rows as a picker, opened from a "+ INVITE" plate: one tap sends the invite. */
+	TSharedRef<SWidget> BuildFriendPick();
+	/** Every stacked invite with ACCEPT / REJECT rows, behind the stack's "+N MORE" chip. */
+	TSharedRef<SWidget> BuildInviteTray();
+	/** One 72-tall roster row: square avatar, name banner, centred status, trailing action. */
+	TSharedRef<SWidget> BuildFriendRow(const FCampusPlayerCard& Card, EFriendRow Kind);
+	/** The colour plate that stands in for an avatar everywhere in the social UI. */
+	TSharedRef<SWidget> Avatar(const FCampusPlayerCard& Card, float Size) const;
+	/** "ONLINE" / "SOCIAL OFFLINE - TAP TO RETRY": one honest line at the top of the friends panel. */
+	TSharedRef<SWidget> BuildSocialStatus();
+	/** The count on the top-bar friends icon: friend requests waiting on me. Nothing when zero. */
+	TSharedRef<SWidget> FriendRequestBadge();
+	/** ACCEPT on a card: confirms first when it would abandon another squad. */
+	void AnswerInvite(const FString& InviteId, bool bAccept);
+	void SendInvite(const FString& PlayerId);
+	void OpenProfile(const FString& PlayerId);
+	/** The squad strip under the plate row: who leads, LEAVE SQUAD, and the leader's MANAGE. */
+	TSharedRef<SWidget> BuildPartyBar();
+	/** The leader's remove list. A visible row with its own button beats a hidden long press, and
+	 *  beats a tiny X on every plate - which on a phone is a mis-tap generator. */
+	void OpenManageSquad();
+
+	// ---- post-match (Campus/CampusSocialUI.cpp)
+	/** PLAYER OF THE MATCH: the MVP big, every player's line, friend buttons, CONTINUE. */
+	TSharedRef<SWidget> BuildSummary();
+	TSharedRef<SWidget> BuildSummaryRow(const FCampusSummaryRow& Row);
+	/** Fetches GET /rooms/:code/summary and shows the screen when it lands. */
+	void OpenSummary(const FString& RoomCode);
+	/** + ADD FRIEND / REQUESTED / ACCEPT / FRIENDS, from friend_state, optimistic on tap. */
+	TSharedRef<SWidget> FriendButton(const FCampusPlayerCard& Card, FVector2D Size);
+
+	// ---- profile (Campus/CampusProfileUI.cpp)
+	/** Full screen: the 3D figure on the left, the angular tabbed panel on the right. */
+	TSharedRef<SWidget> BuildProfile();
+	TSharedRef<SWidget> BuildProfileHeader();
+	TSharedRef<SWidget> BuildProfileTab();
+	TSharedRef<SWidget> BuildShowcaseTab();
+	TSharedRef<SWidget> BuildHistoryTab();
+	TSharedRef<SWidget> BuildRankBlock();
+	TSharedRef<SWidget> BuildStatsStrip();
+	TSharedRef<SWidget> BuildMilestone(const FCampusMilestone& Badge);
+	TSharedRef<SWidget> BuildHistoryRow(const FCampusHistoryRow& Row);
+	/** One stats cell: glyph, number, label. */
+	TSharedRef<SWidget> StatCell(CampusAngular::EGlyph Glyph, const FText& Value, const FText& Caption) const;
+	void CloseProfile();
+
 	TWeakObjectPtr<ACampusLobbyPlayerController> Controller;
 	TSharedPtr<SBox> Content;
 	EScreen Current = EScreen::Splash;
@@ -250,6 +436,38 @@ private:
 	FString PickedCollegeId;
 	bool bShowCollegeTick = false;
 	FString CollegeFilter;
+
+	// ---- social / profile state
+	EFriendTab FriendTab = EFriendTab::Friends;
+	EProfileTab ProfileTab = EProfileTab::Profile;
+	/** Where the friends screen goes back to: the lobby, or straight back to a profile. */
+	EScreen FriendsReturn = EScreen::Lobby;
+	/** Whose profile is open; empty = mine. */
+	FString ProfileTarget;
+	/** Held by pointer so this header does not have to pull in CampusSocial.h. */
+	TSharedPtr<FCampusProfile> ProfileData;
+	TSharedPtr<FCampusSummary> SummaryData;
+	bool bProfileLoading = false;
+	bool bHistoryLoading = false;
+	/** The post-match screen holds for a few seconds before CONTINUE is tappable. */
+	float SummaryTime = 0.f;
+	/** Friend requests sent this session: the button reads REQUESTED before the roster catches up. */
+	TSet<FString> OptimisticFriends;
+	/** Likes given this session, so the heart stays filled without a second request. */
+	TSet<FString> OptimisticLikes;
+	/** The ADD tab's search box. One request per SEARCH tap, never per keystroke. */
+	FString SearchText;
+	/** The lobby's right-edge friends strip starts collapsed: the notice stack owns that corner
+	 *  whenever a card is in flight, and an always-open list is screen the player did not ask for. */
+	bool bLobbyFriendsOpen = false;
+	/** The yes/no that floats over whatever screen is showing; empty content = nothing asked. */
+	TSharedPtr<SBox> ConfirmBox;
+	FDelegateHandle SocialPartyHandle;
+	FDelegateHandle SocialRosterHandle;
+	FDelegateHandle SocialStateHandle;
+	FDelegateHandle SocialNoticeHandle;
+	FDelegateHandle SocialRoomHandle;
+	FDelegateHandle SocialSummaryHandle;
 
 	// form fields
 	FString EmailText;

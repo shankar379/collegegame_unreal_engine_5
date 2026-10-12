@@ -141,7 +141,13 @@ namespace CampusAngular
 		const FLinearColor& Top, const FLinearColor& Bottom);
 
 	/** Small vector icons; no texture assets, so they never fail to load. */
-	enum class EGlyph : uint8 { Gear, Mail, Friends, Plus, Rank, Coin, Gem, Wifi, Crown, Close, Chevron, Lock, Clock, Tick };
+	enum class EGlyph : uint8 { Gear, Mail, Friends, Plus, Rank, Coin, Gem, Wifi, Crown, Close, Chevron, Lock, Clock, Tick,
+		/** Profile page: deaths, headshots / accuracy, wins + MVP, likes. Drawn, not textured, for the
+		 *  same reason as every glyph above - four icons do not earn an atlas that can fail to load. */
+		Skull, Target, Trophy, Heart };
+
+	/** The glyph a server-side milestone row names (`milestones.glyph`), or Rank when it is unknown. */
+	EGlyph GlyphFromName(const FString& Name);
 
 	void DrawGlyph(FSlateWindowElementList& Out, int32 Layer, const FGeometry& Geometry, EGlyph Glyph,
 		const FVector2f& Center, float Radius, const FLinearColor& Color, float Thickness = 0.f);

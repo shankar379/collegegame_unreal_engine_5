@@ -144,32 +144,61 @@ void UCampusParty::ClearGuests()
 	}
 }
 
-void UCampusParty::ApplyRoster(const TArray<FCampusPartyMember>& InMembers)
+void UCampusParty::ApplyRoster(const TArray<FCampusPartyMember>& InMembers, bool bAuthoritative)
 {
-	FCampusPartyMember Leader;
-	bool bHadLeader = false;
-	for (const FCampusPartyMember& Member : Members)
+	TArray<FCampusPartyMember> Next;
+	Next.Reserve(FMath::Max(Capacity, InMembers.Num()));
+	if (bAuthoritative)
 	{
-		if (Member.bLeader)
+		// The server's roster, verbatim and in its own order (joined_at, leader first in practice).
+		// Nothing local is merged in: the party IS the server's answer, including who holds the crown.
+		for (const FCampusPartyMember& Member : InMembers)
 		{
-			Leader = Member;
-			bHadLeader = true;
-			break;
+			if (Next.Num() >= Capacity)
+			{
+				break;
+			}
+			Next.Add(Member);
 		}
 	}
-	Members.Reset(Capacity);
-	if (bHadLeader)
+	else
 	{
-		Members.Add(Leader);
-	}
-	for (const FCampusPartyMember& Member : InMembers)
-	{
-		if (Member.bLeader || Members.Num() >= Capacity)
+		for (const FCampusPartyMember& Member : Members)
 		{
-			continue;
+			if (Member.bLeader)
+			{
+				Next.Add(Member);
+				break;
+			}
 		}
-		Members.Add(Member);
+		for (const FCampusPartyMember& Member : InMembers)
+		{
+			if (Member.bLeader || Next.Num() >= Capacity)
+			{
+				continue;
+			}
+			Next.Add(Member);
+		}
 	}
+
+	// Only broadcast on a real change: every party event repaints the lobby, and an unconditional
+	// broadcast from a 30-second presence frame would rebuild the whole screen for nothing.
+	if (Next.Num() == Members.Num())
+	{
+		bool bSame = true;
+		for (int32 Index = 0; Index < Next.Num() && bSame; ++Index)
+		{
+			const FCampusPartyMember& A = Next[Index];
+			const FCampusPartyMember& B = Members[Index];
+			bSame = A.Is(B) && A.Name == B.Name && A.Level == B.Level && A.bLeader == B.bLeader
+				&& A.bAccepted == B.bAccepted && A.Presence == B.Presence && A.InviteId == B.InviteId;
+		}
+		if (bSame)
+		{
+			return;
+		}
+	}
+	Members = MoveTemp(Next);
 	Changed();
 }
 

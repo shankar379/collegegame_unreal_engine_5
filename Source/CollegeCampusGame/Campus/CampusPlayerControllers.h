@@ -17,6 +17,7 @@ class SCampusTouchControls;
 class UCampusParty;
 class UCampusSave;
 class UCampusBackend;
+class UCampusSocial;
 class UCampusEOS;
 class UCampusGameInstance;
 
@@ -31,9 +32,16 @@ public:
 	UCampusGameInstance* GetCampusInstance() const;
 	UCampusSave* GetProfile() const;
 	UCampusParty* GetParty() const;
+	/** Friends, squads, invites, presence and the profile page's data (migration 012 / 013). */
+	UCampusSocial* GetSocial() const;
 
 	/** Turns the whole squad together (drag in the empty middle of the screen). */
 	void RotateDisplay(float DeltaYaw);
+
+	/** The profile page: one figure, moved to about 25 % across the screen so the angular panel can
+	 *  have the right half. Reuses the lobby's own mannequin and RotateDisplay - there is no second
+	 *  3D path to keep in step. Call with false to put the line-up and the podium camera back. */
+	void FocusProfile(bool bOn);
 
 	UCampusBackend* GetBackend() const;
 
@@ -76,6 +84,12 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<ACameraActor> PodiumCamera;
+
+	/** Spawned on the first profile open and kept: the same rotation and FOV as the podium camera,
+	 *  shifted sideways so the figure lands under the left 45 % of the screen. */
+	UPROPERTY(Transient)
+	TObjectPtr<ACameraActor> ProfileCamera;
+	bool bProfileFocus = false;
 
 	TSharedPtr<SCampusLobbyWidget> Widget;
 	FDelegateHandle PartyChangedHandle;

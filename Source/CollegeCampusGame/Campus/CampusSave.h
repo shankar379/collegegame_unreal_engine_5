@@ -17,7 +17,12 @@ public:
 	static UCampusSave* LoadOrCreate();
 	void Persist();
 
-	int32 GetLevel() const { return 1 + Xp / 500; }
+	// THERE IS NO GetLevel() HERE ANY MORE, DELIBERATELY. Level and XP are server state (migration 013,
+	// PROFILE_DESIGN §3): the curve is a table in engagement_config and the client never computes a level.
+	// The old `1 + Xp / 500` was a number the phone invented - two phones looking at the same player saw
+	// different levels, and every squad name plate printed that same local guess for everybody else.
+	// Read UCampusBackend::Level / XpIntoLevel / XpForNext instead; the three fields below are only the
+	// cache that lets the lobby paint before the first response lands.
 
 	/** Spends coins if there are enough. */
 	bool TrySpend(int32 Amount);
@@ -141,4 +146,22 @@ public:
 	/** IST game day (YYYYMMDD) the streak popup was last shown, so it opens once a day and never nags. */
 	UPROPERTY()
 	FString StreakPopupDay;
+
+	// ---- social (UCampusSocial, migration 012) and server-side progression (migration 013)
+
+	/** The last social event sequence this phone APPLIED. Persisted so an app restart does not replay
+	 *  yesterday's invite cards; reset to the `hello` frame's next_seq after a full re-read. */
+	UPROPERTY()
+	int64 SocialSeq = 0;
+
+	/** The server's last word on my level and XP, so the top bar and the profile paint on frame one and
+	 *  then repaint when GET /me/profile lands. Never computed here - see the note above. */
+	UPROPERTY()
+	int32 ServerLevel = 1;
+
+	UPROPERTY()
+	int32 ServerXpInto = 0;
+
+	UPROPERTY()
+	int32 ServerXpForNext = 0;
 };

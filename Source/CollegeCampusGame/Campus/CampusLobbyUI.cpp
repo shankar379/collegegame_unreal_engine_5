@@ -13,6 +13,7 @@
 #include "Campus/CampusPlayBilling.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "Campus/CampusSave.h"
+#include "Campus/CampusSocial.h"
 #include "Brushes/SlateNoResource.h"
 #include "Styling/CoreStyle.h"
 #include "Styling/SlateTypes.h"
@@ -103,6 +104,11 @@ UCampusParty* SCampusLobbyWidget::Party() const
 	return Controller.IsValid() ? Controller->GetParty() : nullptr;
 }
 
+UCampusSocial* SCampusLobbyWidget::Social() const
+{
+	return Controller.IsValid() ? Controller->GetSocial() : nullptr;
+}
+
 void SCampusLobbyWidget::SyncParty()
 {
 	UCampusParty* Squad = Party();
@@ -110,11 +116,21 @@ void SCampusLobbyWidget::SyncParty()
 	{
 		return;
 	}
+	// THE GATE. BuildLobby() calls this on every repaint, and it used to call SetCapacity / SetLeader
+	// unconditionally. With a real server party that local guess would fight ApplyRoster for ever: the
+	// server says who leads and how wide the row is, so when a party exists this does nothing at all.
+	// Without one, today's behaviour is unchanged, and AdoptSquad stays the no-party fallback.
+	if (const UCampusSocial* Live = Social(); Live && Live->HasParty())
+	{
+		return;
+	}
 	// The plate row is as wide as the chosen squad size, and the local player is always the leader.
 	Squad->SetCapacity(SelectedTeamSize);
 	const UCampusBackend* Api = Backend();
 	const UCampusSave* Save = Profile();
-	Squad->SetLeader(Api ? Api->PlayerName : TEXT("YOU"), Save ? Save->GetLevel() : 1,
+	// Level is the SERVER's number (migration 013). There is no local formula any more, so the plate
+	// and the profile page can never disagree about it.
+	Squad->SetLeader(Api ? Api->PlayerName : TEXT("YOU"), Api ? Api->Level : 1,
 		Save ? FMath::Clamp(Save->Wins / 5, 0, 5) : 0);
 }
 
@@ -140,6 +156,58 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 			if (Current == EScreen::Lobby)
 			{
 				Refresh();
+			}
+		});
+	}
+
+	// The social channel pushes; the UI never polls. Each delegate repaints at most one screen.
+	if (UCampusSocial* Live = Social())
+	{
+		SocialPartyHandle = Live->OnPartyChanged.AddLambda([this]()
+		{
+			if (Current == EScreen::Lobby || Current == EScreen::FriendPick || Current == EScreen::Friends)
+			{
+				Refresh();
+			}
+		});
+		SocialRosterHandle = Live->OnRosterChanged.AddLambda([this]()
+		{
+			if (Current == EScreen::Friends || Current == EScreen::FriendPick || Current == EScreen::Summary)
+			{
+				Refresh();
+			}
+		});
+		SocialStateHandle = Live->OnStateChanged.AddLambda([this]()
+		{
+			if (Current == EScreen::Friends || Current == EScreen::FriendPick)
+			{
+				Refresh();
+			}
+		});
+		SocialNoticeHandle = Live->OnNotice.AddLambda([this](const FString& Message) { Toast(Message); });
+		// party.room_ready: the leader is already hosting, so this only ever fires for a member.
+		SocialRoomHandle = Live->OnRoomReady.AddLambda([this](const FString& Code)
+		{
+			if (!Controller.IsValid())
+			{
+				return;
+			}
+			// Never teleport out of the lobby with no explanation - that reads as a crash. The busy
+			// overlay names what is happening and stays up for the travel.
+			Busy(TEXT("Joining your squad's match..."));
+			Controller->JoinRoomByCode(Code, [this](const FString& Error)
+			{
+				bBusy = false;
+				Toast(Error.IsEmpty() ? TEXT("Could not join the squad's room.") : Error);
+				Refresh();
+			});
+		});
+		SocialSummaryHandle = Live->OnSummaryReady.AddLambda([this](const FString& Code)
+		{
+			// Mid-match this only records the code; the lobby's Tick opens the screen on arrival.
+			if (Current == EScreen::Lobby)
+			{
+				OpenSummary(Code);
 			}
 		});
 	}
@@ -196,6 +264,64 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 					FMargin(40.f, 24.f), 20.f, true)
 			]
 		]
+		// A yes/no over whatever screen is showing. Above the busy scrim, because the question it asks
+		// is usually the thing that is holding the call up.
+		+ SOverlay::Slot()
+		[
+			SAssignNew(ConfirmBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+		]
+		// THE NOTICE STACK, above everything except the toast (SOCIAL_PARTY §14.1): an invite that
+		// lands while the Store is open, or while a claim is in flight, must still be answerable.
+		// Top padding 150 clears the top bar and the logo (which sits at y 86-126); right padding 0,
+		// so the card's right edge meets the safe-zone edge and "stops at the right side" reads as
+		// intentional rather than as a layout accident.
+		+ SOverlay::Slot()
+		[
+			SNew(SSafeZone).Visibility(EVisibility::SelfHitTestInvisible).Padding(FMargin(24.f, 16.f))
+			[
+				SNew(SBox).HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(FMargin(0.f, 150.f, 0.f, 0.f))
+				.Visibility(EVisibility::SelfHitTestInvisible)
+				[
+					SNew(SCampusNoticeStack)
+					.Social(Social())
+					.OnAccept(FOnCampusNoticeAction::CreateLambda([this](FString Key)
+					{
+						UCampusSocial* Live = Social();
+						const FCampusNotice* Card = Live ? Live->FindNotice(Key) : nullptr;
+						if (!Card)
+						{
+							return;
+						}
+						if (Card->Kind == ECampusNoticeKind::Invite)
+						{
+							AnswerInvite(Key, true);
+							return;
+						}
+						const FString Who = Card->Sender.PlayerId;
+						Live->ResolveNotice(Key, TEXT("ACCEPTED"));
+						Live->AcceptFriend(Who, [this](bool, const FString&) { Refresh(); });
+					}))
+					.OnReject(FOnCampusNoticeAction::CreateLambda([this](FString Key)
+					{
+						UCampusSocial* Live = Social();
+						const FCampusNotice* Card = Live ? Live->FindNotice(Key) : nullptr;
+						if (!Card)
+						{
+							return;
+						}
+						if (Card->Kind == ECampusNoticeKind::Invite)
+						{
+							AnswerInvite(Key, false);
+							return;
+						}
+						const FString Who = Card->Sender.PlayerId;
+						Live->ResolveNotice(Key, TEXT("DECLINED"));
+						Live->DeclineFriend(Who, [this](bool, const FString&) { Refresh(); });
+					}))
+					.OnOpenTray(FSimpleDelegate::CreateLambda([this]() { Show(EScreen::InviteTray); }))
+				]
+			]
+		]
 		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(0.f, 96.f, 0.f, 0.f)
 		[
 			SNew(SCampusAngularPanel)
@@ -224,6 +350,81 @@ SCampusLobbyWidget::~SCampusLobbyWidget()
 		{
 			Squad->OnChanged.Remove(PartyChangedHandle);
 		}
+	}
+	// The subsystem outlives this widget (it survives level travel), so every handle comes off here or
+	// the next lobby load would fire into a dead `this`.
+	if (UCampusSocial* Live = Social())
+	{
+		Live->OnPartyChanged.Remove(SocialPartyHandle);
+		Live->OnRosterChanged.Remove(SocialRosterHandle);
+		Live->OnStateChanged.Remove(SocialStateHandle);
+		Live->OnNotice.Remove(SocialNoticeHandle);
+		Live->OnRoomReady.Remove(SocialRoomHandle);
+		Live->OnSummaryReady.Remove(SocialSummaryHandle);
+	}
+}
+
+void SCampusLobbyWidget::ShowFloating(TSharedRef<SWidget> Content2, float Width)
+{
+	if (!ConfirmBox.IsValid())
+	{
+		return;
+	}
+	ConfirmBox->SetVisibility(EVisibility::Visible);
+	ConfirmBox->SetContent(
+		SNew(SOverlay)
+		+ SOverlay::Slot()[Backdrop(0.62f)]
+		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
+		[
+			SNew(SBox).WidthOverride(Width)
+			[
+				CampusStyle::Panel(Content2, FMargin(32.f, 24.f), 20.f, true)
+			]
+		]);
+}
+
+void SCampusLobbyWidget::AskConfirm(const FText& Title, const FText& Body, const FText& Yes, TFunction<void()> OnYes)
+{
+	ShowFloating(
+		SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight()[Label(Title, 28, FLinearColor::White)]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 12.f, 0.f, 0.f)
+		[
+			SNew(STextBlock).Text(Body).Font(Font(18, false))
+			.ColorAndOpacity(CampusAngular::TextMuted).AutoWrapText(true)
+		]
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 22.f, 0.f, 0.f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 10.f, 0.f)
+			[
+				Button(LOCTEXT("ConfirmNo", "CANCEL"), FOnClicked::CreateLambda([this]()
+				{
+					CloseConfirm();
+					return FReply::Handled();
+				}), EButton::Ghost, 18, FVector2D(180.f, 56.f))
+			]
+			+ SHorizontalBox::Slot().AutoWidth()
+			[
+				Button(Yes, FOnClicked::CreateLambda([this, OnYes]()
+				{
+					CloseConfirm();
+					if (OnYes)
+					{
+						OnYes();
+					}
+					return FReply::Handled();
+				}), EButton::Accent, 18, FVector2D(230.f, 56.f))
+			]
+		], 680.f);
+}
+
+void SCampusLobbyWidget::CloseConfirm()
+{
+	if (ConfirmBox.IsValid())
+	{
+		ConfirmBox->SetContent(SNullWidget::NullWidget);
+		ConfirmBox->SetVisibility(EVisibility::SelfHitTestInvisible);
 	}
 }
 
@@ -273,6 +474,32 @@ void SCampusLobbyWidget::Tick(const FGeometry& AllottedGeometry, const double In
 	{
 		Show(EScreen::AdultConfirm);
 		return;
+	}
+
+	// The post-match screen's own clock: CONTINUE arms at 1.5 s so nobody blind-taps through it, and
+	// it lets go at 12 s - longer than that and the player feels held hostage.
+	if (Current == EScreen::Summary)
+	{
+		SummaryTime += InDeltaTime;
+		if (SummaryTime > 12.f)
+		{
+			SummaryData.Reset();
+			Show(EScreen::Lobby);
+			return;
+		}
+	}
+
+	// A match just ended: open PLAYER OF THE MATCH as soon as we are back on the lobby. The room code
+	// comes from match.summary_ready when the socket is up, and from the match we just left when it
+	// is not - so the screen shows either way.
+	if (UCampusSocial* Live = Social(); Live && Current == EScreen::Lobby && !SummaryData.IsValid()
+		&& !Live->PendingSummaryRoom().IsEmpty() && !bBusy)
+	{
+		const FString Code = Live->PendingSummaryRoom();
+		// One attempt per code: roomSummary() only exists once the HOST has reported the result, and
+		// a retry loop here would poll a metered tunnel.
+		Live->ClearPendingSummary();
+		OpenSummary(Code);
 	}
 
 	// The login streak popup: once per game day, and only on the lobby itself, so it can never land
@@ -342,6 +569,28 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	case EScreen::AdultConfirm: Body = BuildAdultConfirm(); break;
 	case EScreen::CollegePick: Body = BuildCollegePick(); break;
 	case EScreen::MapSelect: Body = BuildMapSelect(); break;
+	case EScreen::Friends: Body = BuildFriends(); break;
+	case EScreen::FriendPick: Body = BuildFriendPick(); break;
+	case EScreen::InviteTray: Body = BuildInviteTray(); break;
+	case EScreen::Profile: Body = BuildProfile(); break;
+	case EScreen::Summary: Body = BuildSummary(); break;
+	}
+
+	// An invite that lands while the Store is open, or while the profile page is up, MUST still be
+	// answerable - that is the whole reason the stack sits above the busy scrim. The only screens
+	// that suppress it are the ones before there is an account to invite: there they queue in the
+	// subsystem and are re-evaluated on the way in, dropping anything whose clock ran out.
+	if (UCampusSocial* Live = Social())
+	{
+		const bool bSignedInScreen = Screen != EScreen::Splash && Screen != EScreen::Agreement
+			&& Screen != EScreen::LoginChoice && Screen != EScreen::EmailLogin && Screen != EScreen::Register
+			&& Screen != EScreen::Nickname && Screen != EScreen::AdultConfirm;
+		Live->SetNoticesVisible(bSignedInScreen);
+	}
+	// Leaving the profile page gives the 3D scene back to the line-up.
+	if (Screen != EScreen::Profile && Controller.IsValid())
+	{
+		Controller->FocusProfile(false);
 	}
 	Content->SetContent(Body);
 }
@@ -420,6 +669,19 @@ void SCampusLobbyWidget::AfterSignIn()
 	// One round trip for streak + missions + the weekend board, and any Play purchase that was
 	// paid but never credited (an app killed mid-purchase) is pushed to the server now.
 	RefreshEngagement();
+	// The social channel, and the ONE read that makes the top bar's level true (migration 013). Both
+	// are cheap and both happen once per sign-in, never on a timer.
+	if (UCampusSocial* Live = Social())
+	{
+		Live->Start();
+		Live->LoadProfile(FString(), [this](bool bOk, const FString&, const FCampusProfile&)
+		{
+			if (bOk && (Current == EScreen::Lobby || Current == EScreen::Profile))
+			{
+				Refresh();
+			}
+		});
+	}
 	if (UCampusPlayBilling* Billing = Controller.IsValid() && Controller->GetGameInstance()
 		? Controller->GetGameInstance()->GetSubsystem<UCampusPlayBilling>() : nullptr)
 	{
@@ -897,11 +1159,12 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildNickname()
 TSharedRef<SWidget> SCampusLobbyWidget::BuildTopBar()
 {
 	const UCampusBackend* Api = Backend();
-	const UCampusSave* Save = Profile();
 	const FString Name = Api && !Api->PlayerName.IsEmpty() ? Api->PlayerName : TEXT("GUEST");
-	const int32 Level = Save ? Save->GetLevel() : 1;
-	// XP inside the current level (GetLevel() is 1 + Xp / 500).
-	const float LevelProgress = Save ? float(Save->Xp % 500) / 500.f : 0.f;
+	// Level and XP are the SERVER's (migration 013), cached in the save for an instant first paint.
+	// There is no local formula any more: a level the phone invents is a level two players can hold
+	// up side by side and disagree about, and the squad plates printed that same guess for everybody.
+	const int32 Level = Api ? Api->Level : 1;
+	const float LevelProgress = Api ? Api->LevelFraction() : 0.f;
 
 	// Avatar + name + level + XP bar, the whole plate taps through to the profile.
 	TSharedRef<SWidget> Identity = SNew(SCampusAngularButton)
@@ -912,7 +1175,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildTopBar()
 		.AccentEdge(CampusAngular::Accent)
 		.AccentEdgeWidth(5.f)
 		.ContentPadding(FMargin(16.f, 8.f, 22.f, 8.f))
-		.OnClicked(FOnClicked::CreateLambda([this]() { Show(EScreen::Account); return FReply::Handled(); }))
+		// Tapping your own plate now opens the PROFILE PAGE, not the settings dialog. The settings are
+		// still one tap away from it (EDIT), so nothing that worked before was taken away.
+		.OnClicked(FOnClicked::CreateLambda([this]() { OpenProfile(FString()); return FReply::Handled(); }))
 		[
 			SNew(SHorizontalBox)
 			// Avatar: a clipped-corner plate with the level number, until there are portraits.
@@ -993,13 +1258,33 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildTopBar()
 		// Friends, mail, settings gear - the Free Fire corner cluster.
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(18.f, 0.f, 0.f, 0.f)
 		[
-			CampusStyle::IconButton(CampusAngular::EGlyph::Friends, FOnClicked::CreateLambda([this]()
-			{
-				// No friends list in the API yet; the room code is the real invite channel.
-				Toast(TEXT("Friends list is coming. Invite with a room code for now."));
-				Show(EScreen::Rooms);
-				return FReply::Handled();
-			}), 58.f)
+			SNew(SOverlay)
+			+ SOverlay::Slot()
+			[
+				CampusStyle::IconButton(CampusAngular::EGlyph::Friends, FOnClicked::CreateLambda([this]()
+				{
+					FriendTab = EFriendTab::Friends;
+					FriendsReturn = EScreen::Lobby;
+					// One read on open, never a poll: the push is a live top-up, not the source.
+					if (UCampusSocial* Live = Social())
+					{
+						Live->RefreshFriends([this](bool, const FString&)
+						{
+							if (Current == EScreen::Friends)
+							{
+								Refresh();
+							}
+						});
+					}
+					Show(EScreen::Friends);
+					return FReply::Handled();
+				}), 58.f)
+			]
+			// A COUNT, not a bare dot: "2 waiting" is actionable, "something is here" is not.
+			+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(0.f, -6.f, -6.f, 0.f)
+			[
+				FriendRequestBadge()
+			]
 		]
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(8.f, 0.f, 0.f, 0.f)
 		[
@@ -1130,50 +1415,120 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildNamePlate(const FCampusPartyMember&
 		];
 	}
 
-	return SNew(SCampusAngularPanel)
-		.Shape(FCampusShape::Wedge(14.f, 10.f))
-		.Fill(Member.bAccepted ? FLinearColor(0.015f, 0.02f, 0.03f, 0.88f) : FLinearColor(0.015f, 0.02f, 0.03f, 0.45f))
-		.Border(Edge)
-		.BorderWidth(Member.bLeader ? 2.f : 1.f)
-		.AccentEdge(Edge)
-		.AccentEdgeWidth(4.f)
-		.ContentPadding(FMargin(18.f, 7.f, 14.f, 7.f))
+	// A member of a REAL party is somebody you can look up: the plate taps through to their profile.
+	// A plate from the AdoptSquad fallback has no player id, so it stays a plain panel.
+	TSharedRef<SWidget> Body = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 		[
-			SNew(SVerticalBox)
-			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+			// CAPPED. The plate is anchored at a screen FRACTION so it sits under its own 3D
+			// character; its WIDTH, though, grows with the name, and at Squad (4) the right-hand
+			// plate is the one that would eventually reach the mode plate / START column. Clipping
+			// at 150 makes that impossible at any name length without moving the plate off its
+			// character - which is the one thing this row may never do.
+			SNew(SBox).MaxDesiredWidth(150.f)
 			[
 				SNew(STextBlock)
 				.Text(FText::FromString(Member.Name.ToUpper()))
 				.Font(CampusAngular::Display(19))
 				.ColorAndOpacity(Member.bAccepted ? FLinearColor::White : FLinearColor(1.f, 1.f, 1.f, 0.5f))
+				.Clipping(EWidgetClipping::ClipToBounds)
 			]
-			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 2.f, 0.f, 0.f)
+		]
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 2.f, 0.f, 0.f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[Badges]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[Badges]
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-				[
-					SNew(STextBlock)
-					.Text(Member.bAccepted
-						? FText::Format(LOCTEXT("PlateLevel", "LV {0}"), FText::AsNumber(Member.Level))
-						: LOCTEXT("PlateWaiting", "INVITED"))
-					.Font(CampusAngular::Display(13))
-					.ColorAndOpacity(CampusAngular::TextMuted)
-				]
+				SNew(STextBlock)
+				.Text(Member.bAccepted
+					? FText::Format(LOCTEXT("PlateLevel", "LV {0}"), FText::AsNumber(Member.Level))
+					: LOCTEXT("PlateWaiting", "INVITED"))
+				.Font(CampusAngular::Display(13))
+				.ColorAndOpacity(CampusAngular::TextMuted)
 			]
+			// The presence dot: a squadmate who is still in a match is worth seeing before START.
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.f, 0.f, 0.f, 0.f)
+			[
+				Member.Presence == TEXT("match")
+					? StaticCastSharedRef<SWidget>(SNew(STextBlock).Text(LOCTEXT("PlateInMatch", "· IN MATCH"))
+						.Font(CampusAngular::Display(11)).ColorAndOpacity(Accent))
+					: SNullWidget::NullWidget
+			]
+		];
+
+	const FLinearColor Fill = Member.bAccepted
+		? FLinearColor(0.015f, 0.02f, 0.03f, 0.88f)
+		: FLinearColor(0.015f, 0.02f, 0.03f, 0.45f);
+	if (Member.PlayerId.IsEmpty() || !Member.bAccepted)
+	{
+		return SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Wedge(14.f, 10.f))
+			.Fill(Fill)
+			.Border(Edge)
+			.BorderWidth(Member.bLeader ? 2.f : 1.f)
+			.AccentEdge(Edge)
+			.AccentEdgeWidth(4.f)
+			.ContentPadding(FMargin(18.f, 7.f, 14.f, 7.f))
+			[
+				Body
+			];
+	}
+	const FString Who = Member.PlayerId;
+	return SNew(SCampusAngularButton)
+		.Shape(FCampusShape::Wedge(14.f, 10.f))
+		.Fill(Fill)
+		.Border(Edge)
+		.BorderWidth(Member.bLeader ? 2.f : 1.f)
+		.AccentEdge(Edge)
+		.AccentEdgeWidth(4.f)
+		.ContentPadding(FMargin(18.f, 7.f, 14.f, 7.f))
+		.OnClicked(FOnClicked::CreateLambda([this, Who]()
+		{
+			OpenProfile(Who);
+			return FReply::Handled();
+		}))
+		[
+			Body
 		];
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildInvitePlate()
 {
-	// An empty slot: tap to invite. Room codes are the only invite channel the API has today.
+	// An empty slot: tap to invite. This used to open the room-code screen because the API had no
+	// invite channel; now it opens the friend picker, and one tap there puts a card on their phone.
 	return SNew(SCampusAngularButton)
 		.Shape(FCampusShape::Wedge(14.f, 10.f))
 		.Fill(FLinearColor(0.f, 0.f, 0.f, 0.35f))
 		.Border(FLinearColor(1.f, 1.f, 1.f, 0.22f))
 		.BorderWidth(1.f)
 		.ContentPadding(FMargin(14.f, 10.f))
-		.OnClicked(FOnClicked::CreateLambda([this]() { Show(EScreen::Rooms); return FReply::Handled(); }))
+		.OnClicked(FOnClicked::CreateLambda([this]()
+		{
+			UCampusSocial* Live = Social();
+			if (!Live)
+			{
+				// No social subsystem at all (a build without it): the room code still works.
+				Show(EScreen::Rooms);
+				return FReply::Handled();
+			}
+			// A member cannot invite - the server would answer 409 NOT_PARTY_LEADER - so say who can.
+			if (Live->HasParty() && !Live->IsPartyLeader())
+			{
+				Toast(FString::Printf(TEXT("%s LEADS THIS SQUAD. ONLY THEY CAN INVITE."),
+					*Live->GetServerParty().LeaderName().ToUpper()));
+				return FReply::Handled();
+			}
+			Live->RefreshFriends([this](bool, const FString&)
+			{
+				if (Current == EScreen::FriendPick)
+				{
+					Refresh();
+				}
+			});
+			Show(EScreen::FriendPick);
+			return FReply::Handled();
+		}))
 		[
 			SNew(SVerticalBox)
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
@@ -1230,27 +1585,147 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSquadRow()
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
 {
+	UCampusSocial* Live = Social();
+	const bool bInParty = Live && Live->HasParty();
+	const bool bLeads = !bInParty || Live->IsPartyLeader();
+	// With a server party the SIZE OF THE ROW IS THE SERVER'S: the chips show the party's mode, the
+	// leader's tap goes through PATCH /v1/parties/me, and SetCapacity only follows party.mode_changed.
+	const int32 Shown = bInParty ? Live->GetServerParty().Mode : SelectedTeamSize;
+
+	// A MEMBER GETS ONE READ-ONLY PLATE, NOT THREE DEAD PILLS. Three greyed-out chips are three tap
+	// targets that do nothing, and the caption explaining them has nowhere to go that does not land on
+	// the squad plates. One plate says the same thing in a third of the width.
+	if (bInParty && !bLeads)
+	{
+		return SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 8.f)
+			[
+				SNew(SBox).HeightOverride(46.f)
+				[
+					SNew(SCampusAngularPanel)
+					.Shape(FCampusShape::Slanted(12.f))
+					.Fill(FLinearColor(0.02f, 0.03f, 0.04f, 0.8f))
+					.Border(CampusAngular::Hairline)
+					.BorderWidth(1.f)
+					.ContentPadding(FMargin(18.f, 4.f))
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(Shown == 2 ? LOCTEXT("ModeDuo", "DUO") : LOCTEXT("ModeSquad", "SQUAD"))
+							.Font(CampusAngular::Display(18)).ColorAndOpacity(Accent)
+						]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(12.f, 2.f, 0.f, 0.f)
+						[
+							SNew(STextBlock).Text(LOCTEXT("LeaderPicks", "LEADER PICKS"))
+							.Font(CampusAngular::Display(12)).ColorAndOpacity(CampusAngular::TextMuted)
+						]
+					]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)[BuildModePlate()];
+	}
+
 	TSharedRef<SHorizontalBox> TeamRow = SNew(SHorizontalBox);
 	for (const FTeamDef& Team : Teams)
 	{
 		const int32 Size = Team.Size;
 		TeamRow->AddSlot().AutoWidth().Padding(4.f, 0.f)
 		[
-			CampusStyle::Pill(FText::FromString(FString(Team.Name).ToUpper()), SelectedTeamSize == Size,
-				FOnClicked::CreateLambda([this, Size]()
-				{
-					SelectedTeamSize = Size;
-					SaveMatchChoice();
-					// The squad row and the 3D line-up follow the chosen size straight away.
-					SyncParty();
-					Refresh();
-					return FReply::Handled();
-				}), FVector2D(136.f, 46.f))
+			SNew(SBox).IsEnabled(bLeads)
+			[
+				CampusStyle::Pill(FText::FromString(FString(Team.Name).ToUpper()), Shown == Size,
+					FOnClicked::CreateLambda([this, Size]()
+					{
+						UCampusSocial* Live2 = Social();
+						if (Live2 && Live2->HasParty())
+						{
+							if (Size <= 1)
+							{
+								// SOLO is not a mode value: it is the ABSENCE of a party. So it is a
+								// confirm-and-leave, never a silent disband behind the player's back.
+								AskConfirm(LOCTEXT("SoloTitle", "LEAVE YOUR SQUAD?"),
+									LOCTEXT("SoloBody", "SOLO MEANS PLAYING ON YOUR OWN. YOUR SQUAD WILL BE DISBANDED."),
+									LOCTEXT("SoloYes", "GO SOLO"),
+									[this]()
+									{
+										if (UCampusSocial* Live3 = Social())
+										{
+											Live3->LeaveParty([this](bool bOk, const FString& Error)
+											{
+												if (!bOk)
+												{
+													Toast(Error);
+												}
+												SelectedTeamSize = 1;
+												SaveMatchChoice();
+												SyncParty();
+												Refresh();
+											});
+										}
+									});
+								return FReply::Handled();
+							}
+							Live2->SetPartyMode(Size, [this](bool bOk, const FString& Error)
+							{
+								if (!bOk)
+								{
+									// 409 PARTY_TOO_LARGE: a silent kick-to-fit is the worst possible
+									// behaviour, so the leader is told and kicks explicitly instead.
+									Toast(Error);
+								}
+								Refresh();
+							});
+							return FReply::Handled();
+						}
+						SelectedTeamSize = Size;
+						SaveMatchChoice();
+						// The squad row and the 3D line-up follow the chosen size straight away.
+						SyncParty();
+						Refresh();
+						return FReply::Handled();
+					}), FVector2D(136.f, 46.f))
+			]
 		];
 	}
-	return SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
-		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 8.f)[TeamRow]
-		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)[BuildModePlate()];
+
+	TSharedRef<SVerticalBox> Column = SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible);
+	Column->AddSlot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 8.f)[TeamRow];
+	Column->AddSlot().AutoHeight().HAlign(HAlign_Right)[BuildModePlate()];
+	return Column;
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildStartButton()
+{
+	UCampusSocial* Live = Social();
+	if (Live && Live->HasParty() && !Live->IsPartyLeader())
+	{
+		// A member cannot start their own room out from under the squad: they would spend a Room Card
+		// and leave everyone else standing in the lobby.
+		const FString LeaderName = Live->GetServerParty().LeaderName().ToUpper();
+		return SNew(SBox).IsEnabled(false).MinDesiredWidth(300.f).MinDesiredHeight(96.f)
+			[
+				SNew(SCampusAngularPanel)
+				.Shape(FCampusShape::Wedge(28.f, 20.f))
+				.Fill(FLinearColor(1.f, 1.f, 1.f, 0.08f))
+				.Border(CampusAngular::Hairline)
+				.BorderWidth(1.f)
+				.ContentPadding(FMargin(26.f, 8.f))
+				[
+					SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(FText::Format(LOCTEXT("WaitingForLeader", "WAITING FOR {0}"), FText::FromString(LeaderName)))
+						.Font(CampusAngular::Display(24))
+						.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.6f))
+						.Justification(ETextJustify::Center)
+					]
+				]
+			];
+	}
+	return CampusStyle::StartButton(LOCTEXT("Start", "START"),
+		FOnClicked::CreateLambda([this]() { Show(EScreen::Rooms); return FReply::Handled(); }), FVector2D(300.f, 96.f));
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
@@ -1275,6 +1750,14 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 				[
 					SNew(SBox).Visibility(EVisibility::HitTestInvisible)[CampusAngular::Logo(40)]
 				]
+				// The right-edge friends strip: the reference's pre-START invite rail, sitting directly
+				// above the mode chips. Anchored to the BOTTOM rather than the top on purpose - the
+				// notice stack owns the top-right corner, and a permanent list under transient cards
+				// is the one arrangement that would annoy twice.
+				+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 190.f)
+				[
+					BuildLobbyFriends()
+				]
 				// Slanted menu tabs down the left, with the weekend board under them.
 				+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(0.f, 20.f, 0.f, 0.f)
 				[
@@ -1292,20 +1775,24 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 				[
 					BuildSquadRow()
 				]
-				+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 86.f)
+				// The squad strip and the drag hint share ONE column anchored to the bottom, so they
+				// can never land on top of each other however tall the strip gets - and the whole
+				// column clears the plate row above it (which ends 108 up).
+				+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 14.f)
 				[
-					Label(LOCTEXT("DragHint", "DRAG TO TURN"), 14, FLinearColor(1.f, 1.f, 1.f, 0.35f))
+					SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)[BuildPartyBar()]
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 8.f, 0.f, 0.f)
+					[
+						Label(LOCTEXT("DragHint", "DRAG TO TURN"), 14, FLinearColor(1.f, 1.f, 1.f, 0.35f))
+					]
 				]
 				// Bottom right: mode chips above the yellow slanted START.
 				+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom)
 				[
 					SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
 					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 12.f)[BuildModeSelect()]
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
-					[
-						CampusStyle::StartButton(LOCTEXT("Start", "START"),
-							FOnClicked::CreateLambda([this]() { Show(EScreen::Rooms); return FReply::Handled(); }), FVector2D(300.f, 96.f))
-					]
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)[BuildStartButton()]
 				]
 			]
 		];
@@ -2448,7 +2935,12 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildRooms()
 				{
 					if (Controller.IsValid())
 					{
-						Busy(TEXT("Creating room..."));
+						// Say what is actually happening: a leader's squad is pulled in behind the
+						// room, and that second round trip is worth naming on the busy overlay.
+						const UCampusSocial* Live = Social();
+						Busy(Live && Live->HasParty() && Live->IsPartyLeader()
+							? TEXT("Pulling your squad in...")
+							: TEXT("Creating room..."));
 						Controller->HostRoom([this](const FString& Error) { Done(false, Error); });
 					}
 					return FReply::Handled();
@@ -2565,7 +3057,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildAccount()
 			Label(LOCTEXT("GuestLogoutWarn", "Guest: logging out or reinstalling loses this account unless you register first."), 15, Danger, false)
 		];
 	}
-	return Dialog(LOCTEXT("AccountTitle", "PROFILE"), Body, 860.f, true, EScreen::Lobby);
+	// Named ACCOUNT, not PROFILE: the profile PAGE is the new full-screen identity sheet, and two
+	// screens with the same title is how a player stops trusting either of them.
+	return Dialog(LOCTEXT("AccountTitle", "ACCOUNT"), Body, 860.f, true, EScreen::Lobby);
 }
 
 #undef LOCTEXT_NAMESPACE

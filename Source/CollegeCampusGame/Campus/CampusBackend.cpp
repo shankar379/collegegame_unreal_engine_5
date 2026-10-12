@@ -159,6 +159,43 @@ void UCampusBackend::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 	HeartbeatHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateUObject(this, &UCampusBackend::HeartbeatTick), HeartbeatSeconds);
+	// The server's last word on level / XP, so the top bar paints a true number on the first frame
+	// instead of a 1 that jumps when the profile response lands.
+	if (const UCampusSave* Profile = Save())
+	{
+		Level = FMath::Max(1, Profile->ServerLevel);
+		XpIntoLevel = FMath::Max(0, Profile->ServerXpInto);
+		XpForNext = FMath::Max(0, Profile->ServerXpForNext);
+	}
+}
+
+void UCampusBackend::ApplyProgress(int32 InLevel, int32 InXpInto, int32 InXpForNext, int32 InLevelMax)
+{
+	Level = FMath::Max(1, InLevel);
+	XpIntoLevel = FMath::Max(0, InXpInto);
+	XpForNext = FMath::Max(0, InXpForNext);
+	LevelMax = FMath::Max(Level, InLevelMax);
+	if (UCampusSave* Profile = Save())
+	{
+		Profile->ServerLevel = Level;
+		Profile->ServerXpInto = XpIntoLevel;
+		Profile->ServerXpForNext = XpForNext;
+		Profile->Persist();
+	}
+}
+
+void UCampusBackend::CallApi(const FString& Verb, const FString& Path, TSharedPtr<FJsonObject> Body, bool bIdempotent, FJsonDone Done)
+{
+	Request(Verb, Path, Body, true, bIdempotent, [Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		// 2xx is the whole success test: 201 (invite created), 204 (left the squad, no body) and 200 all
+		// mean the call worked, and the caller reads whatever shape it asked for out of Json.
+		const bool bOk = Status >= 200 && Status < 300;
+		if (Done)
+		{
+			Done(bOk, bOk ? FString() : ErrorText(Status, Json), Json);
+		}
+	});
 }
 
 void UCampusBackend::Deinitialize()
@@ -418,6 +455,7 @@ void UCampusBackend::AcceptSession(TSharedPtr<FJsonObject> Json)
 
 void UCampusBackend::ReadPlayer(TSharedPtr<FJsonObject> Player)
 {
+	PublicId = Str(Player, TEXT("public_id"));
 	if (!Player.IsValid())
 	{
 		return;

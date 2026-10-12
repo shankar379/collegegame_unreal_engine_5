@@ -27,6 +27,20 @@ public class CollegeCampusGame : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "OnlineSubsystem", "OnlineSubsystemUtils" });
 
+		// FPlatformApplicationMisc::ClipboardCopy - the profile page's COPY (player ID) and SHARE.
+		// Slate pulls ApplicationCore in only when bCompileAgainstApplicationCore is set, so naming it
+		// here is what actually links the symbol (otherwise: LNK2019 ClipboardCopy, module-wide).
+		PrivateDependencyModuleNames.Add("ApplicationCore");
+
+		// Campus/CampusSocial.cpp holds ONE WebSocket to /v1/social/ws for invites, party roster and
+		// presence. It is not a nicety: the API lives behind an ngrok free tunnel metered at 20,000 HTTP
+		// requests a MONTH, and a 15-second poll would burn that in four hours with twenty testers, while
+		// a socket costs one request per connection and makes heartbeats and acks free frames
+		// (docs/SOCIAL_PARTY_DESIGN.md §3.4). libWebSockets ships prebuilt for Android arm64, so this is
+		// one line; everything that touches IWebSocket is still behind #if WITH_WEBSOCKETS so a platform
+		// without it compiles and falls back to GET /v1/social/events.
+		PrivateDependencyModuleNames.Add("WebSockets");
+
 		// Campus/CampusMapArt.cpp decodes the map-select banner PNGs at runtime (they ship as loose
 		// UFS files, see DefaultGame.ini) instead of cooking a texture asset per picture.
 		PrivateDependencyModuleNames.Add("ImageWrapper");

@@ -348,7 +348,65 @@ namespace CampusAngular
 			Line(Out, Layer, Geometry, { At(-R * 0.6f, 0.f), At(-R * 0.16f, R * 0.46f), At(R * 0.64f, -R * 0.5f) }, Color, T * 1.5f);
 			break;
 		}
+		case EGlyph::Skull:
+		{
+			// Dome over a jaw, with two eye sockets: the deaths cell on the stats strip.
+			Arc(Out, Layer, Geometry, At(0.f, -R * 0.12f), R * 0.72f, UE_PI, UE_TWO_PI, 12, Color, T);
+			Line(Out, Layer, Geometry, { At(-R * 0.72f, -R * 0.12f), At(-R * 0.72f, R * 0.3f), At(-R * 0.34f, R * 0.3f),
+				At(-R * 0.34f, R * 0.66f), At(R * 0.34f, R * 0.66f), At(R * 0.34f, R * 0.3f),
+				At(R * 0.72f, R * 0.3f), At(R * 0.72f, -R * 0.12f) }, Color, T);
+			Arc(Out, Layer, Geometry, At(-R * 0.32f, -R * 0.14f), R * 0.17f, 0.f, UE_TWO_PI, 8, Color, T * 0.9f);
+			Arc(Out, Layer, Geometry, At(R * 0.32f, -R * 0.14f), R * 0.17f, 0.f, UE_TWO_PI, 8, Color, T * 0.9f);
+			break;
 		}
+		case EGlyph::Target:
+		{
+			// Two rings and a cross-hair: headshots and accuracy.
+			Arc(Out, Layer, Geometry, Center, R * 0.86f, 0.f, UE_TWO_PI, 16, Color, T);
+			Arc(Out, Layer, Geometry, Center, R * 0.34f, 0.f, UE_TWO_PI, 10, Color, T);
+			Line(Out, Layer, Geometry, { At(-R, 0.f), At(-R * 0.58f, 0.f) }, Color, T);
+			Line(Out, Layer, Geometry, { At(R * 0.58f, 0.f), At(R, 0.f) }, Color, T);
+			Line(Out, Layer, Geometry, { At(0.f, -R), At(0.f, -R * 0.58f) }, Color, T);
+			Line(Out, Layer, Geometry, { At(0.f, R * 0.58f), At(0.f, R) }, Color, T);
+			break;
+		}
+		case EGlyph::Trophy:
+		{
+			// Cup, handles, stem, base: wins and MVP.
+			Line(Out, Layer, Geometry, { At(-R * 0.52f, -R * 0.74f), At(R * 0.52f, -R * 0.74f), At(R * 0.36f, R * 0.08f),
+				At(-R * 0.36f, R * 0.08f), At(-R * 0.52f, -R * 0.74f) }, Color, T);
+			Arc(Out, Layer, Geometry, At(-R * 0.56f, -R * 0.4f), R * 0.3f, UE_PI * 0.5f, UE_PI * 1.5f, 8, Color, T * 0.9f);
+			Arc(Out, Layer, Geometry, At(R * 0.56f, -R * 0.4f), R * 0.3f, UE_PI * 1.5f, UE_PI * 2.5f, 8, Color, T * 0.9f);
+			Line(Out, Layer, Geometry, { At(0.f, R * 0.08f), At(0.f, R * 0.52f) }, Color, T);
+			Line(Out, Layer, Geometry, { At(-R * 0.54f, R * 0.84f), At(R * 0.54f, R * 0.84f) }, Color, T * 1.3f);
+			Line(Out, Layer, Geometry, { At(-R * 0.3f, R * 0.52f), At(R * 0.3f, R * 0.52f) }, Color, T);
+			break;
+		}
+		case EGlyph::Heart:
+		{
+			// Two lobes over a point: likes. Angular enough to sit beside the rest of this set.
+			Arc(Out, Layer, Geometry, At(-R * 0.37f, -R * 0.26f), R * 0.38f, UE_PI * 0.92f, UE_TWO_PI * 1.02f, 10, Color, T);
+			Arc(Out, Layer, Geometry, At(R * 0.37f, -R * 0.26f), R * 0.38f, UE_PI * 0.98f, UE_TWO_PI * 1.08f, 10, Color, T);
+			Line(Out, Layer, Geometry, { At(-R * 0.74f, -R * 0.2f), At(0.f, R * 0.8f), At(R * 0.74f, -R * 0.2f) }, Color, T);
+			break;
+		}
+		}
+	}
+
+	EGlyph GlyphFromName(const FString& Name)
+	{
+		// The milestone catalogue stores a glyph NAME, never a texture path, so a new badge is one
+		// server row and no client build. An unknown name falls back rather than failing to draw.
+		static const TMap<FString, EGlyph> ByName = {
+			{ TEXT("gear"), EGlyph::Gear }, { TEXT("mail"), EGlyph::Mail }, { TEXT("friends"), EGlyph::Friends },
+			{ TEXT("plus"), EGlyph::Plus }, { TEXT("rank"), EGlyph::Rank }, { TEXT("coin"), EGlyph::Coin },
+			{ TEXT("gem"), EGlyph::Gem }, { TEXT("wifi"), EGlyph::Wifi }, { TEXT("crown"), EGlyph::Crown },
+			{ TEXT("lock"), EGlyph::Lock }, { TEXT("clock"), EGlyph::Clock }, { TEXT("tick"), EGlyph::Tick },
+			{ TEXT("skull"), EGlyph::Skull }, { TEXT("target"), EGlyph::Target }, { TEXT("trophy"), EGlyph::Trophy },
+			{ TEXT("heart"), EGlyph::Heart },
+		};
+		const EGlyph* Found = ByName.Find(Name.ToLower());
+		return Found ? *Found : EGlyph::Rank;
 	}
 
 	void DrawShapedImage(FSlateWindowElementList& Out, int32 Layer, const FGeometry& Geometry,
@@ -540,14 +598,21 @@ int32 SCampusAngularButton::OnPaint(const FPaintArgs& Args, const FGeometry& All
 	}
 	else if (bPressed)
 	{
-		Face = Face * FLinearColor(0.78f, 0.78f, 0.78f, 1.f);
-		Face.A = Fill.A;
+		// A MULTIPLY ALONE IS INVISIBLE ON THE NEAR-TRANSPARENT PLATES THE LISTS USE: a row filled
+		// with 3 % white hovers to 3.5 %, which no eye reads as a state change. So each state moves
+		// the fill additively as well, and nudges the alpha - that delta is visible on a 3 % row AND
+		// on a solid accent button, which is the whole point of having one primitive.
+		Face = Face * FLinearColor(0.80f, 0.80f, 0.80f, 1.f) - FLinearColor(0.02f, 0.02f, 0.02f, 0.f);
+		Face.A = FMath::Clamp(Fill.A + 0.10f, 0.f, 1.f);
 	}
 	else if (bHovered)
 	{
-		Face = Face * FLinearColor(1.18f, 1.18f, 1.18f, 1.f);
-		Face.A = Fill.A;
+		Face = Face * FLinearColor(1.12f, 1.12f, 1.12f, 1.f) + FLinearColor(0.05f, 0.05f, 0.06f, 0.f);
+		Face.A = FMath::Clamp(Fill.A + 0.07f, 0.f, 1.f);
 	}
+	Face.R = FMath::Max(Face.R, 0.f);
+	Face.G = FMath::Max(Face.G, 0.f);
+	Face.B = FMath::Max(Face.B, 0.f);
 
 	const FVector2f Size = AllottedGeometry.GetLocalSize();
 	CampusAngular::DrawSlantedPanel(OutDrawElements, LayerId, AllottedGeometry, FVector2f::ZeroVector, Size, Shape,

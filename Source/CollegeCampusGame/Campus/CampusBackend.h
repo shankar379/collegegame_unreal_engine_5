@@ -297,6 +297,31 @@ public:
 	 *  cached wallet here is already updated; Json is the whole response body for anything else the caller wants. */
 	void VerifyGooglePurchase(const FString& ProductId, const FString& PurchaseToken, FJsonDone Done);
 
+	// ---- the social / profile surface (UCampusSocial owns the calls; this is the transport)
+	/** One authenticated API call with the full response body. Everything UCampusSocial does goes through
+	 *  here rather than FHttpModule, so the access-token refresh, the 18+ replay, the ngrok header and the
+	 *  error text stay in ONE place. bIdempotent adds an Idempotency-Key, which every mutation needs. */
+	void CallApi(const FString& Verb, const FString& Path, TSharedPtr<FJsonObject> Body, bool bIdempotent, FJsonDone Done);
+
+	/** The bearer for the social WebSocket's upgrade headers. Empty when signed out. */
+	const FString& GetAccessToken() const { return AccessToken; }
+
+	/** The API base the HTTP client is actually using (after the ini quote / "//" defences). */
+	FString ApiBaseUrl() const { return ApiBase(); }
+
+	/** The one player-facing sentence for a status + error body, shared with UCampusSocial. */
+	static FString DescribeError(int32 Status, TSharedPtr<FJsonObject> Json) { return ErrorText(Status, Json); }
+
+	/** Server-side level and XP (migration 013). Painted from the save until GET /me/profile lands; NEVER
+	 *  computed on the phone - see the note in CampusSave.h. */
+	void ApplyProgress(int32 InLevel, int32 InXpInto, int32 InXpForNext, int32 InLevelMax);
+	int32 Level = 1;
+	int32 XpIntoLevel = 0;
+	int32 XpForNext = 0;
+	int32 LevelMax = 60;
+	/** 0..1 through the current level, for the top bar's XP sliver. MAX level reads as full. */
+	float LevelFraction() const { return XpForNext > 0 ? FMath::Clamp(float(XpIntoLevel) / float(XpForNext), 0.f, 1.f) : 1.f; }
+
 	// ---- rooms
 	/** Spends 1 Room Card; this phone becomes the host (listen server) of the returned room.
 	 *  EosPuid is this phone's EOS ProductUserId when it can host over EOS P2P (internet play), so
@@ -314,6 +339,9 @@ public:
 
 	// ---- cached state (valid after the calls above)
 	FString PlayerId;
+	/** The readable 9-10 digit account number a player reads out to a friend. Empty on a server that
+	 *  predates it, in which case the UI falls back to the uuid's short form. */
+	FString PublicId;
 	FString PlayerName;
 	FString Email;
 	FString RollNo;

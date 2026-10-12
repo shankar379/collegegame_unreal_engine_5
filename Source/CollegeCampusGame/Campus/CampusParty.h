@@ -32,6 +32,23 @@ struct FCampusPartyMember
 	bool bLeader = false;
 	/** False = invited but has not accepted yet; drawn dimmed, no character spawned. */
 	bool bAccepted = true;
+
+	/** The server's player id, set for every member of a real party (migration 012). Identity is this,
+	 *  never Name: two students may pick the same nickname, and kick needs an id anyway. Empty on the
+	 *  AdoptSquad path, where all the lobby has is a replicated display name. */
+	FString PlayerId;
+
+	/** menu | lobby | match | offline, from the party view. Empty on the AdoptSquad path. */
+	FString Presence;
+
+	/** The pending invite behind an INVITED plate, so the leader can cancel it. */
+	FString InviteId;
+
+	/** Same plate, by id when there is one and by name otherwise. */
+	bool Is(const FCampusPartyMember& Other) const
+	{
+		return !PlayerId.IsEmpty() && !Other.PlayerId.IsEmpty() ? PlayerId == Other.PlayerId : Name == Other.Name;
+	}
 };
 
 UCLASS()
@@ -64,8 +81,13 @@ public:
 	/** Drops everyone but the leader. */
 	void ClearGuests();
 
-	/** Replaces the whole roster (for a future API party feed). The leader entry is kept. */
-	void ApplyRoster(const TArray<FCampusPartyMember>& InMembers);
+	/** Replaces the whole roster from the API party feed (GET /v1/parties/me and every party.* event).
+	 *
+	 *  bAuthoritative = the list is the server's and already contains ME, with the server's own
+	 *  leader flag - so it replaces the roster wholesale. Without it the local leader entry is kept,
+	 *  which is what the pre-party AdoptSquad path still wants. Keeping the local entry while a server
+	 *  party exists would show the player twice and put the crown on the wrong plate. */
+	void ApplyRoster(const TArray<FCampusPartyMember>& InMembers, bool bAuthoritative = false);
 
 	/** Takes the squad from a finished match: everyone on the local player's team, in join order. */
 	void AdoptSquad(const AGameStateBase* State, const FString& MyName, uint8 MyTeam);

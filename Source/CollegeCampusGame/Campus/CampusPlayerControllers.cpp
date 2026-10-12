@@ -12,6 +12,7 @@
 #include "Campus/CampusNetSettings.h"
 #include "Campus/CampusParty.h"
 #include "Campus/CampusSave.h"
+#include "Campus/CampusSocial.h"
 #include "Campus/CampusTouchControls.h"
 #include "Campus/CampusUI.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -82,6 +83,11 @@ UCampusParty* ACampusLobbyPlayerController::GetParty() const
 	return GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusParty>() : nullptr;
 }
 
+UCampusSocial* ACampusLobbyPlayerController::GetSocial() const
+{
+	return GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusSocial>() : nullptr;
+}
+
 void ACampusLobbyPlayerController::RemovePodium()
 {
 	// L_Lobby ships a /Engine/BasicShapes/Cylinder static mesh actor (material MI_Podium) under the
@@ -142,6 +148,12 @@ void ACampusLobbyPlayerController::RebuildSquad()
 	UWorld* World = GetWorld();
 	const UCampusParty* Party = GetParty();
 	if (!World || !Party)
+	{
+		return;
+	}
+	// The profile page owns the scene while it is open (one figure, its own camera). A party event
+	// arriving behind it must not un-hide the line-up under the panel.
+	if (bProfileFocus)
 	{
 		return;
 	}
@@ -239,6 +251,17 @@ void ACampusLobbyPlayerController::BeginPlay()
 		Backend->CloseHostedRoom();
 	}
 
+	// The social channel follows the screen: one socket, opened once we are signed in, telling the
+	// server we are in the lobby so friends see "IN LOBBY" and an invite is not spent on a ghost.
+	if (UCampusSocial* Social = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusSocial>() : nullptr)
+	{
+		Social->SetScreenState(ECampusPresence::Lobby);
+		if (const UCampusBackend* Backend = GetBackend(); Backend && Backend->IsSignedIn())
+		{
+			Social->Start();
+		}
+	}
+
 	// Warm the EOS login up while the player is reading the lobby, so CREATE and JOIN do not wait on
 	// it. Does nothing at all when internet play is not configured, and never blocks or shows an error.
 	if (UCampusEOS* Eos = GetEos(); Eos && Eos->IsConfigured())
@@ -287,6 +310,63 @@ void ACampusLobbyPlayerController::RotateDisplay(float DeltaYaw)
 	}
 }
 
+void ACampusLobbyPlayerController::FocusProfile(bool bOn)
+{
+	if (bProfileFocus == bOn)
+	{
+		return;
+	}
+	bProfileFocus = bOn;
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	if (bOn)
+	{
+		// Hide every slot but the first - the same SetActorHiddenInGame mechanism RebuildSquad already
+		// uses for unwanted slots, so there is nothing new to get wrong.
+		for (int32 Index = 0; Index < Squad.Num(); ++Index)
+		{
+			if (Squad[Index])
+			{
+				Squad[Index]->SetActorHiddenInGame(Index != 0);
+			}
+		}
+		if (Squad.IsValidIndex(0) && Squad[0])
+		{
+			// One figure, standing at the lobby centre whatever squad slot it was in.
+			Squad[0]->SetActorLocation(FVector(0.f, 0.f, FloorZ), false, nullptr, ETeleportType::TeleportPhysics);
+		}
+		if (!ProfileCamera)
+		{
+			// Derived from the numbers already in BeginPlay: the camera is 380 cm out at 70 degrees
+			// horizontal FOV, so the visible half-width there is 380 * tan(35) = 266 cm. Moving the
+			// camera half a half-width along its right vector (which is -Y, since it looks down -X)
+			// puts the figure at about 25 % across the screen and leaves the right half for the panel.
+			FActorSpawnParameters Params;
+			Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+			ProfileCamera = World->SpawnActor<ACameraActor>(FVector(380.f, -133.f, 135.f), FRotator(-6.f, 180.f, 0.f), Params);
+			if (ProfileCamera)
+			{
+				ProfileCamera->GetCameraComponent()->SetConstraintAspectRatio(false);
+				ProfileCamera->GetCameraComponent()->SetFieldOfView(70.f);
+			}
+		}
+		if (ProfileCamera)
+		{
+			SetViewTargetWithBlend(ProfileCamera, 0.25f);
+		}
+		return;
+	}
+	if (PodiumCamera)
+	{
+		SetViewTargetWithBlend(PodiumCamera, 0.25f);
+	}
+	// RebuildSquad puts every slot back where it belongs and re-hides the ones the squad size excludes.
+	RebuildSquad();
+}
+
 UCampusBackend* ACampusLobbyPlayerController::GetBackend() const
 {
 	return GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBackend>() : nullptr;
@@ -307,7 +387,12 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 		return;
 	}
 	const FString Map = Profile->MatchMap.ToString();
-	const int32 Team = Profile->TeamSize;
+	// With a server party the ROOM MUST MATCH THE SQUAD: the API refuses the hand-off with
+	// 409 MODE_MISMATCH if team_size and the party mode disagree, and it is far better to create the
+	// right room than to create the wrong one and discover it after the Room Card is spent.
+	const UCampusSocial* Social = GetSocial();
+	const bool bPartyLeader = Social && Social->HasParty() && Social->IsPartyLeader();
+	const int32 Team = bPartyLeader ? Social->GetServerParty().Mode : Profile->TeamSize;
 	const int32 Rounds = FMath::Clamp(Profile->MatchRounds, 4, 7);
 	const int32 Minutes = FMath::Clamp(Profile->RoundMinutes, 3, 10);
 	TWeakObjectPtr<ACampusLobbyPlayerController> WeakThis(this);
@@ -344,6 +429,31 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 			// 7777 as it always was even when EOS is configured but this phone could not log in.
 			const TCHAR* Transport = EosPuid.IsEmpty() ? TEXT("?bUseIPSockets") : TEXT("");
 			const FString Options = FString::Printf(TEXT("listen%s?Map=%s?Team=%d?Room=%s?Rounds=%d?Minutes=%d"), Transport, *Map, Team, *Room.Code, Rounds, Minutes);
+
+			// THE PARTY HAND-OFF. Tell the API which room this squad is playing, and every member's
+			// phone gets party.room_ready and joins by itself - nobody reads six characters aloud.
+			// The server does not join anybody: each member calls the existing POST /v1/rooms/join, so
+			// the ticket, the max_players check and the admit step stay byte-for-byte what already
+			// works today. We travel either way - a failed hand-off must not cost the host a Room
+			// Card, and the code still works by hand.
+			UCampusSocial* Squad = Me->GetSocial();
+			if (Squad && Squad->HasParty() && Squad->IsPartyLeader())
+			{
+				Squad->HandOffRoom(Room.Code, [WeakThis, Options](bool bOk, const FString& Error)
+				{
+					ACampusLobbyPlayerController* Host = WeakThis.Get();
+					if (!Host)
+					{
+						return;
+					}
+					if (!bOk)
+					{
+						UE_LOG(LogTemp, Warning, TEXT("[CampusSocial] party hand-off failed: %s"), *Error);
+					}
+					UGameplayStatics::OpenLevel(Host, FName(UCampusGameInstance::MatchMap), true, Options);
+				});
+				return;
+			}
 			UGameplayStatics::OpenLevel(Me, FName(UCampusGameInstance::MatchMap), true, Options);
 		});
 	};
@@ -439,6 +549,13 @@ void ACampusMatchPlayerController::BeginPlay()
 	{
 		return;
 	}
+	// Presence says `match` for the whole match, which is what makes a friend's list read "IN MATCH"
+	// and the INVITE button go disabled instead of burning an invite on somebody mid-firefight.
+	if (UCampusSocial* Social = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusSocial>() : nullptr)
+	{
+		Social->SetScreenState(ECampusPresence::Match);
+	}
+
 	if (const UCampusSave* Profile = GetProfile())
 	{
 		ServerSetName(Profile->PlayerName);
@@ -589,7 +706,9 @@ void ACampusMatchPlayerController::RecordResult()
 		const ACampusGameState* State = GetWorld()->GetGameState<ACampusGameState>();
 		const ACampusPlayerState* Mine = GetPlayerState<ACampusPlayerState>();
 		Profile->Coins += ComputeReward();
-		Profile->Xp += 50;
+		// NO LOCAL XP. XP and level are awarded by the result transaction on the server (migration 013,
+		// PROFILE_DESIGN §3) and only ever read back from GET /me/profile. A phone that also paid itself
+		// 50 XP would disagree with every other phone about this player's level.
 		Profile->Matches += 1;
 		Profile->Wins += (State && Mine && State->Winner == int32(Mine->Team)) ? 1 : 0;
 		Profile->Kills += Mine ? Mine->Kills : 0;
@@ -614,6 +733,16 @@ void ACampusMatchPlayerController::LeaveToLobby()
 		{
 			Party->AdoptSquad(State, Mine->GetPlayerName(), uint8(Mine->Team));
 		}
+	}
+	// Remember which room we just left, so the lobby can open PLAYER OF THE MATCH even if the
+	// match.summary_ready event never arrives (socket down, or the app was backgrounded).
+	if (UCampusSocial* Social = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusSocial>() : nullptr)
+	{
+		if (const ACampusGameState* State = GetWorld() ? GetWorld()->GetGameState<ACampusGameState>() : nullptr)
+		{
+			Social->NoteFinishedRoom(State->RoomCode);
+		}
+		Social->SetScreenState(ECampusPresence::Menu);
 	}
 	bSettingsOpen = false;
 	UGameplayStatics::OpenLevel(this, FName(UCampusGameInstance::LobbyMap));
