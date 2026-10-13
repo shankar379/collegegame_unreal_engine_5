@@ -595,7 +595,17 @@ void SCampusLobbyWidget::Done(bool bOk, const FString& Error, TFunction<void()> 
 
 void SCampusLobbyWidget::Show(EScreen Screen)
 {
+	// ENTERING a screen is not the same as repainting it. Anything that costs a round trip belongs
+	// here, where it happens once, and never in a Build function, which runs on every repaint.
+	const bool bEntering = Current != Screen;
 	Current = Screen;
+	if (bEntering && Screen == EScreen::Store)
+	{
+		// A fresh visit may find prices the last one could not; the latch inside stops it looping.
+		bStorePricesQueried = false;
+		StoreQueryPlayPrices();
+	}
+
 	TSharedRef<SWidget> Body = SNullWidget::NullWidget;
 	switch (Screen)
 	{
@@ -650,6 +660,12 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	{
 		ShownBody = Body;
 		Content->SetContent(Body);
+		// MEASURE IT NOW. A repaint is served from Tick, which can land after Slate has already run
+		// this frame's layout pass - and a widget that has never been measured has a desired size of
+		// zero, so every child of it arranges at its slot's origin. That is exactly what the store
+		// looked like: the whole screen piled into the top-left corner. One prepass of the subtree we
+		// just built costs nothing and makes a repaint safe to serve from anywhere.
+		Body->SlatePrepass();
 	}
 }
 
@@ -1822,7 +1838,11 @@ void SCampusLobbyWidget::FillRegion(const TSharedPtr<SBox>& Slot, uint32& Stamp,
 		return;
 	}
 	Stamp = Next;
-	Slot->SetContent(Build());
+	const TSharedRef<SWidget> Fresh = Build();
+	Slot->SetContent(Fresh);
+	// Measured now, for the same reason Show() measures a new body: a region re-filled from Tick can
+	// miss this frame's layout pass, and an unmeasured widget arranges its children at zero size.
+	Fresh->SlatePrepass();
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()

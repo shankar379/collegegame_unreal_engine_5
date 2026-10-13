@@ -67,6 +67,14 @@ namespace CampusLineUp
 	 *  corrected: a figure standing further back is further from the camera, so it sits closer to the
 	 *  middle of the screen than its lateral offset alone would suggest. */
 	float SlotScreenFraction(int32 SlotIndex);
+
+	/** THE YAW A FIGURE IN THIS SLOT SHOULD STAND AT, before the turntable drag is added.
+	 *
+	 *  Aimed at the camera first - a figure 115 cm off to one side is NOT facing the camera when it
+	 *  faces straight down the lobby axis - and then turned by the slot's own small amount so the
+	 *  outer three lean in towards the group. The player's slot adds nothing, so the player faces the
+	 *  camera square on. */
+	float SlotFacingYaw(int32 SlotIndex);
 }
 
 /** One plate in the lobby squad row. */

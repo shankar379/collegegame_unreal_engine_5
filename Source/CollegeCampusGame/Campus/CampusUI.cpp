@@ -1,4 +1,4 @@
-#include "Campus/CampusUI.h"
+﻿#include "Campus/CampusUI.h"
 
 #include "Brushes/SlateRoundedBoxBrush.h"
 #include "Campus/CampusAngular.h"
@@ -411,11 +411,22 @@ void SCampusDragArea::Construct(const FArguments& InArgs)
 
 void SCampusDragArea::Drag(float DeltaX, float DeltaTime)
 {
+	// A TAP IS NOT A DRAG. The finger travels a pixel or two on any tap on open screen, and this used
+	// to turn that into a fling: a 2 px move over a 2 ms frame reads as 1000 units/second, which the
+	// decay below then spends about 50 degrees of yaw on. A few taps and the line-up was side-on -
+	// which is why the player "usually faces left". Nothing rotates until the finger has really moved.
+	Travel += FMath::Abs(DeltaX);
+	if (Travel < DragThreshold)
+	{
+		return;
+	}
 	OnDrag.ExecuteIfBound(DeltaX);
 	if (DeltaTime > UE_KINDA_SMALL_NUMBER)
 	{
-		// Smoothed finger speed, used for the fling when the finger lifts.
-		Velocity = FMath::Lerp(Velocity, DeltaX / DeltaTime, 0.5f);
+		// Smoothed finger speed, used for the fling when the finger lifts. CLAMPED: a single stuttery
+		// frame must not be allowed to define the whole spin.
+		const float Measured = FMath::Clamp(DeltaX / DeltaTime, -MaxFlingSpeed, MaxFlingSpeed);
+		Velocity = FMath::Lerp(Velocity, Measured, 0.5f);
 	}
 }
 
@@ -446,6 +457,7 @@ FReply SCampusDragArea::OnMouseButtonDown(const FGeometry& MyGeometry, const FPo
 {
 	bDragging = true;
 	Velocity = 0.f;
+	Travel = 0.f;
 	LastX = MouseEvent.GetScreenSpacePosition().X;
 	LastMoveTime = FSlateApplication::Get().GetCurrentTime();
 	return FReply::Handled().CaptureMouse(SharedThis(this));
@@ -479,6 +491,7 @@ FReply SCampusDragArea::OnTouchStarted(const FGeometry& MyGeometry, const FPoint
 	}
 	PointerIndex = TouchEvent.GetPointerIndex();
 	Velocity = 0.f;
+	Travel = 0.f;
 	LastX = TouchEvent.GetScreenSpacePosition().X;
 	LastMoveTime = FSlateApplication::Get().GetCurrentTime();
 	return FReply::Handled().CaptureMouse(SharedThis(this));

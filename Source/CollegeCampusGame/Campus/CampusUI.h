@@ -128,6 +128,13 @@ private:
 	double LastMoveTime = 0.0;
 	/** Units per second at release; keeps the character spinning like a lobby turntable, then eases out. */
 	float Velocity = 0.f;
+	/** How far this press has travelled. Nothing turns until it passes DragThreshold: a tap on open
+	 *  screen moves a pixel or two, and that used to be enough to fling the line-up side-on. */
+	float Travel = 0.f;
+	/** Slate units of finger travel before a press counts as a drag at all. */
+	static constexpr float DragThreshold = 8.f;
+	/** Ceiling on the measured fling speed, so one stuttery frame cannot define the whole spin. */
+	static constexpr float MaxFlingSpeed = 900.f;
 };
 
 /** Which button on a notice card was tapped; the lobby owns the answer, because it owns dialogs. */
@@ -492,6 +499,10 @@ private:
 
 	EScreen Current = EScreen::Splash;
 	EStoreTab StoreTab = EStoreTab::Guns;
+	/** The Play price query has been asked for on this visit to the store. A build function must never
+	 *  start a round trip: when this one did, the reply repainted the store, the repaint asked again,
+	 *  and on a build Play answers with an empty catalogue the two fed each other without end. */
+	bool bStorePricesQueried = false;
 	/** The confirmed choice, mirrored from UCampusSave; indices into CampusCatalog. */
 	int32 SelectedMap = 0;
 	int32 SelectedMode = 0;

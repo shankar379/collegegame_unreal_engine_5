@@ -326,7 +326,7 @@ void ACampusLobbyPlayerController::RebuildSquad()
 		Actor->SetActorHiddenInGame(false);
 		// Everyone keeps the yaw the player dragged to, plus their own slot's turn-in. Set BEFORE the
 		// placement, because the placement measures the figure where it is actually standing.
-		Actor->SetActorRotation(FRotator(0.f, DisplayYaw + CampusLineUp::SlotPose(Slot).YawDeg, 0.f));
+		Actor->SetActorRotation(FRotator(0.f, DisplayYaw + CampusLineUp::SlotFacingYaw(Slot), 0.f));
 		// One trace PER SLOT, every rebuild. A mode change moves every figure, so every figure is
 		// re-grounded; nothing is carried over from a height measured somewhere else, earlier.
 		PlaceMember(Actor, Slot);
@@ -429,7 +429,7 @@ void ACampusLobbyPlayerController::RotateDisplay(float DeltaYaw)
 			// The whole line-up turns as one, but each figure keeps its own turn-in, or dragging would
 			// flatten the group back into a rigid row.
 			const int32 Slot = bProfileFocus ? CampusLineUp::MainSlot : CampusLineUp::SlotForMember(Index);
-			Member->SetActorRotation(FRotator(0.f, DisplayYaw + CampusLineUp::SlotPose(Slot).YawDeg, 0.f));
+			Member->SetActorRotation(FRotator(0.f, DisplayYaw + CampusLineUp::SlotFacingYaw(Slot), 0.f));
 		}
 	}
 }

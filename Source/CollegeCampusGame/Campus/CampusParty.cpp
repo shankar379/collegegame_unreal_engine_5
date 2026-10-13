@@ -19,15 +19,19 @@ namespace CampusLineUp
 	{
 		// Laterals are centred on the GROUP, which leaves the player half a step left of the screen
 		// centre - exactly the "centre or slightly left of centre" the line-up is drawn around.
+		// YAW SIGN. The lobby camera looks down -X and its right is -Y, so screen-left is +Y - and a
+		// figure faces +X at yaw 0, which UE turns towards +Y as the yaw rises. A POSITIVE yaw
+		// therefore turns a figure towards the LEFT OF THE SCREEN. The one on the left of the group
+		// leans in with a negative yaw; the two on the right lean in with a positive one.
 		static const FSlotPose Poses[NumSlots] = {
-			// 0: the one teammate on the player's left, well back, turned in towards the group.
-			{ -1.5f * SpacingCm, -18.f,  6.f },
-			// 1: THE PLAYER. Forward of everyone and square to the camera. Never moves.
+			// 0: the one teammate on the player's left, well back, leaning in to its right.
+			{ -1.5f * SpacingCm, -18.f, -6.f },
+			// 1: THE PLAYER. Forward of everyone and square to the camera. Never moves, never leans.
 			{ -0.5f * SpacingCm,  22.f,  0.f },
-			// 2: first teammate to the player's right.
-			{  0.5f * SpacingCm, -14.f, -5.f },
+			// 2: first teammate to the player's right, leaning in to its left.
+			{  0.5f * SpacingCm, -14.f,  5.f },
 			// 3: second teammate to the player's right, the furthest back of the four.
-			{  1.5f * SpacingCm, -26.f, -9.f },
+			{  1.5f * SpacingCm, -26.f,  9.f },
 		};
 		return Poses[FMath::Clamp(SlotIndex, 0, NumSlots - 1)];
 	}
@@ -46,6 +50,18 @@ namespace CampusLineUp
 		// further back is further away, so the same lateral offset covers fewer pixels.
 		const float Distance = FMath::Max(50.f, CameraDistanceCm - Pose.DepthCm);
 		return 0.5f + Pose.LateralCm / (2.f * Distance * HalfFovTan);
+	}
+
+	float SlotFacingYaw(int32 SlotIndex)
+	{
+		const FSlotPose& Pose = SlotPose(SlotIndex);
+		// The figure stands at world (DepthCm, -LateralCm) and the camera at (CameraDistanceCm, 0), so
+		// the bearing from the figure to the camera is atan2(LateralCm, CameraDistanceCm - DepthCm).
+		// At yaw 0 a figure faces +X, straight down the lobby axis, which only points AT the camera
+		// for something standing dead centre.
+		const float Distance = FMath::Max(50.f, CameraDistanceCm - Pose.DepthCm);
+		const float TowardsCamera = FMath::RadiansToDegrees(FMath::Atan2(Pose.LateralCm, Distance));
+		return TowardsCamera + Pose.YawDeg;
 	}
 }
 

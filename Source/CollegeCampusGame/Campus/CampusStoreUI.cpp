@@ -390,10 +390,18 @@ void SCampusLobbyWidget::StoreQueryPlayPrices()
 {
 	UCampusBackend* Api = Backend();
 	UCampusPlayBilling* Play = StoreBilling();
-	if (!Play || !Play->IsAvailable() || Play->GetProducts().Num() > 0)
+	// ONCE PER VISIT TO THE STORE, NOT ONCE PER REPAINT.
+	//
+	// This used to be called from BuildStoreV2 and guarded only by "Play has no products yet". On a
+	// build that is not installed from Play - or with the SKUs unpublished - QueryProducts answers
+	// bOk with an EMPTY list, so the guard never closed: the reply called Refresh, the repaint called
+	// this again, and the store rebuilt itself without end. The latch is the hard stop; the caller in
+	// Show() clears it when the store is actually opened.
+	if (bStorePricesQueried || !Play || !Play->IsAvailable() || Play->GetProducts().Num() > 0)
 	{
 		return;
 	}
+	bStorePricesQueried = true;
 
 	// Opening the store is the natural moment to re-offer anything Play is still holding (an interrupted
 	// verify, a UPI collect that settled while the app was closed).
@@ -418,9 +426,11 @@ void SCampusLobbyWidget::StoreQueryPlayPrices()
 		return;
 	}
 
-	Play->QueryProducts(Wanted, [this](bool bOk, const FString&, const TArray<FCampusPlayProduct>&)
+	// Only repaint when real prices actually arrived. A successful but empty answer changes nothing on
+	// screen, and repainting for it is what fed the loop.
+	Play->QueryProducts(Wanted, [this](bool bOk, const FString&, const TArray<FCampusPlayProduct>& Products)
 	{
-		if (bOk && Current == EScreen::Store)
+		if (bOk && Products.Num() > 0 && Current == EScreen::Store)
 		{
 			Refresh();
 		}
@@ -1059,7 +1069,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStoreWallet()
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildStoreV2()
 {
-	StoreQueryPlayPrices();
+	// NO SIDE EFFECTS HERE. The Play price query used to run from this function, which made every
+	// repaint of the store start another round trip - and the reply repainted the store. Opening the
+	// store is the event that wants prices, so Show() asks for them; a repaint only draws.
 
 	TSharedRef<SWidget> Body = SNullWidget::NullWidget;
 	FText Footnote = FText::GetEmpty();
