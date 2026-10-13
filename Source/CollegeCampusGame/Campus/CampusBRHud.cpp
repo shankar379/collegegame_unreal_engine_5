@@ -506,6 +506,10 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 {
 	Controller = InArgs._Controller;
 
+	// Itself, not just its child: AddViewportWidgetContent gives this widget the whole screen, and at
+	// the default Visible it sits above the touch controls (Z 5) and eats every tap. Children stay hittable.
+	SetVisibility(EVisibility::SelfHitTestInvisible);
+
 	// Every piece is a visibility lambda over the cached view: built once, repainted per frame, and
 	// NOTHING is rebuilt when the state changes. On a budget phone that is the whole game.
 	ChildSlot
