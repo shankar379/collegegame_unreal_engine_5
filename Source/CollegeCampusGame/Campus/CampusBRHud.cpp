@@ -177,6 +177,16 @@ namespace
 		return nullptr;
 	}
 
+	/** THE SERVER'S CLOCK, which is the only one a replicated deadline can be measured against: a
+	 *  client's own World->GetTimeSeconds() starts at zero when ITS level loads, so on a phone that
+	 *  joined a host which had been up two minutes every countdown here read two minutes long. The
+	 *  same call the zone and the touch HUD already use. */
+	double BrHudNow(const UWorld* World)
+	{
+		const AGameStateBase* State = World ? World->GetGameState() : nullptr;
+		return State ? State->GetServerWorldTimeSeconds() : (World ? World->GetTimeSeconds() : 0.0);
+	}
+
 	/** A field that IS a server world-time stamp (BRPhaseEndTime, EventEndTime): seconds left. */
 	bool BrHudDeadline(const UObject* Object, const UWorld* World, float& Out, const TCHAR* A,
 		const TCHAR* B = nullptr, const TCHAR* C = nullptr)
@@ -186,7 +196,7 @@ namespace
 		{
 			return false;
 		}
-		Out = FMath::Max(0.f, float(Value - World->GetTimeSeconds()));
+		Out = FMath::Max(0.f, float(Value - BrHudNow(World)));
 		return true;
 	}
 
@@ -201,7 +211,7 @@ namespace
 		}
 		// Anything larger than ten minutes is a world-time stamp, not a duration: BR phases are short
 		// and a server that has been up an hour reports stamps in the thousands.
-		const double Now = World->GetTimeSeconds();
+		const double Now = BrHudNow(World);
 		Out = Value > 600.0 ? float(Value - Now) : float(Value);
 		Out = FMath::Max(0.f, Out);
 		return true;

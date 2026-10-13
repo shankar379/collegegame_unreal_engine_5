@@ -737,7 +737,13 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 				return;
 			}
 			const TCHAR* Transport = EosPuid.IsEmpty() ? TEXT("?bUseIPSockets") : TEXT("");
-			FString Options = FString::Printf(TEXT("listen%s?Mode=BR?Night=%d?Code=%s?Team=%d%s"),
+			// "?game=" IS WHAT PICKS THE MODE (UGameInstance::CreateGameModeForURL). The BR map carries no
+			// game mode override, so without it the level opens under GlobalDefaultGameMode - which is
+			// ACampusMatchGameMode, the red/blue ROOM - and the whole battle session runs as a 4v4: no
+			// squads, no waiting platform, no plane, no zone, and a host START MATCH button. "?Mode=BR"
+			// is only what the match itself reads; it has never selected a class.
+			FString Options = FString::Printf(
+				TEXT("listen%s?Mode=BR?game=/Script/CollegeCampusGame.CampusBRGameMode?Night=%d?Code=%s?Team=%d%s"),
 				Transport, Night, *Code, Team, *SquadOption);
 			if (Humans > 0)
 			{
@@ -1062,9 +1068,15 @@ void ACampusMatchPlayerController::LeaveToLobby()
 	}
 	// Remember which room we just left, so the lobby can open PLAYER OF THE MATCH even if the
 	// match.summary_ready event never arrives (socket down, or the app was backgrounded).
+	//
+	// A ROOM ONLY. PLAYER OF THE MATCH is GET /v1/rooms/:code/summary, a Custom Room route; a battle
+	// session's code is not a room code, so noting it sent the lobby off to fetch a summary that can
+	// only 404. BR reports its own result (POST /br/:code/result) and the player hears it back as
+	// `br.result` - the placement toast in the lobby.
 	if (UCampusSocial* Social = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusSocial>() : nullptr)
 	{
-		if (const ACampusGameState* State = GetWorld() ? GetWorld()->GetGameState<ACampusGameState>() : nullptr)
+		if (const ACampusGameState* State = GetWorld() ? GetWorld()->GetGameState<ACampusGameState>() : nullptr;
+			State && !CampusBR::IsBattleRoyale(GetWorld()))
 		{
 			Social->NoteFinishedRoom(State->RoomCode);
 		}

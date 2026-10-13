@@ -331,6 +331,19 @@ void ACampusBRGameMode::PostLogin(APlayerController* NewPlayer)
 		PlayerState->Squad = Slot.Squad;
 		PlayerState->Placement = 0;
 		PlayerState->bIsHost = NewPlayer->IsLocalPlayerController();
+		// THE HOST'S OWN ACCOUNT, exactly as ACampusMatchGameMode::AdmitWithTicket does for a room:
+		// it is this phone's signed-in id, so there is nothing to verify. Without it ReportResult
+		// reports every combatant - the player included - as a bot, and the backend awards nobody.
+		// A REMOTE joiner still has no account here: a battle session travels with the session code
+		// and no per-phone ticket, so there is nothing to admit it with yet.
+		if (NewPlayer->IsLocalPlayerController())
+		{
+			if (const UCampusBackend* Backend = GetGameInstance()
+				? GetGameInstance()->GetSubsystem<UCampusBackend>() : nullptr)
+			{
+				PlayerState->AccountId = Backend->PlayerId;
+			}
+		}
 	}
 
 	Super::PostLogin(NewPlayer);
@@ -655,7 +668,14 @@ bool ACampusBRGameMode::Promote(int32 Index)
 			return false;
 		}
 		// A bot needs a player state so the scoreboard, the kill feed and the squad HUD see it at all.
-		Bot->InitPlayerState();
+		// ONLY IF IT HAS NONE: ACampusBotController asks for one itself (bWantsPlayerState, spawned in
+		// AAIController::PostInitializeComponents), and a second InitPlayerState leaves the first one
+		// registered on the game state for ever - a nameless, pawnless row replicated to every phone,
+		// ten of them per match.
+		if (!Bot->PlayerState)
+		{
+			Bot->InitPlayerState();
+		}
 		if (ACampusPlayerState* BotState = Bot->GetPlayerState<ACampusPlayerState>())
 		{
 			BotState->SetPlayerName(Slot.Name);

@@ -93,15 +93,18 @@ namespace CampusBR
 {
 	const TCHAR* LevelForMap(const FString& MapId)
 	{
-		// The API calls the BR map "real" (its own catalogue name); the client's catalogue id is
-		// "VarsityValley". Both mean /Game/Maps/L_VarsityValley, and an empty id does too - a BR
-		// match can only be on the BR map.
-		if (MapId.IsEmpty() || MapId.Equals(TEXT("real"), ESearchCase::IgnoreCase)
-			|| MapId.Equals(TEXT("VarsityValley"), ESearchCase::IgnoreCase))
+		// The API calls the BR map "real" (its own catalogue name), the client's catalogue id is
+		// "VarsityValley" and the game state replicates it as "RealMap". They all mean the same level,
+		// and so does an empty id - A BATTLE SESSION CAN ONLY BE ON THE BR MAP.
+		//
+		// So the BR map is the DEFAULT and only the room's own map id is spelled out: an id nobody here
+		// recognised used to fall through to L_Match, which opened a fifty-player battle session on the
+		// 4v4 room map.
+		if (MapId.Equals(TEXT("classic"), ESearchCase::IgnoreCase))
 		{
-			return TEXT("/Game/Maps/L_VarsityValley");
+			return TEXT("/Game/Maps/L_Match");
 		}
-		return TEXT("/Game/Maps/L_Match");
+		return TEXT("/Game/Maps/L_VarsityValley");
 	}
 
 	const TCHAR* ModeForTeamSize(int32 TeamSize)
