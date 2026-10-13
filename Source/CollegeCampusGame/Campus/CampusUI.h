@@ -255,6 +255,10 @@ private:
 	enum class EProfileTab : uint8 { Showcase, Profile, History };
 
 	void Show(EScreen Screen);
+	/** Asks for ONE repaint of the current screen on the next Tick. Deliberately deferred: a single
+	 *  tap reaches this two or three times (the chip's own handler, UCampusParty::OnChanged, then the
+	 *  server's reply), and repainting from inside the tap tears down the very button that is still
+	 *  routing it - which is what the lobby's visible glitch on every interaction was. */
 	void Refresh();
 	void Toast(const FString& Message);
 	/** Runs an API call with a "please wait" overlay; the reply re-enables the screen. */
@@ -289,7 +293,14 @@ private:
 	TSharedRef<SWidget> BuildEmailLogin();
 	TSharedRef<SWidget> BuildRegister();
 	TSharedRef<SWidget> BuildNickname();
+	/** Builds the lobby overlay ONCE and hands the same widget back on every later repaint. */
 	TSharedRef<SWidget> BuildLobby();
+	/** Re-fills the lobby's regions in place. The overlay, the safe zone and the drag area are never
+	 *  re-created, and a region whose own data did not move is left exactly as it is - which is why a
+	 *  mode chip, the ONLINE strip or an invite can no longer flicker the left menu column. */
+	void RepaintLobby();
+	/** One region. Re-filled only when Stamp moves; Stamp 0 means "never filled yet". */
+	void FillRegion(const TSharedPtr<SBox>& Slot, uint32& Stamp, uint32 Now, TFunctionRef<TSharedRef<SWidget>()> Build);
 	TSharedRef<SWidget> BuildTopBar();
 	TSharedRef<SWidget> BuildMenuColumn();
 	TSharedRef<SWidget> BuildSquadRow();
@@ -437,6 +448,29 @@ private:
 
 	TWeakObjectPtr<ACampusLobbyPlayerController> Controller;
 	TSharedPtr<SBox> Content;
+	/** What Content currently holds, so re-showing the same body does not re-attach it. */
+	TSharedPtr<SWidget> ShownBody;
+
+	// ---- the lobby's persistent widget tree.
+	// THE RULE: the lobby is built once and repainted region by region. Nothing above this line is
+	// re-created by a repaint, so the character drag, the touch that is still being routed and every
+	// region that did not change all survive it.
+	TSharedPtr<SBox> LobbyBody;
+	TSharedPtr<SBox> TopBarBox;
+	TSharedPtr<SBox> MenuColumnBox;
+	TSharedPtr<SBox> WeekendBox;
+	TSharedPtr<SBox> ClaimBannerBox;
+	TSharedPtr<SBox> FriendsStripBox;
+	TSharedPtr<SBox> SquadRowBox;
+	TSharedPtr<SBox> PartyBarBox;
+	TSharedPtr<SBox> ModeSelectBox;
+	TSharedPtr<SBox> StartBox;
+	/** Fingerprints of the data behind the regions that an interaction must NEVER disturb. */
+	uint32 TopBarStamp = 0;
+	uint32 MenuColumnStamp = 0;
+	uint32 WeekendStamp = 0;
+	uint32 ClaimBannerStamp = 0;
+
 	EScreen Current = EScreen::Splash;
 	EStoreTab StoreTab = EStoreTab::Guns;
 	/** The confirmed choice, mirrored from UCampusSave; indices into CampusCatalog. */
@@ -459,7 +493,14 @@ private:
 	float ToastTime = 0.f;
 	FString ToastText;
 	bool bBusy = false;
+	/** How long the call in flight has been waiting. The scrim BLOCKS taps from the first frame, but
+	 *  only paints itself once this passes BusyScrimDelay - a LAN reply lands in two frames, and a
+	 *  black wash that appears and vanishes inside 30 ms reads as the screen glitching. */
+	float BusyTime = 0.f;
+	static constexpr float BusyScrimDelay = 0.2f;
 	FString BusyText;
+	/** One repaint per frame, applied from Tick instead of from inside the event that asked for it. */
+	bool bRefreshQueued = false;
 	FDelegateHandle PartyChangedHandle;
 
 	// ---- engagement / 18+ state

@@ -321,6 +321,39 @@ FString FCampusServerParty::LeaderName() const
 	return FString();
 }
 
+bool FCampusServerParty::Matches(const FCampusServerParty& Other) const
+{
+	if (bValid != Other.bValid || Id != Other.Id || LeaderId != Other.LeaderId || State != Other.State
+		|| RoomCode != Other.RoomCode || Mode != Other.Mode
+		|| Members.Num() != Other.Members.Num() || Pending.Num() != Other.Pending.Num())
+	{
+		return false;
+	}
+	// The same fields UCampusParty::ApplyRoster compares - everything a plate, the party bar or the
+	// mode chips actually draw. Order matters: the server owns it (joined_at), and so does the row.
+	auto Same = [](const FCampusPartyMember& A, const FCampusPartyMember& B)
+	{
+		return A.PlayerId == B.PlayerId && A.Name == B.Name && A.Level == B.Level && A.Rank == B.Rank
+			&& A.bLeader == B.bLeader && A.bAccepted == B.bAccepted && A.Presence == B.Presence
+			&& A.InviteId == B.InviteId;
+	};
+	for (int32 Index = 0; Index < Members.Num(); ++Index)
+	{
+		if (!Same(Members[Index], Other.Members[Index]))
+		{
+			return false;
+		}
+	}
+	for (int32 Index = 0; Index < Pending.Num(); ++Index)
+	{
+		if (!Same(Pending[Index], Other.Pending[Index]))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 TArray<FCampusPartyMember> FCampusServerParty::Roster() const
 {
 	TArray<FCampusPartyMember> Out;
@@ -1290,6 +1323,13 @@ void UCampusSocial::ReadParty(const TSharedPtr<FJsonObject>& Json)
 			OnPartyChanged.Broadcast();
 			OnRosterChanged.Broadcast();
 		}
+		return;
+	}
+	// Nothing new to say: a party.presence heartbeat, a re-read of /parties/me, or the leader's own
+	// PATCH reply echoing back what the socket already applied. Each of those used to broadcast and
+	// repaint the whole lobby for a frame that changed nothing.
+	if (Party.Matches(Next))
+	{
 		return;
 	}
 	Party = MoveTemp(Next);

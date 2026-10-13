@@ -1,4 +1,4 @@
-// Lobby level UI (Slate, no widget assets). Flow like Free Fire / PUBG Mobile:
+﻿// Lobby level UI (Slate, no widget assets). Flow like Free Fire / PUBG Mobile:
 //   Splash (loading + tips, TAP TO START) -> first launch: Agreement (terms + privacy) -> Login choice
 //   (PLAY AS GUEST / LOGIN / REGISTER) -> first launch: Nickname -> Lobby.
 // Everything account / money related goes through UCampusBackend (the API); nothing is decided on the phone.
@@ -247,43 +247,56 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 		[
 			SNew(SBorder)
 			.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
-			.BorderBackgroundColor(FLinearColor(0.f, 0.f, 0.f, 0.5f))
+			// The WASH fades in only once the call is genuinely slow; see BusyScrimDelay. The scrim
+			// itself stays Visible for the whole call, so it still blocks the second tap from frame one.
+			.BorderBackgroundColor_Lambda([this]()
+			{
+				return FSlateColor(FLinearColor(0.f, 0.f, 0.f, bBusy && BusyTime >= BusyScrimDelay ? 0.5f : 0.f));
+			})
 			.HAlign(HAlign_Center)
 			.VAlign(VAlign_Center)
 			.Visibility_Lambda([this]() { return bBusy ? EVisibility::Visible : EVisibility::Collapsed; })
 			[
-				CampusStyle::Panel(
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
-					[
-						SNew(STextBlock).Text_Lambda([this]()
-						{
-							const UCampusBackend* Api = Backend();
-							// BusyText is already uppercased in Busy(); no per-frame string work here.
-						return FText::FromString(Api && Api->IsWaitingForPayment() ? FString(TEXT("WAITING FOR THE PAYMENT TO FINISH...")) : BusyText);
-						}).Font(Font(22)).ColorAndOpacity(FLinearColor::White)
-					]
-					// a payment can always be abandoned (back from the browser, sheet stuck): the server settles it
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 16.f, 0.f, 0.f)
-					[
-						SNew(SBox).Visibility_Lambda([this]()
-						{
-							const UCampusBackend* Api = Backend();
-							return Api && Api->IsWaitingForPayment() ? EVisibility::Visible : EVisibility::Collapsed;
-						})
+				SNew(SBox)
+				// "PLEASE WAIT" over an invite that answers in two frames is a flash, not information.
+				.Visibility_Lambda([this]()
+				{
+					return bBusy && BusyTime >= BusyScrimDelay ? EVisibility::Visible : EVisibility::Collapsed;
+				})
+				[
+					CampusStyle::Panel(
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 						[
-							Button(LOCTEXT("CancelPay", "CANCEL PAYMENT"), FOnClicked::CreateLambda([this]()
+							SNew(STextBlock).Text_Lambda([this]()
 							{
-								if (UCampusBackend* Api = Backend())
-								{
-									BusyText = TEXT("CHECKING WITH RAZORPAY...");
-									Api->CancelPendingPayment();
-								}
-								return FReply::Handled();
-							}), EButton::Ghost, 18, FVector2D(280.f, 56.f))
+								const UCampusBackend* Api = Backend();
+								// BusyText is already uppercased in Busy(); no per-frame string work here.
+							return FText::FromString(Api && Api->IsWaitingForPayment() ? FString(TEXT("WAITING FOR THE PAYMENT TO FINISH...")) : BusyText);
+							}).Font(Font(22)).ColorAndOpacity(FLinearColor::White)
 						]
-					],
-					FMargin(40.f, 24.f), 20.f, true)
+						// a payment can always be abandoned (back from the browser, sheet stuck): the server settles it
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 16.f, 0.f, 0.f)
+						[
+							SNew(SBox).Visibility_Lambda([this]()
+							{
+								const UCampusBackend* Api = Backend();
+								return Api && Api->IsWaitingForPayment() ? EVisibility::Visible : EVisibility::Collapsed;
+							})
+							[
+								Button(LOCTEXT("CancelPay", "CANCEL PAYMENT"), FOnClicked::CreateLambda([this]()
+								{
+									if (UCampusBackend* Api = Backend())
+									{
+										BusyText = TEXT("CHECKING WITH RAZORPAY...");
+										Api->CancelPendingPayment();
+									}
+									return FReply::Handled();
+								}), EButton::Ghost, 18, FVector2D(280.f, 56.f))
+							]
+						],
+						FMargin(40.f, 24.f), 20.f, true)
+				]
 			]
 		]
 		// A yes/no over whatever screen is showing. Above the busy scrim, because the question it asks
@@ -462,6 +475,15 @@ void SCampusLobbyWidget::Tick(const FGeometry& AllottedGeometry, const double In
 {
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
 	ToastTime = FMath::Max(0.f, ToastTime - InDeltaTime);
+	BusyTime = bBusy ? BusyTime + InDeltaTime : 0.f;
+
+	// Every repaint asked for since the last frame, served once, outside event routing. Done first so
+	// the rest of this Tick sees a painted screen, and before the Show() calls below - those paint
+	// themselves and clear the flag, so a screen change is never followed by a wasted repaint.
+	if (bRefreshQueued)
+	{
+		Show(Current);
+	}
 
 	if (Current == EScreen::Splash && !bSplashReady)
 	{
@@ -557,6 +579,7 @@ void SCampusLobbyWidget::Toast(const FString& Message)
 void SCampusLobbyWidget::Busy(const FString& What)
 {
 	bBusy = true;
+	BusyTime = 0.f;
 	// Uppercased once here, not in the overlay's per-frame text lambda.
 	BusyText = What.ToUpper();
 }
@@ -623,12 +646,26 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	{
 		Controller->FocusProfile(false);
 	}
-	Content->SetContent(Body);
+	// The body was built from the state as it stands right now, so any repaint that was asked for
+	// while it was being built has already been served.
+	bRefreshQueued = false;
+	// The lobby hands back the SAME body every time (BuildLobby repaints it in place), so re-attaching
+	// it would throw away a layout for nothing. Every other screen builds a fresh one.
+	if (ShownBody.Get() != &Body.Get())
+	{
+		ShownBody = Body;
+		Content->SetContent(Body);
+	}
 }
 
 void SCampusLobbyWidget::Refresh()
 {
-	Show(Current);
+	// COALESCED, AND NEVER FROM INSIDE THE TAP THAT ASKED FOR IT. One mode chip reaches this three
+	// times - SyncParty() moves the capacity and UCampusParty::OnChanged fires, the handler then calls
+	// Refresh itself, and the party reply arrives on top of that. Repainting there did three full
+	// repaints inside one touch and destroyed the chip that was still routing the touch, so the press
+	// highlight, the hover state and the whole left menu column visibly jumped on every interaction.
+	bRefreshQueued = true;
 }
 
 void SCampusLobbyWidget::RefreshEngagement()
@@ -1770,74 +1807,199 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStartButton()
 		}), FVector2D(300.f, 96.f));
 }
 
+void SCampusLobbyWidget::FillRegion(const TSharedPtr<SBox>& Slot, uint32& Stamp, uint32 Now,
+	TFunctionRef<TSharedRef<SWidget>()> Build)
+{
+	if (!Slot.IsValid())
+	{
+		return;
+	}
+	// 0 is reserved for "never filled", so a region whose data happens to hash to 0 still paints once.
+	const uint32 Next = Now == 0 ? 1u : Now;
+	if (Stamp == Next)
+	{
+		return;
+	}
+	Stamp = Next;
+	Slot->SetContent(Build());
+}
+
 TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 {
 	SyncParty();
 
-	return SNew(SOverlay)
-		.Visibility(EVisibility::SelfHitTestInvisible)
-		+ SOverlay::Slot()
+	// BUILT ONCE. The overlay, the safe zone and - above all - the drag area live for as long as the
+	// lobby does: re-creating them on every tap dropped the touch that was still being routed and
+	// re-laid out the whole screen, which is the flicker the phone showed on every interaction.
+	if (!LobbyBody.IsValid())
+	{
+		SAssignNew(LobbyBody, SBox).Visibility(EVisibility::SelfHitTestInvisible)
 		[
-			SNew(SCampusDragArea).OnDrag_Lambda([this](float DeltaX) { if (Controller.IsValid()) { Controller->RotateDisplay(-DeltaX * 0.4f); } })
-		]
-		+ SOverlay::Slot()
-		[
-			SNew(SSafeZone).Visibility(EVisibility::SelfHitTestInvisible).Padding(FMargin(24.f, 16.f))
+			SNew(SOverlay)
+			.Visibility(EVisibility::SelfHitTestInvisible)
+			+ SOverlay::Slot()
 			[
-				SNew(SOverlay).Visibility(EVisibility::SelfHitTestInvisible)
-				// Top bar: avatar + name + level, coin and gem counters, friends / mail / gear.
-				+ SOverlay::Slot().VAlign(VAlign_Top)[BuildTopBar()]
-				// The logo sits under the corner icon cluster, right-aligned.
-				+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(0.f, 86.f, 4.f, 0.f)
+				SNew(SCampusDragArea).OnDrag_Lambda([this](float DeltaX) { if (Controller.IsValid()) { Controller->RotateDisplay(-DeltaX * 0.4f); } })
+			]
+			+ SOverlay::Slot()
+			[
+				SNew(SSafeZone).Visibility(EVisibility::SelfHitTestInvisible).Padding(FMargin(24.f, 16.f))
 				[
-					SNew(SBox).Visibility(EVisibility::HitTestInvisible)[CampusAngular::Logo(40)]
-				]
-				// The right-edge friends strip: the reference's pre-START invite rail, sitting directly
-				// above the mode chips. Anchored to the BOTTOM rather than the top on purpose - the
-				// notice stack owns the top-right corner, and a permanent list under transient cards
-				// is the one arrangement that would annoy twice.
-				+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 276.f) // clears START + mode plate + SOLO/DUO/SQUAD pills
-				[
-					BuildLobbyFriends()
-				]
-				// Slanted menu tabs down the left, with the weekend board under them.
-				+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(0.f, 20.f, 0.f, 0.f)
-				[
-					SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
-					+ SVerticalBox::Slot().AutoHeight()[BuildMenuColumn()]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 14.f, 0.f, 0.f)[BuildWeekendPanel()]
-				]
-				// A settled weekend's unclaimed reward: top-centre, under the top bar, impossible to miss.
-				+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(0.f, 96.f, 0.f, 0.f)
-				[
-					BuildClaimBanner()
-				]
-				// Squad name plates, under the characters.
-				+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 108.f)
-				[
-					BuildSquadRow()
-				]
-				// The squad strip and the drag hint share ONE column anchored to the bottom, so they
-				// can never land on top of each other however tall the strip gets - and the whole
-				// column clears the plate row above it (which ends 108 up).
-				+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 14.f)
-				[
-					SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)[BuildPartyBar()]
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 8.f, 0.f, 0.f)
+					SNew(SOverlay).Visibility(EVisibility::SelfHitTestInvisible)
+					// Top bar: avatar + name + level, coin and gem counters, friends / mail / gear.
+					+ SOverlay::Slot().VAlign(VAlign_Top)
 					[
-						Label(LOCTEXT("DragHint", "DRAG TO TURN"), 14, FLinearColor(1.f, 1.f, 1.f, 0.35f))
+						SAssignNew(TopBarBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
 					]
-				]
-				// Bottom right: mode chips above the yellow slanted START.
-				+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom)
-				[
-					SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 12.f)[BuildModeSelect()]
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)[BuildStartButton()]
+					// The logo sits under the corner icon cluster, right-aligned.
+					+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(0.f, 86.f, 4.f, 0.f)
+					[
+						SNew(SBox).Visibility(EVisibility::HitTestInvisible)[CampusAngular::Logo(40)]
+					]
+					// The right-edge friends strip: the reference's pre-START invite rail, sitting directly
+					// above the mode chips. Anchored to the BOTTOM rather than the top on purpose - the
+					// notice stack owns the top-right corner, and a permanent list under transient cards
+					// is the one arrangement that would annoy twice.
+					+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 276.f) // clears START + mode plate + SOLO/DUO/SQUAD pills
+					[
+						SAssignNew(FriendsStripBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+					]
+					// Slanted menu tabs down the left, with the weekend board under them.
+					+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(0.f, 20.f, 0.f, 0.f)
+					[
+						SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SAssignNew(MenuColumnBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 14.f, 0.f, 0.f)
+						[
+							SAssignNew(WeekendBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+						]
+					]
+					// A settled weekend's unclaimed reward: top-centre, under the top bar, impossible to miss.
+					+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(0.f, 96.f, 0.f, 0.f)
+					[
+						SAssignNew(ClaimBannerBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+					]
+					// Squad name plates, under the characters.
+					+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 108.f)
+					[
+						SAssignNew(SquadRowBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+					]
+					// The squad strip and the drag hint share ONE column anchored to the bottom, so they
+					// can never land on top of each other however tall the strip gets - and the whole
+					// column clears the plate row above it (which ends 108 up).
+					+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 14.f)
+					[
+						SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+						[
+							SAssignNew(PartyBarBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+						]
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 8.f, 0.f, 0.f)
+						[
+							Label(LOCTEXT("DragHint", "DRAG TO TURN"), 14, FLinearColor(1.f, 1.f, 1.f, 0.35f))
+						]
+					]
+					// Bottom right: mode chips above the yellow slanted START.
+					+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom)
+					[
+						SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 12.f)
+						[
+							SAssignNew(ModeSelectBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+						]
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
+						[
+							SAssignNew(StartBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+						]
+					]
 				]
 			]
 		];
+	}
+
+	RepaintLobby();
+	return LobbyBody.ToSharedRef();
+}
+
+void SCampusLobbyWidget::RepaintLobby()
+{
+	const UCampusBackend* Api = Backend();
+	UCampusSocial* Live = Social();
+
+	// THE TOP BAR, THE LEFT MENU COLUMN, THE WEEKEND BOARD AND THE CLAIM BANNER are the parts of the
+	// lobby an interaction must never touch. None of them reads the mode, the friends strip or the
+	// party, so each is fingerprinted from its OWN inputs and left alone until those move. Choosing a
+	// mode, opening ONLINE or sending an invite now repaints neither the tabs nor the board.
+	uint32 Now = GetTypeHash(FString::Printf(TEXT("%s|%d|%d|%d|%d|%d"),
+		Api ? *Api->PlayerName : TEXT(""),
+		Api ? Api->Level : 0,
+		Api ? FMath::RoundToInt(Api->LevelFraction() * 1000.f) : 0,
+		Api && Api->bGuest ? 1 : 0,
+		Api ? Api->RoomCards : 0,
+		Api ? Api->Diamonds : 0));
+	// The friends icon carries a count of everything waiting on an answer, so the live notice stack
+	// and the incoming-request list are part of the top bar's fingerprint too.
+	Now = HashCombine(Now, Live ? uint32(Live->GetRoster().Incoming.Num() * 31 + Live->GetNotices().Num()) : 0u);
+	FillRegion(TopBarBox, TopBarStamp, Now, [this]() { return BuildTopBar(); });
+
+	// BuildMenuColumn reads exactly two things: the free Room Card and the claimable mission count.
+	FillRegion(MenuColumnBox, MenuColumnStamp,
+		GetTypeHash(FString::Printf(TEXT("%d|%d"),
+			Api && Api->bDailyCardAvailable ? 1 : 0,
+			Api ? Api->Engagement.TotalClaimable() : 0)),
+		[this]() { return BuildMenuColumn(); });
+
+	// The board's own fingerprint. Its COUNTDOWN is already a text lambda, so a ticking clock has
+	// never needed a repaint and must not get one now.
+	uint32 Board = 0;
+	if (Api && Api->Engagement.bLoaded && Api->Engagement.Board.bValid)
+	{
+		const FCampusWeekend& Weekend = Api->Engagement.Board;
+		Board = GetTypeHash(FString::Printf(TEXT("%s|%s|%lld|%lld|%d|%d|%d|%d|%d|%d|%d|%d"),
+			*Weekend.PeriodId, *Weekend.State, Weekend.StartsAt.GetTicks(), Weekend.EndsAt.GetTicks(),
+			Weekend.bProvisional ? 1 : 0, Weekend.bDegraded ? 1 : 0, Weekend.bHasMe ? 1 : 0,
+			Weekend.bHasNextRank ? 1 : 0, Weekend.MyRank, Weekend.MyPoints, Weekend.NextRank, Weekend.NextGap));
+		for (const FCampusBoardEntry& Entry : Weekend.Top)
+		{
+			Board = HashCombine(Board, GetTypeHash(FString::Printf(TEXT("%d|%s|%d|%d"),
+				Entry.Rank, *Entry.Name, Entry.Points, Entry.bMe ? 1 : 0)));
+		}
+	}
+	FillRegion(WeekendBox, WeekendStamp, Board, [this]() { return BuildWeekendPanel(); });
+
+	FillRegion(ClaimBannerBox, ClaimBannerStamp,
+		GetTypeHash(FString::Printf(TEXT("%d|%s|%d|%s"),
+			Api && Api->Engagement.bLoaded && Api->Engagement.LastWeekend.bUnclaimed ? 1 : 0,
+			Api ? *Api->Engagement.LastWeekend.PeriodId : TEXT(""),
+			Api ? Api->Engagement.LastWeekend.MyRank : 0,
+			Api ? *Api->Engagement.LastWeekend.Reward.Describe() : TEXT(""))),
+		[this]() { return BuildClaimBanner(); });
+
+	// The rest IS what an interaction changes, so it is always re-filled - but only these five
+	// regions, and only once per frame (see Refresh).
+	if (SquadRowBox.IsValid())
+	{
+		SquadRowBox->SetContent(BuildSquadRow());
+	}
+	if (PartyBarBox.IsValid())
+	{
+		PartyBarBox->SetContent(BuildPartyBar());
+	}
+	if (ModeSelectBox.IsValid())
+	{
+		ModeSelectBox->SetContent(BuildModeSelect());
+	}
+	if (StartBox.IsValid())
+	{
+		StartBox->SetContent(BuildStartButton());
+	}
+	if (FriendsStripBox.IsValid())
+	{
+		FriendsStripBox->SetContent(BuildLobbyFriends());
+	}
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildSettings()

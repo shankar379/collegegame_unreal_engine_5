@@ -107,6 +107,10 @@ struct FCampusServerParty
 	bool HasRoom() const { return bValid && Occupancy() < Mode; }
 	/** The leader's display name, for "WAITING FOR ARJUN". */
 	FString LeaderName() const;
+	/** Field for field, over everything the lobby draws. A party frame that says nothing new must not
+	 *  reach OnPartyChanged: every one of those repaints the lobby, and the presence heartbeat alone
+	 *  would do it for no reason. Same contract as UCampusParty::ApplyRoster's guard. */
+	bool Matches(const FCampusServerParty& Other) const;
 	/** Members then pending, which is exactly the plate order the lobby draws. */
 	TArray<FCampusPartyMember> Roster() const;
 };

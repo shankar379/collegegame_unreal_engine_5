@@ -77,8 +77,18 @@ private:
 	 *  Called once at BeginPlay and again whenever the roster or the squad size changes. */
 	void RebuildSquad();
 
-	/** The floor height under a slot, traced once per rebuild (the podium may be gone by then). */
+	/** The floor height UNDER THAT SLOT, traced fresh every time. Never cached: one height measured at
+	 *  the lobby centre is only the right answer for the middle of a Squad line-up. */
 	float GroundAt(const FVector& Where) const;
+
+	/** The lobby floor's own height, read off the level once. L_Lobby's floor is an
+	 *  /Engine/BasicShapes/Plane, which ships with no collision at all, so GroundAt's ray finds
+	 *  nothing to hit and needs an honest answer to fall back on rather than a bare zero. */
+	float ReadFloorHeight() const;
+
+	/** Stands one line-up figure on the floor at Y, with its FEET on the floor - measured from the
+	 *  mesh's own bounds, not from an assumption about where the asset's origin sits. */
+	void PlaceMember(ASkeletalMeshActor* Actor, float Y) const;
 
 	/** Keeps the yaw the player dragged to when the line-up is rebuilt. */
 	float DisplayYaw = 0.f;
@@ -86,9 +96,8 @@ private:
 	/** Index 0 is the local player; up to UCampusParty::MaxMembers. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<ASkeletalMeshActor>> Squad;
-	/** Lobby floor height under the line-up, measured once (traces never see the squad). */
-	float FloorZ = 0.f;
-	bool bFloorZKnown = false;
+	/** The level's floor height; GroundAt's fallback. Read after the podium is gone. */
+	float FloorPlaneZ = 0.f;
 
 	UPROPERTY(Transient)
 	TObjectPtr<ACameraActor> PodiumCamera;

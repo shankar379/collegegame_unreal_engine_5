@@ -118,17 +118,60 @@ void ACampusLobbyPlayerController::RemovePodium()
 	}
 }
 
-float ACampusLobbyPlayerController::GroundAt(const FVector& Where) const
+float ACampusLobbyPlayerController::ReadFloorHeight() const
 {
-	// The podium is already gone by now, so this finds the lobby floor plane. Falls back to Z = 0.
+	// L_Lobby's whole floor is ONE StaticMeshActor ("Floor", /Engine/BasicShapes/Plane, scaled 80).
+	// That mesh has no collision primitive, so nothing can be traced against it - its actor height is
+	// the only honest answer, and it costs one iteration when the level opens.
 	const UWorld* World = GetWorld();
 	if (!World)
 	{
 		return 0.f;
 	}
+	float Found = 0.f;
+	bool bAny = false;
+	for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
+	{
+		const AStaticMeshActor* Actor = *It;
+		if (!Actor || !Actor->GetStaticMeshComponent())
+		{
+			continue;
+		}
+		const UStaticMesh* Mesh = Actor->GetStaticMeshComponent()->GetStaticMesh();
+		const FString MeshName = Mesh ? Mesh->GetPathName() : FString();
+		// The mesh path, not the label: GetActorLabel is editor-only data and does not survive a cook,
+		// so on the phone the plane mesh is the only thing left to recognise the floor by.
+		if (!MeshName.Contains(TEXT("BasicShapes/Plane")) && !Actor->GetName().Contains(TEXT("Floor")))
+		{
+			continue;
+		}
+		// The HIGHEST floor plane that is still at roughly standing height: a skybox plane far above
+		// the lobby is not the thing the squad stands on.
+		const float Z = Actor->GetActorLocation().Z;
+		if (Z < 300.f && (!bAny || Z > Found))
+		{
+			Found = Z;
+			bAny = true;
+		}
+	}
+	return Found;
+}
+
+float ACampusLobbyPlayerController::GroundAt(const FVector& Where) const
+{
+	// Traced AT THE SLOT and never cached: the old code measured once at the lobby centre and reused
+	// that one height for all four slots and for the rest of the session, so a floor that is not dead
+	// flat - or a first measurement taken before the podium was gone - left the line-up hanging.
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return FloorPlaneZ;
+	}
 	FHitResult Hit;
-	const FVector Start(Where.X, Where.Y, 400.f);
-	const FVector End(Where.X, Where.Y, -400.f);
+	// From just over head height rather than from 400 up: a ceiling or an overhead prop would
+	// otherwise be the first thing the ray meets, and the whole line-up would hang off it.
+	const FVector Start(Where.X, Where.Y, FloorPlaneZ + 240.f);
+	const FVector End(Where.X, Where.Y, FloorPlaneZ - 500.f);
 	FCollisionQueryParams Params(TEXT("CampusLobbyFloor"), false);
 	// never land on a squad member (a hidden one still had collision: the line-up stood on invisible teammates)
 	for (const TObjectPtr<ASkeletalMeshActor>& Member : Squad)
@@ -142,7 +185,38 @@ float ACampusLobbyPlayerController::GroundAt(const FVector& Where) const
 	{
 		return Hit.ImpactPoint.Z;
 	}
-	return 0.f;
+	return FloorPlaneZ;
+}
+
+void ACampusLobbyPlayerController::PlaceMember(ASkeletalMeshActor* Actor, float Y) const
+{
+	if (!Actor)
+	{
+		return;
+	}
+	const float Ground = GroundAt(FVector(0.f, Y, 0.f));
+	Actor->SetActorLocation(FVector(0.f, Y, Ground), false, nullptr, ETeleportType::TeleportPhysics);
+
+	// THEN PLANT THE FEET. Putting the actor's origin on the floor only stands the figure up if the
+	// asset's origin is exactly at the soles - the gameplay character does not assume that either, it
+	// sinks the mesh inside its capsule by a measured amount (see ACampusCharacter's constructor).
+	// Here the measurement comes from the mesh's own bounds in the pose it is actually drawn in, so
+	// the feet touch the floor whatever the clip's root does and whatever the asset was authored at.
+	USkeletalMeshComponent* Component = Actor->GetSkeletalMeshComponent();
+	if (!Component || !Component->GetSkeletalMeshAsset())
+	{
+		return;
+	}
+	// CalcBounds rather than the cached Bounds: it answers for the pose the component holds right now,
+	// including on the frame the actor was spawned, and it is the same call the renderer uses.
+	const FBoxSphereBounds Posed = Component->CalcBounds(Component->GetComponentTransform());
+	const float SoleZ = float(Posed.Origin.Z - Posed.BoxExtent.Z);
+	const float Lift = Ground - SoleZ;
+	// Half a centimetre of slop is below anything the lobby camera can show; only correct a real gap.
+	if (!FMath::IsNearlyZero(Lift, 0.5f))
+	{
+		Actor->SetActorLocation(FVector(0.f, Y, Ground + Lift), false, nullptr, ETeleportType::TeleportPhysics);
+	}
 }
 
 void ACampusLobbyPlayerController::RebuildSquad()
@@ -207,16 +281,13 @@ void ACampusLobbyPlayerController::RebuildSquad()
 		}
 		const int32 Slot = Order.IsValidIndex(Index) ? Order[Index] : Index;
 		const float Y = -UCampusParty::SlotStep(Slot, Capacity) * CampusLobbyScene::SlotSpacing;
-		// one floor height for the whole line-up, measured at the centre once
-		if (!bFloorZKnown)
-		{
-			FloorZ = GroundAt(FVector::ZeroVector);
-			bFloorZKnown = true;
-		}
 		Actor->SetActorHiddenInGame(false);
-		Actor->SetActorLocation(FVector(0.f, Y, FloorZ), false, nullptr, ETeleportType::TeleportPhysics);
-		// Everyone keeps the yaw the player dragged to, so the line-up turns as one.
+		// Everyone keeps the yaw the player dragged to, so the line-up turns as one. Set BEFORE the
+		// placement, because the placement measures the figure where it is actually standing.
 		Actor->SetActorRotation(FRotator(0.f, DisplayYaw, 0.f));
+		// One trace PER SLOT, every rebuild. A mode change moves every figure, so every figure is
+		// re-grounded; nothing is carried over from a height measured somewhere else, earlier.
+		PlaceMember(Actor, Y);
 	}
 }
 
@@ -229,6 +300,8 @@ void ACampusLobbyPlayerController::BeginPlay()
 	}
 
 	RemovePodium();
+	// Read the floor AFTER the podium is gone, so its top can never be mistaken for the floor.
+	FloorPlaneZ = ReadFloorHeight();
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -337,8 +410,9 @@ void ACampusLobbyPlayerController::FocusProfile(bool bOn)
 		}
 		if (Squad.IsValidIndex(0) && Squad[0])
 		{
-			// One figure, standing at the lobby centre whatever squad slot it was in.
-			Squad[0]->SetActorLocation(FVector(0.f, 0.f, FloorZ), false, nullptr, ETeleportType::TeleportPhysics);
+			// One figure, standing at the lobby centre whatever squad slot it was in - and grounded by
+			// the same path the line-up uses, so the profile page cannot float on its own.
+			PlaceMember(Squad[0], 0.f);
 		}
 		if (!ProfileCamera)
 		{
