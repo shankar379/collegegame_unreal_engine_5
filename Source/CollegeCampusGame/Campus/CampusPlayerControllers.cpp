@@ -314,9 +314,8 @@ void ACampusLobbyPlayerController::RebuildSquad()
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			Component->SetMobility(EComponentMobility::Movable);
 			Component->SetSkeletalMeshAsset(Mesh);
-			// Measured on the phone with no input: at -90 the figure stood in profile facing screen-left
-			// (+Y), so this asset needs a further -90 to face +X, back along the camera's -X view.
-			Component->SetRelativeRotation(FRotator(0.f, 180.f, 0.f));
+			// No SetRelativeRotation here: the mesh IS this actor's root, so it would only be overwritten
+			// by SetActorRotation below. The facing correction lives in CampusLineUp::MeshYawOffset.
 			Component->SetAnimationMode(EAnimationMode::AnimationBlueprint);
 			Component->SetAnimInstanceClass(UCampusAnimInstance::StaticClass());
 			Squad[Index] = Actor;
@@ -327,7 +326,7 @@ void ACampusLobbyPlayerController::RebuildSquad()
 		Actor->SetActorHiddenInGame(false);
 		// Everyone keeps the yaw the player dragged to, plus their own slot's turn-in. Set BEFORE the
 		// placement, because the placement measures the figure where it is actually standing.
-		Actor->SetActorRotation(FRotator(0.f, DisplayYaw + CampusLineUp::SlotFacingYaw(Slot), 0.f));
+		Actor->SetActorRotation(FRotator(0.f, CampusLineUp::MeshYawOffset + DisplayYaw + CampusLineUp::SlotFacingYaw(Slot), 0.f));
 		// One trace PER SLOT, every rebuild. A mode change moves every figure, so every figure is
 		// re-grounded; nothing is carried over from a height measured somewhere else, earlier.
 		PlaceMember(Actor, Slot);
@@ -430,7 +429,7 @@ void ACampusLobbyPlayerController::RotateDisplay(float DeltaYaw)
 			// The whole line-up turns as one, but each figure keeps its own turn-in, or dragging would
 			// flatten the group back into a rigid row.
 			const int32 Slot = bProfileFocus ? CampusLineUp::MainSlot : CampusLineUp::SlotForMember(Index);
-			Member->SetActorRotation(FRotator(0.f, DisplayYaw + CampusLineUp::SlotFacingYaw(Slot), 0.f));
+			Member->SetActorRotation(FRotator(0.f, CampusLineUp::MeshYawOffset + DisplayYaw + CampusLineUp::SlotFacingYaw(Slot), 0.f));
 		}
 	}
 }

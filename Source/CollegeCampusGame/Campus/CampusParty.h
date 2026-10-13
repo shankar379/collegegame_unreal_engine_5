@@ -74,6 +74,10 @@ namespace CampusLineUp
 	 *  faces straight down the lobby axis - and then turned by the slot's own small amount so the
 	 *  outer three lean in towards the group. The player's slot adds nothing, so the player faces the
 	 *  camera square on. */
+	// The mannequin mesh faces +Y at yaw 0 (seen on the phone: side-on, facing screen-left). The lobby
+	// camera looks down -X, so every figure needs -90 to face it. Added to the actor yaw, the only rotation.
+	inline constexpr float MeshYawOffset = -90.f;
+
 	float SlotFacingYaw(int32 SlotIndex);
 }
 
