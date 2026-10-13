@@ -216,6 +216,16 @@ public:
 	UPROPERTY(EditAnywhere, Category="BR")
 	float SealGraceSeconds = 15.f;
 
+	/** SOLO TESTING: the host seals the moment it has spawned on the platform - itself plus 49 bots,
+	 *  then the countdown and the plane - instead of waiting for the backend's seal. Turn off once real
+	 *  players fill sessions. */
+	UPROPERTY(EditAnywhere, Category="BR")
+	bool bInstantBotFill = true;
+
+	/** How long the host stands on the platform before the instant fill seals. */
+	UPROPERTY(EditAnywhere, Category="BR")
+	float InstantFillDelaySeconds = 3.f;
+
 	UPROPERTY(EditAnywhere, Category="BR")
 	float CountdownSeconds = 10.f;
 

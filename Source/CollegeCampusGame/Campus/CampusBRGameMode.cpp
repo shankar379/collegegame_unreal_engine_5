@@ -348,6 +348,17 @@ void ACampusBRGameMode::PostLogin(APlayerController* NewPlayer)
 		}
 	}
 	RefreshCounts();
+
+	// SOLO TESTING: the host arriving is enough. Bots take the other 49 slots and the countdown starts.
+	if (bInstantBotFill && !bSealed && NewPlayer->IsLocalPlayerController())
+	{
+		FTimerHandle InstantFill;
+		GetWorldTimerManager().SetTimer(InstantFill, FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			const int32 Present = HumansPresent();
+			SealSession(Present, FMath::Max(0, MaxCombatants - Present), CountdownSeconds);
+		}), FMath::Max(0.1f, InstantFillDelaySeconds), false);
+	}
 }
 
 int32 ACampusBRGameMode::HumansPresent() const
