@@ -851,6 +851,11 @@ void ACampusMatchPlayerController::BeginPlay()
 	{
 		SessionEndedHandle = Queue->OnSessionEnded.AddLambda([this](const FString&)
 		{
+			// The HOST is the one running the match: the server losing track of it does not stop it.
+			if (GetNetMode() != NM_Client)
+			{
+				return;
+			}
 			LeaveToLobby();
 		});
 	}

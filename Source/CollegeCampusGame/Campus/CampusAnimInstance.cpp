@@ -263,6 +263,7 @@ bool FCampusAnimInstanceProxy::Evaluate(FPoseContext& Output)
 	ApplyRootYaw(Output);
 	ApplyFootIK(Output);
 	ApplyProneYaw(Output);
+	ApplyDivePose(Output);
 
 	if (ProneAlpha > UE_KINDA_SMALL_NUMBER)
 	{
@@ -274,6 +275,114 @@ bool FCampusAnimInstanceProxy::Evaluate(FPoseContext& Output)
 		Output.Pose[Root] = Output.Pose[Root] * Lay;
 	}
 	return true;
+}
+
+void FCampusAnimInstanceProxy::ApplyDivePose(FPoseContext& Output) const
+{
+	const float Dive = FMath::Clamp(FreefallAlpha + ChuteAlpha, 0.f, 1.f);
+	if (Dive < 0.01f)
+	{
+		return;
+	}
+	// THE SKYDIVE AND THE CANOPY HANG, IN CODE. The project ships no parachute animation - there is no
+	// skydive / freefall / glide clip anywhere in Content and no loose FBX to import - and the default
+	// jump-fall loop over a 300 m drop is the thing the owner saw and called wrong: a man who has just
+	// hopped off a kerb, legs tucked, for twenty seconds.
+	//
+	// Component space: the mesh faces +Y, up is +Z, so the character's LEFT is +X. With the engine's
+	// rotation convention that makes
+	//    about +X : + leans the body BACK, - pitches it FORWARD (the prone tip below uses -82),
+	//    about +Y : - raises the LEFT arm, + raises the right,
+	//    about +Z : + swings the LEFT arm forward, - the right.
+	// Degrees per bone, blended by the two weights, applied over a pull toward the reference pose so
+	// the result does not depend on where the fall loop happens to be.
+	struct FDiveBone
+	{
+		const TCHAR* Name;
+		int32 Axis;       // 0 = X, 1 = Y, 2 = Z
+		float Freefall;   // belly to earth, arms out
+		float Chute;      // upright, arms up on the risers
+	};
+	static const FDiveBone DiveBones[] =
+	{
+		// The arch: chest up against the wind in freefall, barely any of it in the harness.
+		{ TEXT("spine_02"),   0,  10.f,   4.f },
+		{ TEXT("spine_03"),   0,   8.f,   2.f },
+		// Arms: out to the sides in the star, up and in on the risers under the canopy.
+		{ TEXT("upperarm_l"), 1, -55.f, -78.f },
+		{ TEXT("upperarm_r"), 1,  55.f,  78.f },
+		{ TEXT("upperarm_l"), 2,  12.f,   6.f },
+		{ TEXT("upperarm_r"), 2, -12.f,  -6.f },
+		// Elbows: forward in the star, folded back in toward the risers while hanging.
+		{ TEXT("lowerarm_l"), 2,  45.f,   0.f },
+		{ TEXT("lowerarm_r"), 2, -45.f,   0.f },
+		{ TEXT("lowerarm_l"), 1,   0.f,  42.f },
+		{ TEXT("lowerarm_r"), 1,   0.f, -42.f },
+		// Legs: knees bent and spread in the star, hanging slightly forward under the canopy.
+		{ TEXT("thigh_l"),    1, -14.f,  -6.f },
+		{ TEXT("thigh_r"),    1,  14.f,   6.f },
+		{ TEXT("thigh_l"),    0, -10.f, -14.f },
+		{ TEXT("thigh_r"),    0, -10.f, -14.f },
+		{ TEXT("calf_l"),     0,  50.f,  25.f },
+		{ TEXT("calf_r"),     0,  50.f,  25.f },
+		// Head up: face-down at 58 degrees, the neck has to come back to look where you are going.
+		{ TEXT("neck_01"),    0,  14.f,   0.f },
+		{ TEXT("head"),       0,  10.f,   0.f },
+	};
+
+	const FBoneContainer& Bones = Output.Pose.GetBoneContainer();
+	auto Find = [&Bones](const TCHAR* Name)
+	{
+		const int32 MeshIndex = Bones.GetPoseBoneIndexForBoneName(FName(Name));
+		return MeshIndex == INDEX_NONE ? FCompactPoseBoneIndex(INDEX_NONE)
+			: Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(MeshIndex));
+	};
+
+	// Pull every posed bone toward its reference rotation first: the dive is a pose, not an offset on
+	// top of whatever the jump clip is doing with the arms this frame.
+	for (const FDiveBone& Entry : DiveBones)
+	{
+		const FCompactPoseBoneIndex Index = Find(Entry.Name);
+		if (Index.IsValid())
+		{
+			FTransform& Bone = Output.Pose[Index];
+			Bone.SetRotation(FQuat::Slerp(Bone.GetRotation(), Output.Pose.GetRefPose(Index).GetRotation(), Dive).GetNormalized());
+		}
+	}
+
+	// Then the pose itself. The axis is a COMPONENT-space axis taken into the bone's own space through
+	// its parent chain (the same trick ApplyAimPitch uses for the spine), so none of this depends on
+	// which way a particular bone's local axes happen to point.
+	static const FVector Axes[3] = { FVector::XAxisVector, FVector::YAxisVector, FVector::ZAxisVector };
+	for (const FDiveBone& Entry : DiveBones)
+	{
+		const float Degrees = Entry.Freefall * FreefallAlpha + Entry.Chute * ChuteAlpha;
+		const FCompactPoseBoneIndex Index = Find(Entry.Name);
+		if (!Index.IsValid() || FMath::Abs(Degrees) < 0.05f)
+		{
+			continue;
+		}
+		FQuat ParentRotation = FQuat::Identity;
+		for (FCompactPoseBoneIndex Parent = Bones.GetParentBoneIndex(Index); Parent.IsValid(); Parent = Bones.GetParentBoneIndex(Parent))
+		{
+			ParentRotation = Output.Pose[Parent].GetRotation() * ParentRotation;
+		}
+		const FVector LocalAxis = ParentRotation.Inverse().RotateVector(Axes[Entry.Axis]);
+		FTransform& Bone = Output.Pose[Index];
+		Bone.SetRotation((FQuat(LocalAxis, FMath::DegreesToRadians(Degrees)) * Bone.GetRotation()).GetNormalized());
+	}
+
+	// Last, the whole body: 58 degrees of nose-down in freefall, a 6 degree recline in the harness,
+	// turned about the hips so the diver stays centred in the capsule instead of swinging out of it.
+	const float Pitch = -58.f * FreefallAlpha + 6.f * ChuteAlpha;
+	if (FMath::Abs(Pitch) > 0.1f)
+	{
+		const FCompactPoseBoneIndex Root(0);
+		const FVector Pivot(0.f, 0.f, 95.f);
+		const FQuat Tilt(FVector::XAxisVector, FMath::DegreesToRadians(Pitch));
+		const FTransform Lay(Tilt, Pivot - Tilt.RotateVector(Pivot));
+		Output.Pose[Root] = Output.Pose[Root] * Lay;
+	}
 }
 
 void FCampusAnimInstanceProxy::ApplyUpperBody(FPoseContext& Output)
@@ -661,6 +770,14 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	}
 	Approach(RifleWeight, bArmed ? 1.f : 0.f, 0.2f);
 	Approach(ProneWeight, Campus && Campus->IsProne() ? 1.f : 0.f, 0.45f);
+	// The drop, from the pawn's replicated dive byte (ACampusCharacter::SetDivePose) - NOT from the
+	// drop actor, which only ever reaches the diver's own phone. Both weights ease, so leaving the
+	// plane is a move into the star and the canopy opening crossfades the body upright.
+	Approach(FreefallWeight, Campus && Campus->IsFreefalling() ? 1.f : 0.f, 0.25f);
+	Approach(ChuteWeight, Campus && Campus->IsUnderChute() ? 1.f : 0.f, 0.25f);
+	Proxy.FreefallAlpha = FreefallWeight;
+	Proxy.ChuteAlpha = ChuteWeight;
+	const float DiveShare = FMath::Clamp(FreefallWeight + ChuteWeight, 0.f, 1.f);
 	Proxy.ProneAlpha = 0.f; // the old tipped-crouch placeholder; real prone clips below
 	if (bInAir)
 	{
@@ -872,8 +989,10 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			Proxy.UpperBody = { Sequence, UpperBodyTime, UpperAlpha, false };
 		}
 	}
-	// Sets without rifle clips (crouch, air, landing) hold the rifle with the upper body only.
-	const float HoldRifle = RifleWeight * FMath::Max3(CrouchWeight, AirWeight, Land) * (1.f - ProneShare);
+	// Sets without rifle clips (crouch, air, landing) hold the rifle with the upper body only - but not
+	// mid-drop: a rifle idle on the upper body fights the spread arms and wins (it replaces spine_01
+	// and everything above it).
+	const float HoldRifle = RifleWeight * FMath::Max3(CrouchWeight, AirWeight, Land) * (1.f - ProneShare) * (1.f - DiveShare);
 	if (UpperBodyClip == INDEX_NONE && HoldRifle > 0.01f)
 	{
 		if (const UAnimSequence* RifleIdle = Clip(CampusClips::Rifle))
@@ -911,7 +1030,8 @@ void UCampusAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		AimPitchSmoothed += (TargetAimPitch - AimPitchSmoothed) * (1.f - FMath::Exp(-DeltaSeconds / 0.05f));
 	}
 	Proxy.AimPitch = AimPitchSmoothed;
-	Proxy.AimPitchAlpha = RifleWeight * (1.f - UpperAlpha) * (1.f - ProneShare);
+	// Not while diving: aim pitch bends the whole spine chain, and the drop's own arch owns the spine.
+	Proxy.AimPitchAlpha = RifleWeight * (1.f - UpperAlpha) * (1.f - ProneShare) * (1.f - DiveShare);
 	Proxy.CrouchRunBend = CrouchRunWeight * CrouchWeight;
 
 	// Foot IK: trace under each foot onto the real steps. The stair ramps (smooth capsule movement) are on their

@@ -101,6 +101,11 @@ struct FCampusPartyMember
 	/** menu | lobby | match | offline, from the party view. Empty on the AdoptSquad path. */
 	FString Presence;
 
+	/** `avatar_url` from the party view: the small picture on the squad name plate. Empty on the
+	 *  AdoptSquad path (all that has is a replicated display name), and the plate then looks exactly
+	 *  as it did before pictures existed. */
+	FString AvatarUrl;
+
 	/** The pending invite behind an INVITED plate, so the leader can cancel it. */
 	FString InviteId;
 
@@ -121,7 +126,7 @@ public:
 	static constexpr int32 MaxMembers = 4;
 
 	/** The local player. Replaces any existing leader entry. */
-	void SetLeader(const FString& Name, int32 Level, int32 Rank = 0);
+	void SetLeader(const FString& Name, int32 Level, int32 Rank = 0, const FString& AvatarUrl = FString());
 
 	/** Adds or updates one member; ignored once the party is full. */
 	void AddMember(const FString& Name, int32 Level, bool bAccepted, int32 Rank = 0);

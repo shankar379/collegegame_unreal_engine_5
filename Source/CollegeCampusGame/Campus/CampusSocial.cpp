@@ -163,6 +163,8 @@ namespace
 		}
 		Card.Name = Str(Json, TEXT("display_name"));
 		Card.Color = Colour(Json, TEXT("color"));
+		// The picture; the colour above is only its fallback now (CampusAvatar.h).
+		Card.AvatarUrl = Str(Json, TEXT("avatar_url"));
 		Card.Presence = Str(Json, TEXT("presence"));
 		if (Card.Presence.IsEmpty())
 		{
@@ -211,6 +213,7 @@ namespace
 		Member.Name = Str(Json, TEXT("display_name"));
 		Member.Level = FMath::Max(1, int32(Num(Json, TEXT("level"))));
 		Member.Presence = Str(Json, TEXT("presence"));
+		Member.AvatarUrl = Str(Json, TEXT("avatar_url"));
 		Member.bAccepted = bAccepted;
 		Member.bLeader = bAccepted && !LeaderId.IsEmpty() && Member.PlayerId == LeaderId;
 		Member.InviteId = Str(Json, TEXT("invite_id"));
@@ -335,7 +338,7 @@ bool FCampusServerParty::Matches(const FCampusServerParty& Other) const
 	{
 		return A.PlayerId == B.PlayerId && A.Name == B.Name && A.Level == B.Level && A.Rank == B.Rank
 			&& A.bLeader == B.bLeader && A.bAccepted == B.bAccepted && A.Presence == B.Presence
-			&& A.InviteId == B.InviteId;
+			&& A.InviteId == B.InviteId && A.AvatarUrl == B.AvatarUrl;
 	};
 	for (int32 Index = 0; Index < Members.Num(); ++Index)
 	{
@@ -2135,6 +2138,7 @@ namespace
 		Out.PublicId = Str(Player, TEXT("public_id"));
 		Out.Name = Str(Player, TEXT("display_name"));
 		Out.Color = Colour(Player, TEXT("color"));
+		Out.AvatarUrl = Str(Player, TEXT("avatar_url"));
 		Out.CollegeName = Str(Player, TEXT("college_name"));
 		Out.Branch = Str(Player, TEXT("branch"));
 		Out.bBoardOptOut = Bool(Player, TEXT("board_opt_out"));
@@ -2429,6 +2433,7 @@ void UCampusSocial::LoadSummary(const FString& Code, FSummaryDone Done)
 					Line.PlayerId = Str(Row, TEXT("player_id"));
 					Line.Name = Str(Row, TEXT("display_name"));
 					Line.Color = Colour(Row, TEXT("color"));
+					Line.AvatarUrl = Str(Row, TEXT("avatar_url"));
 					Line.FriendState = Str(Row, TEXT("friend_state"));
 					Line.Team = int32(Num(Row, TEXT("team")));
 					Line.Level = int32(Num(Row, TEXT("level")));

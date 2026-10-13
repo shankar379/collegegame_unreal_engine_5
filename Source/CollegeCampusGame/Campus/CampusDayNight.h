@@ -10,6 +10,10 @@
 //   * the few real lights: the directional light, the sky light, the height fog, and the street lamps -
 //     off by day, on at night, and only the ones near roads exist at all (phone budget).
 //
+// THE SKY ITSELF is a SkyAtmosphere, placed by the build script and guaranteed here (EnsureFor /
+// RetireSkyDome). It used to be a 56 km half-sphere of vertex-coloured triangles baked into the level
+// mesh, which on a phone read as a faceted globe hanging over the valley.
+//
 // Which actor is which is read from tags (VVSun / VVSky / VVFog / VVLamp) that the build script sets, so
 // the level can be rebuilt from Python without anybody re-pointing editor references.
 //
@@ -53,6 +57,13 @@ class ACampusDayNight : public AActor
 public:
 	ACampusDayNight();
 
+	/** Server: make sure this world has exactly one of these. The level carries one when the build
+	 *  script placed it, but a map generated before this class was compiled has none - and then
+	 *  nothing applies the preset, nothing retires the old sky dome and nothing places the
+	 *  atmosphere. The actor is replicated and always relevant, so one spawned here reaches every
+	 *  client and does all three there too. */
+	static void EnsureFor(UWorld* World);
+
 	/** Server only. Replicates to every client, which re-applies on OnRep_Night. */
 	void SetNight(bool bInNight);
 	bool IsNight() const { return bNight; }
@@ -78,6 +89,12 @@ private:
 	/** Fills the actor lists from the level's tags. Cheap, and done once. */
 	void CollectLights();
 	void Apply();
+	/** THE GLOBE. Levels built before the sky became a real atmosphere carry SM_VV_Sky: a 56 km
+	 *  double-sided half-sphere of 18 x 6 vertex-coloured quads, which on a phone reads as a faceted
+	 *  ball over the valley rather than a sky. The builder no longer emits it; this hides whatever a
+	 *  level still has baked in and makes sure a SkyAtmosphere is there to replace it, so a cooked
+	 *  map does not have to be regenerated before it looks right. */
+	void RetireSkyDome();
 
 	UPROPERTY(Transient) TArray<AActor*> Suns;
 	UPROPERTY(Transient) TArray<AActor*> Skies;

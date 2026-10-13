@@ -208,6 +208,8 @@ void ACampusCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME_CONDITION(ACampusCharacter, bAiming, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACampusCharacter, bProne, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACampusCharacter, bSliding, COND_SkipOwner);
+	// NOT SkipOwner: the diver's own phone draws the same skydive pose and pulls its own camera back.
+	DOREPLIFETIME(ACampusCharacter, DivePose);
 	DOREPLIFETIME(ACampusCharacter, Health);
 	// Unconditional on purpose: everyone draws and aims at seated players, the owner included.
 	DOREPLIFETIME(ACampusCharacter, Vehicle);
@@ -389,8 +391,17 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 		const float HeadHeight = GetMesh()->GetSocketLocation(TEXT("head")).Z - GetActorLocation().Z + 4.f;
 		PivotHeight = FMath::Lerp(PivotHeight, HeadHeight, CamAim);
 	}
-	CameraBoom->TargetArmLength = FMath::Lerp(DefaultArmLength, AimArmLength, CamAim);
-	CameraBoom->SocketOffset = FVector(0.f, FMath::Lerp(HipSide, AimSide, CamAim), FMath::Lerp(0.f, AimUp, CamAim));
+	// The drop: the boom goes right out, because the canopy hangs over the walking camera's own head.
+	// Eased, and only toward the dive - coming back out of it rides the same ease, so the landing is
+	// not a cut either. The shoulder offset goes away with it: a 9 m boom with 70 cm of side offset
+	// swings the whole body across the screen on every look.
+	DiveCamera = FMath::FInterpConstantTo(DiveCamera, IsDiving() ? 1.f : 0.f, DeltaSeconds, 1.f / 0.5f);
+	// The dive's own length eases too, so the extra 2.8 m the canopy needs is a push-out and not a cut.
+	DiveArm = DiveArm <= 0.f ? FreefallArmLength
+		: FMath::FInterpTo(DiveArm, IsUnderChute() ? ChuteArmLength : FreefallArmLength, DeltaSeconds, 3.f);
+	CameraBoom->TargetArmLength = FMath::Lerp(FMath::Lerp(DefaultArmLength, AimArmLength, CamAim), DiveArm, DiveCamera);
+	CameraBoom->SocketOffset = FVector(0.f, FMath::Lerp(HipSide, AimSide, CamAim) * (1.f - DiveCamera),
+		FMath::Lerp(0.f, AimUp, CamAim));
 	CameraBoom->SetRelativeLocation(FVector(0.f, 0.f, PivotHeight));
 
 	// Free look: released offset swings back the shortest way (three.js: x *= exp(-14 dt), snap < 0.002 rad).
@@ -1193,6 +1204,17 @@ bool ACampusCharacter::IsLocalPlayerPawn() const
 	return Controller != nullptr && Controller->IsLocalController() && Controller->IsPlayerController();
 }
 
+void ACampusCharacter::SetDivePose(uint8 Pose)
+{
+	if (!HasAuthority() || DivePose == Pose)
+	{
+		return;
+	}
+	DivePose = Pose;
+	// The host's own pose changes with the property; a client's follows when the byte lands.
+	ForceNetUpdate();
+}
+
 double ACampusCharacter::ViewDelaySeconds() const
 {
 	// A seated character's mesh is drawn by the car's 100 ms playout buffer, not by movement smoothing,
@@ -1400,7 +1422,9 @@ void ACampusCharacter::UpdateGun()
 	{
 		return;
 	}
-	const bool bShow = bArmed && !(IsLocallyControlled() && CameraAimBlend > 0.5f);
+	// Nothing in the hands during the drop: the skydive and the canopy hang both spread the arms, and a
+	// rifle hanging off one of them reads as a bug (the loadout is handed back on landing anyway).
+	const bool bShow = bArmed && !IsDiving() && !(IsLocallyControlled() && CameraAimBlend > 0.5f);
 	if (Gun->IsVisible() != bShow)
 	{
 		Gun->SetVisibility(bShow);

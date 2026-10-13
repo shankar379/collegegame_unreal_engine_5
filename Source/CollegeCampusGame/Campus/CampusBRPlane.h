@@ -38,10 +38,12 @@ enum class ECampusBRDive : uint8
 };
 
 /**
- * The open canopy over one diver: a flattened dome and four rigging lines down to the shoulders.
- * No collision, no tick, no gameplay - the dive state stays in ACampusBRDrop, which owns this actor's
- * whole life. It exists only because the drop itself is owner-relevant and a parachute is not: this is
- * what the other forty-nine players see coming down.
+ * The open canopy over one diver: an arched canopy (a flattened dome with a cone ridge over it) and
+ * four rigging lines down to the shoulders. No gameplay - the dive state stays in ACampusBRDrop, which
+ * owns this actor's whole life. It exists only because the drop itself is owner-relevant and a
+ * parachute is not: this is what the other forty-nine players see coming down.
+ *
+ * It ticks for ONE thing: the 0.6 s inflation, run from the local clock on every machine.
  */
 UCLASS()
 class ACampusBRChute : public AActor
@@ -53,6 +55,7 @@ public:
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
 
 	/** Server: hang a canopy over this diver. Null when there is nothing to hang it on. */
 	static ACampusBRChute* Deploy(ACampusCharacter* Diver);
@@ -61,19 +64,31 @@ private:
 	UFUNCTION()
 	void OnRep_Wearer();
 
-	/** Attach to the diver's shoulders on whichever machine we are. Safe to call twice. */
+	/** Attach to the diver's shoulders on whichever machine we are. Safe to call twice. Null hides the
+	 *  canopy: a far diver's pawn is out of relevancy range, and a canopy with nothing under it would
+	 *  hang in the sky at the altitude it opened. */
 	void HangOn(ACampusCharacter* Who);
+
+	/** The inflation, 0..1 over OpenSeconds from the first frame this machine saw the canopy. */
+	void Inflate(float Alpha);
 
 	/** Who is under it. Every machine attaches itself from this, rather than trusting attachment
 	 *  replication to arrive in the same bunch as the spawn. */
 	UPROPERTY(ReplicatedUsing = OnRep_Wearer)
 	TObjectPtr<ACampusCharacter> Wearer = nullptr;
 
+	/** Seconds since this machine first drew the canopy; -1 until it has a wearer to hang on. */
+	float OpenAge = -1.f;
+
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<USceneComponent> Harness;
 
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> Canopy;
+
+	/** The arch: a cone over the dome, so the canopy is a parachute from the side and not an egg. */
+	UPROPERTY(VisibleAnywhere, Category = "Components")
+	TObjectPtr<UStaticMeshComponent> CanopyRidge;
 
 	/** Four rigging lines, one per diagonal. Named rather than an array because a component UPROPERTY
 	 *  has to be fixed up when the class default object is instanced, and the whole file declares its
@@ -100,6 +115,7 @@ public:
 	ACampusBRDrop();
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 
@@ -211,6 +227,16 @@ public:
 
 	/** The plane is inside the map square right now - the window in which jumping is allowed. */
 	bool IsOverMap() const;
+
+	// ---- the flight route, for the maps (SCampusTouchControls::DrawFlightRoute). All three are
+	// derived from the REPLICATED endpoints and clock, so every client draws the same line.
+	/** Launch has handed this plane a line: before that there is no route to draw. */
+	bool HasRoute() const { return LaunchTime > 0.f && FlightSeconds > 0.f && !FVector(Start).Equals(FVector(Finish)); }
+	/** Where the line begins and ends, world cm. Both sit OUTSIDE the map square (LineOvershoot). */
+	FVector GetRouteStart() const { return FVector(Start); }
+	FVector GetRouteFinish() const { return FVector(Finish); }
+	/** Where the aircraft is this frame, unclamped - it flies on past the end of the line and leaves. */
+	FVector GetRouteLocation() const { return FlightLocation(); }
 
 private:
 	/** Server: everyone still aboard leaves now. */

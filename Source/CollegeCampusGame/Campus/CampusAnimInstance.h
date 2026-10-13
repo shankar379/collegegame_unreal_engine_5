@@ -53,6 +53,13 @@ struct FCampusAnimInstanceProxy : public FAnimInstanceProxy
 	/** 0 standing .. 1 lying flat (placeholder: the crouch pose tipped forward onto the ground). */
 	float ProneAlpha = 0.f;
 
+	/** The deployment: 0..1 belly-to-earth freefall, 0..1 hanging under the canopy. The project owns no
+	 *  skydive or parachute clip (there is no FBX and nothing in /Game/CampusAnims), so both poses are
+	 *  built in code out of bone rotations - see ApplyDivePose. Driven from the pawn's REPLICATED dive
+	 *  byte, so remote divers are posed on every phone too. */
+	float FreefallAlpha = 0.f;
+	float ChuteAlpha = 0.f;
+
 	float AimPitch = 0.f;
 	float AimPitchAlpha = 0.f;
 	/** 0..1: the bent-over crouch run (armed, crouched, running): lower spine leans forward, chest partly back. */
@@ -73,6 +80,7 @@ private:
 	void ApplyAimPitch(FPoseContext& Output) const;
 	void ApplyFootIK(FPoseContext& Output) const;
 	void ApplyProneYaw(FPoseContext& Output) const;
+	void ApplyDivePose(FPoseContext& Output) const;
 	void ApplyLean(FPoseContext& Output);
 	void ApplyRootYaw(FPoseContext& Output) const;
 
@@ -192,6 +200,9 @@ private:
 	float AirTime = 0.f;
 	float LandTime = 0.f;
 	bool bWasInAir = false;
+	/** Eased dive weights (0.25 s), so the pose comes in as a move and freefall -> canopy crossfades. */
+	float FreefallWeight = 0.f;
+	float ChuteWeight = 0.f;
 	float TraversalWeight = 0.f;
 	int32 LastTraversalKind = INDEX_NONE;
 	float LastTraversalTime = 0.f;

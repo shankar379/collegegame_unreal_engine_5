@@ -347,6 +347,11 @@ public:
 	FString RollNo;
 	FString Branch;
 	FString College;
+	/** PROFILE PICTURE (`player.avatar_url`): the lobby badge, the profile page and my own squad plate.
+	 *  ALWAYS set on a current server - a new account is given one of the 45 preset icons at random -
+	 *  and it may be relative, so every reader goes through CampusAvatar::Resolve. Mirrored into the
+	 *  save so the badge paints on frame one instead of after GET /me lands. */
+	FString AvatarUrl;
 	bool bGuest = true;
 	int32 RoomCards = 0;
 	int32 Diamonds = 0;

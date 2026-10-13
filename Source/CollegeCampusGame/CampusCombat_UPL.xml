@@ -6,6 +6,14 @@
     AndroidThunkJava_RazorpayOpen(...) through JNI (Campus/CampusRazorpay.cpp); the result comes back through
     nativeRazorpayResult(...). The order is created by OUR server at its own price; the signature is verified by
     the server (POST /v1/payments/verify) before anything is credited.
+  - PROFILE PICTURE picker (Campus/CampusAvatarPicker.cpp): AndroidThunkJava_CampusPickAvatar() opens the
+    SYSTEM PHOTO PICKER (MediaStore ACTION_PICK_IMAGES) where it exists, and ACTION_GET_CONTENT everywhere
+    else. BOTH are user-mediated, single-item pickers, so NO STORAGE PERMISSION IS DECLARED OR NEEDED -
+    READ_MEDIA_IMAGES / READ_EXTERNAL_STORAGE must NOT be added here (Play's photo-and-video-permissions
+    policy would then want a justification this feature does not have). ACTION_PICK on
+    MediaStore.EXTERNAL_CONTENT_URI is the trap: it DOES need READ_EXTERNAL_STORAGE on API 32 and below.
+    The phone does all the pixel work - EXIF rotation, downscale to 512 px, JPEG q85 - on a worker thread,
+    and hands the bytes to C++ through nativeCampusAvatarPicked(byte[], String).
 -->
 <root xmlns:android="http://schemas.android.com/apk/res/android">
 	<androidManifestUpdates>
@@ -39,6 +47,14 @@ import com.razorpay.Checkout;
 import com.razorpay.PaymentData;
 import com.razorpay.PaymentResultWithDataListener;
 import org.json.JSONObject;
+import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
+import android.media.ExifInterface;
+import android.net.Uri;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 		</insert>
 	</gameActivityImportAdditions>
 
@@ -94,6 +110,175 @@ import org.json.JSONObject;
 	public void onPaymentError(int code, String response, PaymentData data) {
 		nativeRazorpayResult(code, data != null ? data.getOrderId() : "", data != null ? data.getPaymentId() : "", "", response);
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// PROFILE PICTURE (Campus/CampusAvatarPicker.cpp, Campus/CampusAvatar.cpp)
+
+	/** Our startActivityForResult code. Nothing else in GameActivity or its plugins uses this range. */
+	public static final int CAMPUS_AVATAR_REQUEST = 61001;
+	/** Longest edge we send up, and the JPEG quality. Mirrors CampusAvatarApi in Campus/CampusAvatar.h. */
+	public static final int CAMPUS_AVATAR_MAX = 512;
+	public static final int CAMPUS_AVATAR_QUALITY = 85;
+	/** The system photo picker's action. Written as a LITERAL so this file does not depend on the
+	 *  compileSdk being 33+ (MediaStore.ACTION_PICK_IMAGES would). */
+	public static final String CAMPUS_ACTION_PICK_IMAGES = "android.provider.action.PICK_IMAGES";
+
+	/** jpeg = the compressed bytes, or null. error = "" when the player simply backed out (NOT an error).
+	 *  PUBLIC on purpose, like the thunk below: the engine's only keep rule for this class is
+	 *  "-keepclassmembers class com.epicgames.unreal.GameActivity { public *; }" (Intermediate/Android/
+	 *  arm64/proguard-project.txt), so a private JNI entry point would be renamed by R8 in a shipping
+	 *  build and FJavaWrapper::FindMethod would come back null. The helpers below ARE private, because
+	 *  nothing outside this class calls them. */
+	public native void nativeCampusAvatarPicked(byte[] jpeg, String error);
+
+	/** Opens the picker. Exactly one nativeCampusAvatarPicked follows, from whichever path ends it. */
+	public void AndroidThunkJava_CampusPickAvatar()
+	{
+		runOnUiThread(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					startActivityForResult(CampusAvatarPickerIntent(), CAMPUS_AVATAR_REQUEST);
+				} catch (Exception e) {
+					Log.error("Campus avatar: no picker could be opened: " + e.toString());
+					nativeCampusAvatarPicked(null, "No photo app could be opened.");
+				}
+			}
+		});
+	}
+
+	/** The SYSTEM PHOTO PICKER on Android 13+ (and on 11/12 where the R SDK extension provides it),
+	 *  ACTION_GET_CONTENT otherwise. Neither needs a storage permission; see the header of this file. */
+	private Intent CampusAvatarPickerIntent()
+	{
+		boolean bPhotoPicker = false;
+		if (android.os.Build.VERSION.SDK_INT &gt;= 33) {
+			bPhotoPicker = true;
+		} else if (android.os.Build.VERSION.SDK_INT &gt;= 30) {
+			try {
+				bPhotoPicker = android.os.ext.SdkExtensions.getExtensionVersion(android.os.Build.VERSION_CODES.R) &gt;= 2;
+			} catch (Throwable t) {
+				bPhotoPicker = false;
+			}
+		}
+		if (bPhotoPicker) {
+			Intent Pick = new Intent(CAMPUS_ACTION_PICK_IMAGES);
+			Pick.setType("image/*");
+			return Pick;
+		}
+		Intent Get = new Intent(Intent.ACTION_GET_CONTENT);
+		Get.addCategory(Intent.CATEGORY_OPENABLE);
+		Get.setType("image/*");
+		return Intent.createChooser(Get, "Choose a picture");
+	}
+
+	/** Reads the stream, honours the EXIF rotation, downscales to 512 px and compresses to JPEG q85.
+	 *  ALWAYS on a worker thread: a 12 MP photo decoded on the UI thread is an ANR waiting to be
+	 *  reported, and inSampleSize keeps the full-size bitmap out of memory entirely. */
+	private void CampusProcessAvatar(final Uri Source)
+	{
+		byte[] Jpeg = null;
+		String Error = "";
+		Bitmap Decoded = null;
+		Bitmap Scaled = null;
+		try {
+			BitmapFactory.Options Bounds = new BitmapFactory.Options();
+			Bounds.inJustDecodeBounds = true;
+			InputStream Probe = getContentResolver().openInputStream(Source);
+			BitmapFactory.decodeStream(Probe, null, Bounds);
+			Probe.close();
+			int Longest = Math.max(Bounds.outWidth, Bounds.outHeight);
+			if (Longest &lt;= 0) {
+				throw new Exception("not an image");
+			}
+
+			BitmapFactory.Options Options = new BitmapFactory.Options();
+			Options.inSampleSize = 1;
+			while ((Longest / (Options.inSampleSize * 2)) &gt;= CAMPUS_AVATAR_MAX) {
+				Options.inSampleSize *= 2;
+			}
+			InputStream Stream = getContentResolver().openInputStream(Source);
+			Decoded = BitmapFactory.decodeStream(Stream, null, Options);
+			Stream.close();
+			if (Decoded == null) {
+				throw new Exception("decode failed");
+			}
+
+			final int Width = Decoded.getWidth();
+			final int Height = Decoded.getHeight();
+			final float Scale = Math.min(1.0f, (float)CAMPUS_AVATAR_MAX / (float)Math.max(Width, Height));
+			final int Rotation = CampusAvatarRotation(Source);
+			Matrix Transform = new Matrix();
+			Transform.postScale(Scale, Scale);
+			if (Rotation != 0) {
+				Transform.postRotate(Rotation);
+			}
+			Scaled = Bitmap.createBitmap(Decoded, 0, 0, Width, Height, Transform, true);
+
+			ByteArrayOutputStream Out = new ByteArrayOutputStream();
+			Scaled.compress(Bitmap.CompressFormat.JPEG, CAMPUS_AVATAR_QUALITY, Out);
+			Jpeg = Out.toByteArray();
+			Out.close();
+		} catch (Throwable t) {
+			Log.error("Campus avatar: " + t.toString());
+			Jpeg = null;
+			Error = "That picture could not be read. Try another one.";
+		} finally {
+			if (Scaled != null &amp;&amp; Scaled != Decoded) {
+				Scaled.recycle();
+			}
+			if (Decoded != null) {
+				Decoded.recycle();
+			}
+		}
+		// C++ hops this to the game thread itself (AsyncTask GameThread), so this call is safe here.
+		nativeCampusAvatarPicked(Jpeg, Error);
+	}
+
+	/** The EXIF quarter-turn, or 0. Phone cameras store the sensor frame and the rotation separately,
+	 *  so without this every portrait selfie arrives on its side. */
+	private int CampusAvatarRotation(final Uri Source)
+	{
+		try {
+			InputStream Stream = getContentResolver().openInputStream(Source);
+			ExifInterface Exif = new ExifInterface(Stream);
+			int Orientation = Exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+			Stream.close();
+			if (Orientation == ExifInterface.ORIENTATION_ROTATE_90) { return 90; }
+			if (Orientation == ExifInterface.ORIENTATION_ROTATE_180) { return 180; }
+			if (Orientation == ExifInterface.ORIENTATION_ROTATE_270) { return 270; }
+		} catch (Throwable t) {
+			// No EXIF (a screenshot, a PNG): nothing to correct.
+		}
+		return 0;
+	}
 		</insert>
 	</gameActivityClassAdditions>
+
+	<gameActivityOnActivityResultAdditions>
+		<insert>
+		if (requestCode == CAMPUS_AVATAR_REQUEST)
+		{
+			// RESULT_CANCELED with no data is the player backing out of the picker: an empty error, so
+			// the game says nothing. Anything else goes to the worker thread.
+			if (resultCode != RESULT_OK || data == null || data.getData() == null)
+			{
+				nativeCampusAvatarPicked(null, "");
+			}
+			else
+			{
+				final Uri Picked = data.getData();
+				new Thread(new Runnable() {
+					@Override
+					public void run() {
+						CampusProcessAvatar(Picked);
+					}
+				}).start();
+			}
+			// NO early return: this block is merged in alongside the engine's own handling, just
+			// before nativeOnActivityResult(...), and returning here would rob every other plugin
+			// of the dispatch for its own request codes.
+		}
+		</insert>
+	</gameActivityOnActivityResultAdditions>
 </root>

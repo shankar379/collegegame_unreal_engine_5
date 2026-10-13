@@ -166,6 +166,9 @@ void UCampusBackend::Initialize(FSubsystemCollectionBase& Collection)
 		Level = FMath::Max(1, Profile->ServerLevel);
 		XpIntoLevel = FMath::Max(0, Profile->ServerXpInto);
 		XpForNext = FMath::Max(0, Profile->ServerXpForNext);
+		// Same reasoning for the profile picture: the badge paints yesterday's picture out of the disk
+		// cache now, and the server's word replaces it the moment GET /me lands.
+		AvatarUrl = Profile->AvatarUrl;
 	}
 }
 
@@ -467,6 +470,9 @@ void UCampusBackend::ReadPlayer(TSharedPtr<FJsonObject> Player)
 	Branch = Str(Player, TEXT("branch"));
 	College = Str(Player, TEXT("college"));
 	CollegeId = Str(Player, TEXT("college_id"));
+	// Additive field: an older server simply sends nothing and the badge keeps its level number.
+	// Relative or absolute, resolved by CampusAvatar::Resolve at the point of use - never here.
+	AvatarUrl = Str(Player, TEXT("avatar_url"));
 	bShowCollege = Bool(Player, TEXT("show_college"));
 	bGuest = Bool(Player, TEXT("guest"));
 	bAdultConfirmed = Bool(Player, TEXT("adult_confirmed"));
@@ -478,6 +484,7 @@ void UCampusBackend::ReadPlayer(TSharedPtr<FJsonObject> Player)
 	if (UCampusSave* Profile = Save())
 	{
 		Profile->PlayerName = PlayerName;
+		Profile->AvatarUrl = AvatarUrl;
 		Profile->Persist();
 	}
 }

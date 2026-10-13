@@ -172,6 +172,12 @@ private:
 	// ---- maps (three.js src/game/maps.js) and the scoreboard
 	/** The campus picture with you (yellow arrow) and your teammates; bBig = full-screen map with grid + names. */
 	void DrawMap(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size, bool bBig, float U) const;
+	/** BATTLE ROYALE: the plane's flight path across the picture, PUBG / Free Fire style - the line,
+	 *  a START and an END marker, chevrons along it for the direction, and the aircraft's own icon
+	 *  where it is right now. Drawn on BOTH maps because DrawMap draws both; dims once the plane has
+	 *  flown the line out, and draws nothing at all outside a battle session. */
+	void DrawFlightRoute(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size,
+		bool bBig, float Scale) const;
 	/** Tap the timer. Picks the board that belongs to the game type and draws nothing else. */
 	void DrawScoreboard(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
 	/** ROOM: both teams side by side, kills / deaths / damage dealt / taken for this room's rounds. */

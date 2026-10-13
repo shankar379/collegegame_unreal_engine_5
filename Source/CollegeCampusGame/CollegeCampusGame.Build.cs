@@ -43,7 +43,18 @@ public class CollegeCampusGame : ModuleRules
 
 		// Campus/CampusMapArt.cpp decodes the map-select banner PNGs at runtime (they ship as loose
 		// UFS files, see DefaultGame.ini) instead of cooking a texture asset per picture.
+		// Campus/CampusAvatar.cpp needs it too: profile pictures (preset icons and uploaded photos)
+		// arrive over HTTP as JPEG / PNG bytes and are decoded into transient UI textures.
 		PrivateDependencyModuleNames.Add("ImageWrapper");
+
+		if (Target.bBuildEditor)
+		{
+			// EDITOR ONLY: Campus/CampusAvatarPicker.cpp opens an ordinary open-file dialog on Windows so
+			// the whole profile-picture path (pick -> downscale -> JPEG -> PUT -> decode -> badge) can be
+			// tested without a phone. On the phone the picker is the Android system photo picker and this
+			// module is not referenced at all.
+			PrivateDependencyModuleNames.Add("DesktopPlatform");
+		}
 
 		// Internet play (Campus/CampusEOS.cpp): EOS Connect device-id login, so a match hosted on a
 		// phone can be reached over EOS P2P instead of a LAN address. OnlineServicesInterface is the

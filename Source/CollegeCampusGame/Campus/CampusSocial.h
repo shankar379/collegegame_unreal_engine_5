@@ -41,14 +41,18 @@ enum class ECampusSocialState : uint8 { Off, Connecting, Live, Retrying, GaveUp 
 
 /**
  * One `playerCard` (SOCIAL_PARTY §6.1): the single player shape the whole social UI paints from - the
- * friends list, the invite picker, the post-match rows and the notice cards. There is no avatar art in
- * this project, so `Color` IS the avatar, which is why the API returns it on every card.
+ * friends list, the invite picker, the post-match rows and the notice cards. `Color` is the avatar
+ * FALLBACK (with the initial) for a card whose picture has not arrived - every current account has an
+ * `avatar_url`, because the server hands out one of 45 preset icons on sign-up.
  */
 struct FCampusPlayerCard
 {
 	FString PlayerId;
 	FString Name;
 	FLinearColor Color = FLinearColor(0.35f, 0.38f, 0.44f, 1.f);
+	/** `avatar_url` from the payload: a preset icon or an uploaded photo, relative or absolute.
+	 *  Empty = this server predates pictures, and the colour + initial plate stands in. */
+	FString AvatarUrl;
 	/** menu | lobby | match | offline | unknown */
 	FString Presence = TEXT("offline");
 	/** They are already in somebody's squad, so the INVITE button is a lie. */
@@ -189,6 +193,8 @@ struct FCampusProfile
 	FString PublicId;
 	FString Name;
 	FLinearColor Color = FLinearColor(0.35f, 0.38f, 0.44f, 1.f);
+	/** `player.avatar_url` - the big plate at the top of the page, and what CHANGE PHOTO replaces. */
+	FString AvatarUrl;
 	FString CollegeName;
 	FString Branch;
 	bool bBoardOptOut = false;
@@ -270,6 +276,8 @@ struct FCampusSummaryRow
 	/** Empty = an erased account: the row stays (the match happened) and reads PLAYER LEFT. */
 	FString Name;
 	FLinearColor Color = FLinearColor(0.35f, 0.38f, 0.44f, 1.f);
+	/** `avatar_url`, when the summary payload carries one. */
+	FString AvatarUrl;
 	FString FriendState;
 	int32 Team = 0;
 	int32 Level = 0;

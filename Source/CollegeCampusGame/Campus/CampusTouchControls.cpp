@@ -1599,6 +1599,48 @@ namespace CampusMapArea
 		return FVector2D((World.X - MinX) / Span, (World.Y - MinY) / Span);
 	}
 
+	/** Liang-Barsky against the unit square, in UV. The flight line is launched from OUTSIDE the map
+	 *  square (CampusBRDive::LineOvershoot) so the plane is never seen turning, which means the part
+	 *  worth drawing is the part that crosses the picture. Clamping each endpoint on its own would
+	 *  bend a diagonal route; this keeps the line straight and puts the markers on the edges it
+	 *  actually enters and leaves by. False when the line misses the picture completely. */
+	bool ClipToPicture(FVector2D& A, FVector2D& B)
+	{
+		const FVector2D Along = B - A;
+		const double Edge[4] = { -Along.X, Along.X, -Along.Y, Along.Y };
+		const double Room[4] = { A.X, 1.0 - A.X, A.Y, 1.0 - A.Y };
+		double Enter = 0.0;
+		double Leave = 1.0;
+		for (int32 Side = 0; Side < 4; ++Side)
+		{
+			if (FMath::IsNearlyZero(Edge[Side]))
+			{
+				if (Room[Side] < 0.0)
+				{
+					return false; // parallel to this edge and wholly outside it
+				}
+				continue;
+			}
+			const double T = Room[Side] / Edge[Side];
+			if (Edge[Side] < 0.0)
+			{
+				Enter = FMath::Max(Enter, T);
+			}
+			else
+			{
+				Leave = FMath::Min(Leave, T);
+			}
+		}
+		if (Enter > Leave)
+		{
+			return false;
+		}
+		const FVector2D Clipped = A + Along * Enter;
+		B = A + Along * Leave;
+		A = Clipped;
+		return true;
+	}
+
 	struct FPlace { const TCHAR* Name; float X; float Y; };
 	const FPlace Places[] = {
 		{ TEXT("Front Block"), -2530.f, -11370.f }, { TEXT("Front Block"), 2835.f, -11370.f },
@@ -1646,6 +1688,9 @@ void SCampusTouchControls::DrawMap(FSlateWindowElementList& Out, int32 Layer, co
 		}
 		DrawText(Out, Layer + 3, G, TEXT("tap anywhere to close"), FVector2D(Min.X + Size * 0.5f, Min.Y + Size + 2.f * U), FMath::RoundToInt(U * 1.2f), FLinearColor(1.f, 1.f, 1.f, 0.7f));
 	}
+
+	// The plane's route, under the player arrows: the line is background, the arrows are you.
+	DrawFlightRoute(Out, Layer + 3, G, Min, Size, bBig, Scale);
 
 	// arrows: you (yellow, bigger) and your teammates (ROOM: the team colour. BR: one friendly green,
 	// because the only other side in a battle session is "everyone else"); enemies never show
@@ -1698,6 +1743,80 @@ void SCampusTouchControls::DrawMap(FSlateWindowElementList& Out, int32 Layer, co
 	{
 		Arrow(At(Me->GetActorLocation()), PC->GetControlRotation().Yaw, FLinearColor(FColor(0xFF, 0xD2, 0x1F)), 8.f * Scale);
 	}
+}
+
+void SCampusTouchControls::DrawFlightRoute(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size,
+	bool bBig, float Scale) const
+{
+	const APlayerController* PC = Controller.Get();
+	const UWorld* World = PC ? PC->GetWorld() : nullptr;
+	// EVERY machine reads the same four replicated values (Start, Finish, LaunchTime, FlightSeconds)
+	// through these accessors, so the line a remote client draws is the line the host is flying.
+	const ACampusBRPlane* Plane = World ? ACampusBRPlane::Get(World) : nullptr;
+	if (!Plane || !Plane->HasRoute())
+	{
+		return; // a room match, or the plane has not been handed a line yet
+	}
+	FVector2D Head = CampusMapArea::ToUV(Plane->GetRouteStart());
+	FVector2D Tail = CampusMapArea::ToUV(Plane->GetRouteFinish());
+	if (!CampusMapArea::ClipToPicture(Head, Tail))
+	{
+		return;
+	}
+	// The route has done its job once the aircraft has flown the line out. It stays on the picture,
+	// faded, rather than vanishing: a player still under the canopy is reading where everyone came from.
+	const float Fade = Plane->FlightAlpha() < 1.f ? 1.f : 0.3f;
+	const FVector2D From = Min + Head * Size;
+	const FVector2D To = Min + Tail * Size;
+	const FVector2D Dir = (To - From).GetSafeNormal();
+	const FVector2D Side(-Dir.Y, Dir.X);
+	const float Weight = FMath::Max(2.f, 2.2f * Scale);
+	const FLinearColor Ink(1.f, 1.f, 1.f, 0.9f * Fade);
+	const FLinearColor Mark = TouchStyle::Accent.CopyWithNewOpacity(TouchStyle::Accent.A * Fade);
+	DrawPolyline(Out, Layer, G, { FVector2f(From), FVector2f(To) }, Ink, Weight);
+
+	// Chevrons along the line: which end the plane came from is never left to be guessed.
+	const float Chevron = FMath::Max(3.f, 4.f * Scale);
+	for (int32 Step = 1; Step <= 3; ++Step)
+	{
+		const FVector2D Mid = From + (To - From) * (Step * 0.25f);
+		DrawPolyline(Out, Layer, G, {
+			FVector2f(Mid - Dir * Chevron + Side * Chevron),
+			FVector2f(Mid + Dir * Chevron),
+			FVector2f(Mid - Dir * Chevron - Side * Chevron) }, Ink, Weight);
+	}
+
+	// START filled, END hollow: the two-marker grammar every battle royale map uses.
+	const float Dot = FMath::Max(3.f, 4.f * Scale);
+	DrawCircle(Out, Layer, G, From, Dot, Mark);
+	DrawRing(Out, Layer, G, To, Dot, Mark);
+	if (bBig)
+	{
+		const int32 Font = FMath::RoundToInt(Size / 50.f);
+		DrawText(Out, Layer, G, TEXT("START"), From - Side * Dot * 3.f, Font, Mark);
+		DrawText(Out, Layer, G, TEXT("END"), To - Side * Dot * 3.f, Font, Mark);
+	}
+
+	// The aircraft itself. Off the picture it is not drawn at all: an icon pinned to the border
+	// would read as a plane parked on the map edge, which is exactly what it is not doing.
+	const FVector2D Now = CampusMapArea::ToUV(Plane->GetRouteLocation());
+	if (Now.X < 0.0 || Now.Y < 0.0 || Now.X > 1.0 || Now.Y > 1.0)
+	{
+		return;
+	}
+	// Fuselage, swept wings, tailplane: three strokes still read as an aeroplane at minimap size,
+	// where an icon texture is eight pixels of mush.
+	const FVector2D Body = Min + Now * Size;
+	const float Wing = FMath::Max(4.f, 5.f * Scale);
+	DrawCircle(Out, Layer, G, Body, Weight, Mark);
+	DrawPolyline(Out, Layer, G, { FVector2f(Body - Dir * Wing), FVector2f(Body + Dir * Wing * 1.3f) }, Ink, Weight);
+	DrawPolyline(Out, Layer, G, {
+		FVector2f(Body + Side * Wing - Dir * Wing * 0.45f),
+		FVector2f(Body),
+		FVector2f(Body - Side * Wing - Dir * Wing * 0.45f) }, Ink, Weight);
+	DrawPolyline(Out, Layer, G, {
+		FVector2f(Body + Side * Wing * 0.45f - Dir * Wing * 0.95f),
+		FVector2f(Body - Side * Wing * 0.45f - Dir * Wing * 0.95f) }, Ink, Weight);
 }
 
 void SCampusTouchControls::DrawScoreboard(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const

@@ -100,6 +100,11 @@ namespace CampusBRArt
 		static ConstructorHelpers::FObjectFinder<UStaticMesh> Found(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
 		return Found.Object;
 	}
+	UStaticMesh* Cone()
+	{
+		static ConstructorHelpers::FObjectFinder<UStaticMesh> Found(TEXT("/Engine/BasicShapes/Cone.Cone"));
+		return Found.Object;
+	}
 
 	/** Hull white. */
 	UMaterialInterface* Shell()
@@ -134,12 +139,25 @@ namespace CampusBRArt
 	constexpr float PropDegreesPerSecond = 900.f;
 
 	/** The canopy sits over the diver's shoulders (the capsule is 83 cm half-height, so this is the
-	 *  top of the chest), and the dome rides 4.2 m above that. */
+	 *  top of the chest), and the dome rides this far above that.
+	 *
+	 *  3.3 m, NOT the 4.2 m of the first pass. THAT is why nobody ever saw a parachute: the camera's
+	 *  own boom sits 1.2 m up and 3.2 m back, so a 7 m dome 4.2 m over the shoulders was directly
+	 *  ABOVE THE CAMERA and 28 deg of the way to the top of a 62 deg vertical frustum - a sliver of
+	 *  amber at the very top of the screen on a level view, and nothing at all the moment the diver
+	 *  looked down at where they were landing, which is the whole descent. The drop camera goes out to
+	 *  9 m (ACampusCharacter::ChuteArmLength) and the dome comes down to 3.3 m: now the far rim lands
+	 *  ~12 deg up and the near rim ~26 deg, so the whole canopy is in frame on every phone. */
 	constexpr float ShoulderHeight = 55.f;
-	constexpr float CanopyRise = 420.f;
+	constexpr float CanopyRise = 330.f;
+	/** 7 m across - a real canopy's span, and wide enough to read from 300 m up. */
+	constexpr float CanopyWidth = 7.f;
 	/** Where the rigging meets the dome, and where it meets the diver. */
 	constexpr float RiggingRadius = 250.f;
 	constexpr float ShoulderRadius = 18.f;
+	/** The inflation: from a bundle at the shoulders to the full canopy. */
+	constexpr float OpenSeconds = 0.6f;
+	constexpr float PackedScale = 0.12f;
 
 	/** One cosmetic primitive: no collision, no shadow, no decals. Used by the plane and the chute. */
 	void Dress(UStaticMeshComponent* Part, UStaticMesh* Mesh, UMaterialInterface* Material,
@@ -171,7 +189,9 @@ namespace CampusBRArt
 
 ACampusBRChute::ACampusBRChute()
 {
-	PrimaryActorTick.bCanEverTick = false; // it rides the diver's capsule and never moves by itself
+	// It rides the diver's capsule and never moves by itself: the tick is the 0.6 s inflation and
+	// nothing else, and it stops the frame that finishes (see Tick).
+	PrimaryActorTick.bCanEverTick = true;
 	bReplicates = true;
 	SetReplicateMovement(false); // the attachment is rebuilt from Wearer, not streamed
 	SetCanBeDamaged(false);
@@ -183,12 +203,26 @@ ACampusBRChute::ACampusBRChute()
 	Harness = CreateDefaultSubobject<USceneComponent>(TEXT("Harness"));
 	SetRootComponent(Harness);
 
+	// The canopy is TWO primitives, because one is not a parachute:
+	//   the dome - a sphere squashed hard on Z (7 m across, 70 cm deep) - is the underside, the part
+	//   the wearer and anyone below actually looks at, and it is nearly flat so it reads as cloth
+	//   under load instead of the egg a 2.4-deep ellipsoid gave;
+	//   the ridge - a cone, apex up, over the dome's top - is the arch, which is the whole silhouette
+	//   from the side and from the air.
+	// Both are engine basic shapes (/Engine/BasicShapes is cooked: the levels place them too).
 	Canopy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Canopy"));
 	Canopy->SetupAttachment(Harness);
-	// A sphere squashed on Z: 7 m across, 1.2 m deep. From underneath, which is where the wearer is,
-	// that is a dome; from the side it is the lens every parachute silhouette already is.
 	CampusBRArt::Dress(Canopy, CampusBRArt::Sphere(), CampusBRArt::CanopyCloth(),
-		FVector(0.f, 0.f, CampusBRArt::CanopyRise), FRotator::ZeroRotator, FVector(7.f, 7.f, 2.4f));
+		FVector(0.f, 0.f, CampusBRArt::CanopyRise), FRotator::ZeroRotator,
+		FVector(CampusBRArt::CanopyWidth, CampusBRArt::CanopyWidth, 1.4f));
+
+	CanopyRidge = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("CanopyRidge"));
+	CanopyRidge->SetupAttachment(Harness);
+	// The engine cone is 100 cm tall about its own centre, so lifting it by half its height puts its
+	// base on the dome's waist and its apex 1.1 m over the diver's canopy.
+	CampusBRArt::Dress(CanopyRidge, CampusBRArt::Cone(), CampusBRArt::CanopyCloth(),
+		FVector(0.f, 0.f, CampusBRArt::CanopyRise + 50.f), FRotator::ZeroRotator,
+		FVector(CampusBRArt::CanopyWidth * 0.92f, CampusBRArt::CanopyWidth * 0.92f, 1.1f));
 
 	// One line per diagonal, each built from the two points it joins - the dome's rim and the
 	// shoulder - so the geometry is stated once and the dome can move without the rigging drifting.
@@ -197,7 +231,7 @@ ACampusBRChute::ACampusBRChute()
 		const float Angle = FMath::DegreesToRadians(45.f + 90.f * Corner);
 		const FVector2D Around(FMath::Cos(Angle), FMath::Sin(Angle));
 		const FVector Top(Around.X * CampusBRArt::RiggingRadius, Around.Y * CampusBRArt::RiggingRadius,
-			CampusBRArt::CanopyRise - 60.f);
+			CampusBRArt::CanopyRise - 50.f); // the dome's underside at the rigging radius
 		const FVector Bottom(Around.X * CampusBRArt::ShoulderRadius, Around.Y * CampusBRArt::ShoulderRadius, 0.f);
 		const FVector Along = Top - Bottom;
 
@@ -224,6 +258,9 @@ void ACampusBRChute::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 void ACampusBRChute::BeginPlay()
 {
 	Super::BeginPlay();
+	// Packed until the first inflation frame, so a canopy can never be seen at full size for one frame
+	// (which on a phone is exactly the "it popped" flicker).
+	Inflate(0.f);
 	// A client can have Wearer applied before BeginPlay runs; hanging again here is free and covers
 	// the other order too.
 	HangOn(Wearer);
@@ -237,7 +274,7 @@ ACampusBRChute* ACampusBRChute::Deploy(ACampusCharacter* Diver)
 		return nullptr;
 	}
 	FActorSpawnParameters Params;
-	Params.Owner = Diver;
+	Params.Owner = Diver; // the owner chain is what makes this relevant to the diver's own phone
 	ACampusBRChute* Chute = World->SpawnActor<ACampusBRChute>(ACampusBRChute::StaticClass(),
 		FTransform(Diver->GetActorLocation()), Params);
 	if (Chute)
@@ -257,6 +294,11 @@ void ACampusBRChute::HangOn(ACampusCharacter* Who)
 {
 	if (!Who || !Who->GetRootComponent())
 	{
+		// No wearer yet (a replicated actor reference that has not resolved on this machine, because
+		// that diver's pawn is out of relevancy range): draw NOTHING. Left visible, the canopy would
+		// hang unattached at the height it opened for the rest of the match.
+		OpenAge = -1.f;
+		SetActorHiddenInGame(true);
 		return;
 	}
 	// The capsule, not a bone: the canopy hangs off the body's centre line and must not inherit the
@@ -264,6 +306,45 @@ void ACampusBRChute::HangOn(ACampusCharacter* Who)
 	AttachToComponent(Who->GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 	SetActorRelativeLocation(FVector(0.f, 0.f, CampusBRArt::ShoulderHeight));
 	SetActorRelativeRotation(FRotator::ZeroRotator);
+	SetActorHiddenInGame(false);
+	if (OpenAge < 0.f)
+	{
+		OpenAge = 0.f; // this machine's inflation starts the frame it first has somebody to hang on
+	}
+}
+
+void ACampusBRChute::Inflate(float Alpha)
+{
+	if (!Harness)
+	{
+		return;
+	}
+	// One scale on the root: the dome, the ridge and the four lines all grow out of the diver's back,
+	// which is what a canopy coming out of its pack looks like. Eased out (1 - (1-a)^3), so it snaps
+	// open and settles instead of arriving at a constant rate.
+	const float Eased = 1.f - FMath::Pow(1.f - FMath::Clamp(Alpha, 0.f, 1.f), 3.f);
+	const float Scale = FMath::Lerp(CampusBRArt::PackedScale, 1.f, Eased);
+	Harness->SetRelativeScale3D(FVector(Scale));
+}
+
+void ACampusBRChute::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	if (OpenAge < 0.f)
+	{
+		// Still waiting for a wearer. Keep asking: an unresolved actor reference can land late, and on
+		// a dedicated server there is no rep notify at all.
+		HangOn(Wearer);
+		return;
+	}
+	if (OpenAge >= CampusBRArt::OpenSeconds)
+	{
+		Inflate(1.f);
+		SetActorTickEnabled(false); // open; from here it is a child of the capsule and costs nothing
+		return;
+	}
+	OpenAge += DeltaSeconds;
+	Inflate(OpenAge / CampusBRArt::OpenSeconds);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -286,6 +367,15 @@ void ACampusBRDrop::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLif
 	DOREPLIFETIME(ACampusBRDrop, Plane);
 }
 
+void ACampusBRDrop::BeginPlay()
+{
+	Super::BeginPlay();
+	// The register is per MACHINE, not per server: Board only ever runs on the host, so on a phone the
+	// list stayed empty for the whole match and FindDrop - which is what the touch controls ask before
+	// they will treat JUMP as "leave the plane" or "open the chute" - answered null every time.
+	CampusBRDive::LiveDrops.AddUnique(this);
+}
+
 void ACampusBRDrop::Board(ACampusCharacter* InDiver, ACampusBRPlane* InPlane)
 {
 	if (!HasAuthority() || !InDiver || !InPlane)
@@ -296,6 +386,7 @@ void ACampusBRDrop::Board(ACampusCharacter* InDiver, ACampusBRPlane* InPlane)
 	Plane = InPlane;
 	State = ECampusBRDive::InPlane;
 	CampusBRDive::LiveDrops.AddUnique(this);
+	InDiver->SetDivePose(ACampusCharacter::DiveNone); // aboard: the pawn is hidden up there anyway
 
 	CaptureMovement();
 	if (UCharacterMovementComponent* Movement = InDiver->GetCharacterMovement())
@@ -319,6 +410,9 @@ void ACampusBRDrop::Drop()
 		return;
 	}
 	State = ECampusBRDive::Freefall;
+	// The pose is on the PAWN, not here: this actor is owner-relevant, and every other phone has to
+	// see a skydiver rather than a man falling off a kerb.
+	Diver->SetDivePose(ACampusCharacter::DiveFreefall);
 	const FVector Exit = Plane ? Plane->SeatLocation() : Diver->GetActorLocation();
 	Diver->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 	Diver->SetActorHiddenInGame(false);
@@ -333,11 +427,13 @@ void ACampusBRDrop::Drop()
 
 void ACampusBRDrop::OpenChute()
 {
-	if (!HasAuthority() || State != ECampusBRDive::Freefall)
+	// Diver checked too: an RPC can arrive in the frame after that pawn was killed in the air.
+	if (!HasAuthority() || State != ECampusBRDive::Freefall || !Diver)
 	{
 		return;
 	}
 	State = ECampusBRDive::Parachute;
+	Diver->SetDivePose(ACampusCharacter::DiveChute);
 	if (!Chute)
 	{
 		Chute = ACampusBRChute::Deploy(Diver);
@@ -517,6 +613,10 @@ void ACampusBRDrop::CutChute()
 	{
 		Chute->Destroy();
 		Chute = nullptr;
+	}
+	if (Diver && HasAuthority())
+	{
+		Diver->SetDivePose(ACampusCharacter::DiveNone);
 	}
 }
 

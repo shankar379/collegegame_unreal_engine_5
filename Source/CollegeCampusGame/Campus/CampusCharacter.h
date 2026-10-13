@@ -50,6 +50,21 @@ public:
 	bool IsProne() const { return bProne; }
 	bool IsSliding() const { return bSliding; }
 	bool IsZipping() const { return Zip != nullptr; }
+
+	/** The deployment pose, REPLICATED TO EVERY MACHINE: 0 none, 1 freefall, 2 under the canopy.
+	 *  ACampusBRDrop keeps the dive's real state, but that actor is owner-relevant - it never reaches
+	 *  the other forty-nine phones, and the skydive pose has to. One byte on the pawn everybody
+	 *  already sees is the cheapest thing that fixes that, so the pose is driven from here. */
+	static constexpr uint8 DiveNone = 0;
+	static constexpr uint8 DiveFreefall = 1;
+	static constexpr uint8 DiveChute = 2;
+	uint8 GetDivePose() const { return DivePose; }
+	bool IsFreefalling() const { return DivePose == DiveFreefall; }
+	bool IsUnderChute() const { return DivePose == DiveChute; }
+	bool IsDiving() const { return DivePose != DiveNone; }
+	/** Server: ACampusBRDrop sets this as the dive moves through its states. */
+	void SetDivePose(uint8 Pose);
+
 	/** Standing at a zipline tower: the Jump button rides it. */
 	bool CanUseZipline() const;
 	float GetHealth() const { return Health; }
@@ -402,6 +417,16 @@ private:
 	UPROPERTY(EditAnywhere, Category="Camera")
 	float AimUp = 3.f;
 
+	/** The drop camera. The canopy is a 7 m dome 3.3 m over the shoulders: at the 320 cm walking boom
+	 *  it sits DIRECTLY ABOVE THE CAMERA, outside a 62 deg vertical frustum - the chute was there all
+	 *  along and nobody could ever see it. 900 cm puts the whole canopy in frame (its far rim lands at
+	 *  ~12 deg, its near rim at ~26 deg), and the freefall pulls back too so the dive reads. */
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float FreefallArmLength = 620.f;
+
+	UPROPERTY(EditAnywhere, Category="Camera")
+	float ChuteArmLength = 900.f;
+
 	/** Boom pivot above the capsule centre: eye (165 - 90) + up (59). */
 	UPROPERTY(EditAnywhere, Category="Camera")
 	float HipPivotHeight = 120.f;
@@ -491,6 +516,11 @@ private:
 
 	UPROPERTY(Replicated)
 	bool bSliding = false;
+
+	/** The dive pose (see SetDivePose): 0 none, 1 freefall, 2 under the canopy. Unconditional, owner
+	 *  included - the owner's own phone draws the pose and pulls its camera back off the same byte. */
+	UPROPERTY(Replicated)
+	uint8 DivePose = 0;
 
 	// Zipline ride (three.js zipline.js), run on every machine from the start event.
 	UPROPERTY(Transient)
@@ -583,6 +613,11 @@ private:
 	float FreeLookCamera = 0.f;
 	/** AimBlend as the camera sees it (0 while free looking). */
 	float CameraAimBlend = 0.f;
+	/** 0..1 eased: the drop camera is out (freefall or canopy). Eased over ~0.5 s so the pull-back at
+	 *  the moment the chute opens is a move, not a cut. */
+	float DiveCamera = 0.f;
+	/** The dive boom's own length (cm), eased between the freefall and the canopy values. */
+	float DiveArm = 0.f;
 	/** Camera pivot height above the feet, eased toward the stance's (cm); < 0 until the first frame. */
 	float CameraAboveFeet = -1.f;
 	/** Speed of the stance height glide (critically damped spring: starts and ends gently). */

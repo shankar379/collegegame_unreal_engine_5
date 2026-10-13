@@ -977,7 +977,9 @@ void UCampusBRHostBeat::Send()
 	}
 	bSending = true;
 	// Five seconds while the session is filling, twenty once it is sealed and the match is running.
-	NextBeatIn = Wanted == ECampusBRBeat::Filling ? FillingBeatSeconds : BeatSeconds;
+	// Five seconds throughout: a phone that seals LOCALLY (solo testing, a lost bs.sealed) is still
+	// FILLING on the server, whose host_quiet clock is far shorter than the old twenty-second beat.
+	NextBeatIn = FillingBeatSeconds;
 	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
 	// The STATE is sent only when it is a move AND a move a host is allowed to announce: "I am still
 	// here" is the whole job of every other beat. COUNTDOWN is never sent - it is the server's to make.

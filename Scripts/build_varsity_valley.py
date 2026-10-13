@@ -17,10 +17,13 @@ only the Unreal half of it, written the way Scripts/build_campus.py writes the c
     nothing is standable that does not look standable
   - the existing campus art (/Game/Campus/Meshes/SM_Campus_*) is instanced once as the college block,
     with a box collider per building part
-  - lighting: a tagged directional light, sky light, fog and street lamps + one ACampusDayNight actor.
-    Day is the default; "?Night=1" on the travel URL flips the preset (see Campus/CampusDayNight.cpp)
-  - PlayerStarts (BR on the waiting platform, Red/Blue pads for TDM), a sky dome and a
-    NavMeshBoundsVolume over the whole play space
+  - lighting: a tagged directional light, sky light, SkyAtmosphere, fog and street lamps + one
+    ACampusDayNight actor. Day is the default; "?Night=1" on the travel URL flips the preset (see
+    Campus/CampusDayNight.cpp). The sky is a REAL SkyAtmosphere, not geometry: the map used to carry a
+    56 km half-sphere of vertex-coloured triangles, which on a phone read as a faceted globe hanging
+    over the valley - 18 segments by 6 rings is a disco ball, not a sky
+  - PlayerStarts (BR on the waiting platform, Red/Blue pads for TDM) and a NavMeshBoundsVolume over
+    the whole play space
 
 Re-runnable: it destroys every actor in the level and rewrites /Game/VarsityValley from scratch.
 """
@@ -307,34 +310,6 @@ class Builder(L.MissingEmitter):
         for i in range(sides):
             sec.tri(hub, skirt[(i + 1) % sides], skirt[i])
 
-    def dome(self, zone, top, horizon, radius):
-        """An inward-facing half sphere: the gradient is vertex colour, so it costs one draw call."""
-        sec = self.zone(zone).section(self.art.instance(top))
-        segments, rings = 18, 6
-        top_rgb = hex_linear(top)
-        low_rgb = hex_linear(horizon)
-        grid = []
-        for r in range(rings + 1):
-            lat = (math.pi * 0.5) * r / rings          # 0 = zenith
-            blend = (r / float(rings)) ** 0.7
-            colour = tuple(top_rgb[k] + (low_rgb[k] - top_rgb[k]) * blend for k in range(3))
-            row = []
-            for s in range(segments):
-                lon = 2.0 * math.pi * s / segments
-                x = radius * math.sin(lat) * math.cos(lon)
-                y = radius * math.sin(lat) * math.sin(lon)
-                z = radius * math.cos(lat) * 0.55
-                row.append(sec.vert((x, y, z), (0.0, 0.0, -1.0), colour))
-            grid.append(row)
-        for r in range(rings):
-            for s in range(segments):
-                s1 = (s + 1) % segments
-                a, b, c, d = grid[r][s], grid[r][s1], grid[r + 1][s1], grid[r + 1][s]
-                # both windings: a one-draw-call sky is not worth risking an invisible one on a
-                # back-face cull, and 900 triangles of dome cost nothing
-                sec.quad(a, b, c, d)
-                sec.quad(d, c, b, a)
-
     # ---- actors
     def campus(self, anchor):
         self.campus_anchor = anchor
@@ -480,6 +455,17 @@ def spawn_lighting(eas, builder):
     component.set_intensity(3.2)
     component.set_light_color(unreal.LinearColor(1.0000, 0.9647, 0.8784, 1.0))
     _sp(component, "cast_shadows", False)   # phones: the world is unlit anyway
+    # This is the sun the SkyAtmosphere scatters: without it the atmosphere renders black.
+    _sp(component, "atmosphere_sun_light", True)
+
+    # THE SKY. A real atmosphere, not a mesh: one screen-space pass, no geometry, no facets, and it
+    # follows the sun ACampusDayNight rotates, so night needs nothing more than the preset it already
+    # applies. The dome this replaced was 56 km of double-sided low-poly sphere - the "globe".
+    atmosphere = eas.spawn_actor_from_class(unreal.SkyAtmosphere, unreal.Vector(0.0, 0.0, 0.0), unreal.Rotator(0, 0, 0))
+    atmosphere.set_actor_label("VV_SkyAtmosphere")
+    atmosphere.set_folder_path(FOLDER + "/Lighting")
+    # (the engine's own spelling of the property, typo included)
+    _sp(atmosphere.get_editor_property("sky_atmosphere_component"), "aerial_pespective_view_distance_scale", 0.6)
 
     sky = eas.spawn_actor_from_class(unreal.SkyLight, unreal.Vector(0.0, 0.0, 15000.0), unreal.Rotator(0, 0, 0))
     sky.set_actor_label("VV_SkyLight")
@@ -489,7 +475,10 @@ def spawn_lighting(eas, builder):
     sky_component.set_mobility(unreal.ComponentMobility.MOVABLE)
     sky_component.set_intensity(1.6)
     sky_component.set_light_color(unreal.LinearColor(0.8471, 0.8118, 0.7059, 1.0))
-    _sp(sky_component, "cast_shadows", False)   # captured scene: the unlit dome IS the sky
+    _sp(sky_component, "cast_shadows", False)
+    # Captures the atmosphere every frame, so the ambient follows the real sky and no reflection
+    # capture has to be built for a level that is rewritten from Python.
+    _sp(sky_component, "real_time_capture", True)
 
     fog = eas.spawn_actor_from_class(unreal.ExponentialHeightFog, unreal.Vector(0.0, 0.0, 400.0),
                                      unreal.Rotator(0, 0, 0))
@@ -522,7 +511,7 @@ def spawn_lighting(eas, builder):
         _sp(lamp, "visible", False)        # day is the default preset
         _sp(lamp, "max_draw_distance", 9000.0)
         lamps += 1
-    log("lighting: sun + sky + fog + %d street lamps (off by day)" % lamps)
+    log("lighting: sun + atmosphere + sky light + fog + %d street lamps (off by day)" % lamps)
     return lamps
 
 
@@ -590,7 +579,7 @@ def main():
     for name, zone in sorted(builder.zones.items()):
         mesh = write_mesh(zone, "%s/Meshes/SM_VV_%s" % (ROOT, name))
         if mesh:
-            cull = 0.0 if name in ("Sky", "Ground", "Hills", "Roads") else 45000.0
+            cull = 0.0 if name in ("Ground", "Hills", "Roads") else 45000.0
             place_mesh(eas, mesh, "VV_" + name, FOLDER + "/Art", cull=cull)
             totals["zones"] += 1
             totals["tris"] += zone.tris

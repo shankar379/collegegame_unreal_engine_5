@@ -12,8 +12,11 @@
 #include "Campus/CampusUI.h"
 
 #include "Campus/CampusAngular.h"
+#include "Campus/CampusAvatar.h"
+#include "Campus/CampusAvatarPicker.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusPlayerControllers.h"
+#include "Campus/CampusSave.h"
 #include "Campus/CampusSocial.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "Widgets/Layout/SBox.h"
@@ -253,6 +256,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildProfileHeader()
 	Card.PlayerId = Page.PlayerId;
 	Card.Name = Page.Name;
 	Card.Color = Page.Color;
+	// The 92 px plate at the top of the page is the SAME Avatar() every row uses, so the picture, the
+	// loading bar and the colour fallback can never look like two different features.
+	Card.AvatarUrl = Page.bMine ? MyAvatarUrl() : Page.AvatarUrl;
 
 	const bool bMax = Page.XpForNext <= 0;
 	const float Fraction = bMax ? 1.f : FMath::Clamp(float(Page.XpInto) / float(Page.XpForNext), 0.f, 1.f);
@@ -1095,6 +1101,449 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildProfile()
 				]
 			]
 		];
+}
+
+// ---------------------------------------------------------------------------------------------
+// PROFILE PICTURE. One surface (the ACCOUNT sheet behind the profile page's EDIT button), one place
+// that writes the new URL, and one cache that holds the pictures (Campus/CampusAvatar.h).
+//
+// Every account already wears one of the 45 preset icons, so this screen is a CHOOSER first and an
+// uploader second: the grid is the normal path, UPLOAD PHOTO is the special one, and REMOVE PHOTO only
+// exists while the current avatar is an upload (DELETE puts a random preset back).
+
+FString SCampusLobbyWidget::MyAvatarUrl() const
+{
+	if (const UCampusBackend* Api = Backend())
+	{
+		if (!Api->AvatarUrl.IsEmpty())
+		{
+			return Api->AvatarUrl;
+		}
+	}
+	// Before GET /me lands, the save's copy paints the picture out of the disk cache on frame one.
+	const UCampusSave* Saved = Profile();
+	return Saved ? Saved->AvatarUrl : FString();
+}
+
+void SCampusLobbyWidget::ApplyMyAvatarUrl(const FString& NewUrl)
+{
+	if (NewUrl.IsEmpty())
+	{
+		// The server changed the picture but did not say to what (a bare 204 on DELETE). Re-read the
+		// profile rather than guess: a guessed URL is a wrong picture, which is worse than a wait.
+		if (UCampusBackend* Api = Backend())
+		{
+			TWeakPtr<SWidget> Weak = AsWeak();
+			Api->LoadMe([this, Weak](bool, const FString&)
+			{
+				if (Weak.IsValid())
+				{
+					TopBarStamp = 0;
+					Refresh();
+				}
+			});
+		}
+		return;
+	}
+	if (UCampusBackend* Api = Backend())
+	{
+		Api->AvatarUrl = NewUrl;
+	}
+	if (UCampusSave* Saved = Profile())
+	{
+		Saved->AvatarUrl = NewUrl;
+		Saved->Persist();
+	}
+	if (ProfileData.IsValid() && ProfileData->bMine)
+	{
+		ProfileData->AvatarUrl = NewUrl;
+	}
+	// The badge's region is fingerprinted on the URL + its load state, so this alone would repaint it;
+	// zeroing the stamp makes that certain even if the two URLs happen to hash alike.
+	TopBarStamp = 0;
+	SquadRowStamp = 0;
+	Refresh();
+}
+
+void SCampusLobbyWidget::EnsureAvatarPresets()
+{
+	if (bPresetsAsked || CampusAvatar::ArePresetsLoaded() || CampusAvatar::ArePresetsLoading())
+	{
+		return;
+	}
+	// ASKED ONCE. A build function must never start a round trip it can start again from its own
+	// reply - see bStorePricesQueried for the version of this bug that already shipped here.
+	bPresetsAsked = true;
+	TWeakPtr<SWidget> Weak = AsWeak();
+	CampusAvatar::LoadPresets(Backend(), [this, Weak](bool bOk, const FString& Error)
+	{
+		if (!Weak.IsValid())
+		{
+			return;
+		}
+		if (!bOk && !Error.IsEmpty())
+		{
+			Toast(Error);
+		}
+		// One repaint when the catalogue lands; the tiles then fetch their own thumbnails as they are
+		// scrolled into view (SCampusAvatar asks for a URL the first time it PAINTS, never before).
+		Refresh();
+	});
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildAvatarPresetTile(int32 Index)
+{
+	const TArray<CampusAvatar::FPreset>& All = CampusAvatar::Presets();
+	if (!All.IsValidIndex(Index))
+	{
+		return SNullWidget::NullWidget;
+	}
+	const CampusAvatar::FPreset& Preset = All[Index];
+	const FString Current = OptimisticPresetId.IsEmpty() ? CampusAvatar::PresetIdOf(MyAvatarUrl()) : OptimisticPresetId;
+	const bool bSelected = !Current.IsEmpty() && Current == Preset.Id;
+	const FString Id = Preset.Id;
+
+	return SNew(SBox).WidthOverride(78.f).HeightOverride(78.f)
+		[
+			SNew(SCampusAngularButton)
+			.Shape(FCampusShape::Clipped(14.f))
+			.Fill(bSelected ? FLinearColor(0.12f, 0.10f, 0.02f, 0.95f) : FLinearColor(0.02f, 0.03f, 0.04f, 0.72f))
+			.Border(bSelected ? CampusAngular::Accent : CampusAngular::Hairline)
+			.BorderWidth(bSelected ? 2.f : 1.f)
+			.AccentEdge(bSelected ? CampusAngular::Accent : FLinearColor::Transparent)
+			.AccentEdgeWidth(bSelected ? 4.f : 0.f)
+			.ContentPadding(FMargin(5.f))
+			.OnClicked(FOnClicked::CreateLambda([this, Id]()
+			{
+				ChooseAvatarPreset(Id);
+				return FReply::Handled();
+			}))
+			[
+				SNew(SCampusAvatar)
+				.Url(Preset.Url)
+				.Size(64.f)
+				.Shape(FCampusShape::Clipped(12.f))
+				.Fill(FLinearColor(0.06f, 0.07f, 0.09f, 0.9f))
+				.Border(FLinearColor::Transparent)
+				.BorderWidth(0.f)
+				[
+					// The tile's own fallback while its thumbnail is on the way: the icon's number.
+					SNew(STextBlock).Text(FText::FromString(Id)).Font(CampusAngular::Numeric(18))
+					.ColorAndOpacity(CampusAngular::TextMuted)
+				]
+			]
+		];
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildAvatarChooser()
+{
+	EnsureAvatarPresets();
+
+	const FString Mine = MyAvatarUrl();
+	const bool bUploaded = !Mine.IsEmpty() && !CampusAvatar::IsPresetUrl(Mine);
+	const UCampusBackend* Api = Backend();
+	const int32 Level = Api ? Api->Level : 1;
+
+	// The current picture, big, with the actions beside it.
+	TSharedRef<SHorizontalBox> Head = SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 16.f, 0.f)
+		[
+			SNew(SCampusAvatar)
+			.Url(Mine)
+			.Size(92.f)
+			.Shape(FCampusShape::Clipped(18.f))
+			.Fill(FLinearColor(0.10f, 0.08f, 0.03f, 0.95f))
+			.Border(CampusAngular::Accent)
+			.BorderWidth(2.f)
+			[
+				// The same fallback the lobby badge uses, so the two never disagree.
+				SNew(STextBlock).Text(FText::AsNumber(Level)).Font(CampusAngular::Display(34))
+				.ColorAndOpacity(CampusAngular::Accent)
+			]
+		];
+
+	TSharedRef<SVerticalBox> Actions = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			Label(bUploaded
+				? LOCTEXT("PhotoHintUpload", "This is your own photo.")
+				: LOCTEXT("PhotoHintPreset", "Tap an icon below to wear it."),
+				17)
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+		[
+			Label(bUploaded
+				? LOCTEXT("PhotoHintUpload2", "Removing it puts one of the icons back.")
+				: LOCTEXT("PhotoHintPreset2", "Or use the first tile to upload a photo from your gallery."),
+				15, Muted, false)
+		];
+	if (bUploaded)
+	{
+		// REMOVE PHOTO exists ONLY while the current avatar is an upload: removing a preset is
+		// meaningless, since DELETE simply rolls the dice for another one.
+		Actions->AddSlot().AutoHeight().Padding(0.f, 10.f, 0.f, 0.f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth()
+			[
+				Button(LOCTEXT("RemovePhoto", "REMOVE PHOTO"), FOnClicked::CreateLambda([this]()
+				{
+					RemoveAvatarPhoto();
+					return FReply::Handled();
+				}), EButton::Ghost, 17, FVector2D(220.f, 52.f), !bAvatarBusy)
+			]
+		];
+	}
+	Head->AddSlot().FillWidth(1.f).VAlign(VAlign_Center)[Actions];
+
+	// The grid. 45 tiles, so it scrolls rather than pushing the sheet off the screen; each tile asks
+	// for its thumbnail the first time it is PAINTED, which makes scrolling into view the lazy load.
+	TSharedRef<SVerticalBox> Block = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight()[Label(LOCTEXT("PictureTitle", "PROFILE PICTURE"), 18, Accent)]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 10.f, 0.f, 0.f)[Head];
+
+	const TArray<CampusAvatar::FPreset>& All = CampusAvatar::Presets();
+	if (All.Num() > 0)
+	{
+		TSharedRef<SWrapBox> Grid = SNew(SWrapBox).UseAllottedSize(true);
+		// THE UPLOAD TILE, first in the grid: the one way into the system photo picker, in the same
+		// 78 px cell as every icon so the whole choice reads as one row of options.
+		Grid->AddSlot().Padding(0.f, 0.f, 8.f, 8.f)
+		[
+			SNew(SBox).WidthOverride(78.f).HeightOverride(78.f)
+			[
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Clipped(14.f))
+				.Fill(FLinearColor(0.10f, 0.08f, 0.03f, 0.92f))
+				.Border(CampusAngular::Accent)
+				.BorderWidth(1.f)
+				.ContentPadding(FMargin(4.f))
+				.OnClicked(FOnClicked::CreateLambda([this]()
+				{
+					ChangeAvatarPhoto();
+					return FReply::Handled();
+				}))
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 6.f, 0.f, 0.f)
+					[
+						SNew(SBox).WidthOverride(26.f).HeightOverride(26.f)
+						[
+							SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Plus).Size(26.f).Color(CampusAngular::Accent)
+						]
+					]
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 2.f, 0.f, 0.f)
+					[
+						SNew(STextBlock).Text(LOCTEXT("UploadTile", "PHOTO")).Font(CampusAngular::Display(13))
+						.ColorAndOpacity(CampusAngular::Accent)
+					]
+				]
+			]
+		];
+		for (int32 Index = 0; Index < All.Num(); ++Index)
+		{
+			Grid->AddSlot().Padding(0.f, 0.f, 8.f, 8.f)[BuildAvatarPresetTile(Index)];
+		}
+		Block->AddSlot().AutoHeight().Padding(0.f, 14.f, 0.f, 4.f)
+		[
+			Label(LOCTEXT("ChooseIcon", "CHOOSE AN ICON"), 15, Muted)
+		];
+		Block->AddSlot().AutoHeight()
+		[
+			SNew(SBox).MaxDesiredHeight(230.f)
+			[
+				SNew(SScrollBox) + SScrollBox::Slot()[Grid]
+			]
+		];
+	}
+	else
+	{
+		Block->AddSlot().AutoHeight().Padding(0.f, 14.f, 0.f, 0.f)
+		[
+			Label(CampusAvatar::ArePresetsLoading()
+				? LOCTEXT("IconsLoading", "LOADING ICONS...")
+				: LOCTEXT("IconsOffline", "ICONS UNAVAILABLE - CHECK YOUR CONNECTION."),
+				15, Muted)
+		];
+		// The catalogue is a separate request and can fail on its own; uploading must not go down with
+		// it, so the tile's job falls back to a plain button here. RETRY is the ONLY way the catalogue
+		// is asked for a second time - see bPresetsAsked.
+		Block->AddSlot().AutoHeight().Padding(0.f, 10.f, 0.f, 0.f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 8.f, 0.f)
+			[
+				Button(LOCTEXT("UploadPhoto", "UPLOAD PHOTO"), FOnClicked::CreateLambda([this]()
+				{
+					ChangeAvatarPhoto();
+					return FReply::Handled();
+				}), EButton::Dark, 17, FVector2D(230.f, 52.f), !bAvatarBusy && CampusAvatarPicker::IsAvailable())
+			]
+			+ SHorizontalBox::Slot().AutoWidth()
+			[
+				CampusAvatar::ArePresetsLoading()
+					? SNullWidget::NullWidget
+					: Button(LOCTEXT("IconsRetry", "RETRY ICONS"), FOnClicked::CreateLambda([this]()
+						{
+							bPresetsAsked = false;
+							EnsureAvatarPresets();
+							Refresh();
+							return FReply::Handled();
+						}), EButton::Ghost, 17, FVector2D(190.f, 52.f))
+			]
+		];
+	}
+	return Block;
+}
+
+void SCampusLobbyWidget::ChangeAvatarPhoto()
+{
+	if (bAvatarBusy || CampusAvatar::IsBusy())
+	{
+		return;
+	}
+	if (!CampusAvatarPicker::IsAvailable())
+	{
+		Toast(TEXT("PHOTOS CAN ONLY BE CHOSEN ON THE PHONE."));
+		return;
+	}
+	bAvatarBusy = true;
+	Refresh();
+
+	TWeakPtr<SWidget> Weak = AsWeak();
+	const FString Old = MyAvatarUrl();
+	// The system photo picker. No storage permission is asked for and none is needed - see
+	// Campus/CampusAvatarPicker.h for why ACTION_PICK is deliberately not used.
+	CampusAvatarPicker::Pick([this, Weak, Old](bool bPicked, TArray<uint8> Jpeg)
+	{
+		if (!Weak.IsValid())
+		{
+			return;
+		}
+		if (!bPicked)
+		{
+			bAvatarBusy = false;
+			// An empty reason means the player simply backed out of the picker: no toast for that.
+			const FString& Why = CampusAvatarPicker::LastError();
+			if (!Why.IsEmpty())
+			{
+				Toast(Why.ToUpper());
+			}
+			Refresh();
+			return;
+		}
+		Busy(TEXT("Uploading photo..."));
+		CampusAvatar::Upload(Backend(), Jpeg, [this, Weak, Old](bool bOk, const FString& NewUrl, const FString& Error)
+		{
+			if (!Weak.IsValid())
+			{
+				return;
+			}
+			bAvatarBusy = false;
+			if (bOk)
+			{
+				if (!Old.IsEmpty() && Old != NewUrl)
+				{
+					// The old picture can never be wanted again: the URL is versioned.
+					CampusAvatar::Forget(Old);
+				}
+				ApplyMyAvatarUrl(NewUrl);
+			}
+			Done(bOk, Error, [this]() { Toast(TEXT("PHOTO UPDATED.")); });
+		});
+	});
+}
+
+void SCampusLobbyWidget::RemoveAvatarPhoto()
+{
+	if (bAvatarBusy || CampusAvatar::IsBusy())
+	{
+		return;
+	}
+	AskConfirm(LOCTEXT("RemovePhotoTitle", "REMOVE PHOTO"),
+		LOCTEXT("RemovePhotoBody", "REMOVE YOUR PHOTO? YOU WILL GET ONE OF THE ICONS INSTEAD."),
+		LOCTEXT("RemovePhotoYes", "REMOVE"),
+		[this]()
+		{
+			TWeakPtr<SWidget> Weak = AsWeak();
+			const FString Old = MyAvatarUrl();
+			bAvatarBusy = true;
+			Busy(TEXT("Removing photo..."));
+			CampusAvatar::Remove(Backend(), [this, Weak, Old](bool bOk, const FString& NewUrl, const FString& Error)
+			{
+				if (!Weak.IsValid())
+				{
+					return;
+				}
+				bAvatarBusy = false;
+				if (bOk)
+				{
+					CampusAvatar::Forget(Old);
+					// The server has put a RANDOM PRESET on the account; NewUrl is empty on a bare 204,
+					// and ApplyMyAvatarUrl then re-reads /me rather than inventing one.
+					ApplyMyAvatarUrl(NewUrl);
+				}
+				Done(bOk, Error, [this]() { Toast(TEXT("PHOTO REMOVED.")); });
+			});
+		});
+}
+
+void SCampusLobbyWidget::ChooseAvatarPreset(const FString& PresetId)
+{
+	if (bAvatarBusy || CampusAvatar::IsBusy() || PresetId.IsEmpty())
+	{
+		return;
+	}
+	const TArray<CampusAvatar::FPreset>& All = CampusAvatar::Presets();
+	const CampusAvatar::FPreset* Found = All.FindByPredicate(
+		[&PresetId](const CampusAvatar::FPreset& Row) { return Row.Id == PresetId; });
+	if (!Found)
+	{
+		return;
+	}
+	const FString Old = MyAvatarUrl();
+	if (CampusAvatar::PresetIdOf(Old) == PresetId)
+	{
+		// Already wearing it: no request, no toast. The tunnel's request budget is finite.
+		return;
+	}
+
+	// OPTIMISTIC: the plate and the badge change on this frame. The thumbnail is already decoded in the
+	// cache (the tile is on screen), so there is nothing to wait for visually.
+	bAvatarBusy = true;
+	OptimisticPresetId = PresetId;
+	if (UCampusBackend* Api = Backend())
+	{
+		Api->AvatarUrl = Found->Url;
+	}
+	TopBarStamp = 0;
+	Refresh();
+
+	TWeakPtr<SWidget> Weak = AsWeak();
+	const FString Chosen = Found->Url;
+	CampusAvatar::SetPreset(Backend(), PresetId, [this, Weak, Old, Chosen](bool bOk, const FString& NewUrl, const FString& Error)
+	{
+		if (!Weak.IsValid())
+		{
+			return;
+		}
+		bAvatarBusy = false;
+		OptimisticPresetId.Reset();
+		if (!bOk)
+		{
+			// ROLLED BACK, and nothing was persisted on the way out: the save only ever holds a URL the
+			// server has confirmed, so a failed tap cannot survive a restart.
+			if (UCampusBackend* Api = Backend())
+			{
+				Api->AvatarUrl = Old;
+			}
+			TopBarStamp = 0;
+			Toast(Error);
+			Refresh();
+			return;
+		}
+		ApplyMyAvatarUrl(NewUrl.IsEmpty() ? Chosen : NewUrl);
+	});
 }
 
 #undef LOCTEXT_NAMESPACE

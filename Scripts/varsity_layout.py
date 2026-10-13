@@ -12,7 +12,6 @@ An emitter implements as much of this as it cares about (see MissingEmitter for 
     box(zone, colour, centre, size, yaw=0.0, solid=False)   axis-box, yaw degrees about Z, solid = collides
     prism(zone, colour, centre, radius, height, sides, yaw=0.0, solid=False)
     cone(zone, colour, centre, radius, height, sides, yaw=0.0)      tip up, never collides
-    dome(zone, top, horizon, radius)                                the sky
     campus(anchor)                                   the existing /Game/Campus meshes, instanced once
     lamp(location)                                   a street lamp's point light (night only)
     start(kind, location, yaw)                       a PlayerStart ("BR" / "Red" / "Blue")
@@ -74,6 +73,8 @@ COL = {
     "awning_a": "d9663f",
     "awning_b": "3f7fa8",
     "lamp": "5b6166",
+    # The BANNER's background gradient only (Scripts/render_varsity_art.py). The level itself has no
+    # sky geometry: a real SkyAtmosphere is the sky there, so there is nothing to keep in step.
     "sky_top": "4a86c8",
     "sky_low": "cfe3f2",
 }
@@ -89,9 +90,6 @@ class MissingEmitter(object):
         pass
 
     def cone(self, zone, colour, centre, radius, height, sides, yaw=0.0):
-        pass
-
-    def dome(self, zone, top, horizon, radius):
         pass
 
     def campus(self, anchor):
@@ -435,10 +433,6 @@ def scatter(e):
             crates += 1
 
 
-def sky(e):
-    e.dome("Sky", COL["sky_top"], COL["sky_low"], 56000.0)
-
-
 def build(e):
     ground(e)
     hills(e)
@@ -450,4 +444,3 @@ def build(e):
     water_tower(e)
     waiting(e)
     scatter(e)
-    sky(e)

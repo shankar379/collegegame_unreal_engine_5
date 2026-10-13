@@ -5,6 +5,7 @@
 #include "Campus/CampusBRZone.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusCharacter.h"
+#include "Campus/CampusDayNight.h"
 #include "Campus/CampusNetSettings.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "AIController.h"
@@ -148,6 +149,10 @@ void ACampusBRGameMode::InitGameState()
 		FTransform(ACampusBRWaitingArea::Place()));
 	ZoneActor = GetWorld()->SpawnActor<ACampusBRZone>(ACampusBRZone::StaticClass(), FTransform::Identity);
 	State->Zone = ZoneActor;
+	// The sky, on every machine: applies the day / night preset, retires any sky dome the level still
+	// has baked in, and places the atmosphere if the level has none. A no-op when the build script
+	// already put one in the level.
+	ACampusDayNight::EnsureFor(GetWorld());
 	State->Phase = ECampusPhase::Waiting;
 	EnterPhase(ECampusBRPhase::Waiting);
 

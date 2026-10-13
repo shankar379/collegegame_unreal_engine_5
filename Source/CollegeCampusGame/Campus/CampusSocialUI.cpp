@@ -13,6 +13,7 @@
 
 #include "Algo/Count.h"
 #include "Campus/CampusAngular.h"
+#include "Campus/CampusAvatar.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusParty.h"
 #include "Campus/CampusPlayerControllers.h"
@@ -61,21 +62,23 @@ namespace
 
 TSharedRef<SWidget> SCampusLobbyWidget::Avatar(const FCampusPlayerCard& Card, float Size) const
 {
+	// THE PICTURE WHEN THERE IS ONE, the colour + initial plate when there is not. Same clipped-corner
+	// shape either way, so a row of mixed cards still reads as one row. The URL is captured by value:
+	// these rows are rebuilt from server data, never bound to a live card.
 	return SNew(SBox).WidthOverride(Size).HeightOverride(Size)
 		[
-			SNew(SCampusAngularPanel)
+			SNew(SCampusAvatar)
+			.Url(Card.AvatarUrl)
+			.Size(Size)
 			.Shape(FCampusShape::Clipped(Size * 0.22f))
 			.Fill(Card.Color)
 			.Border(FLinearColor(1.f, 1.f, 1.f, 0.3f))
 			.BorderWidth(1.f)
 			[
-				SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
-				[
-					SNew(STextBlock)
-					.Text(FText::FromString(Card.Initial()))
-					.Font(CampusAngular::Display(FMath::RoundToInt(Size * 0.46f)))
-					.ColorAndOpacity(FLinearColor::White)
-				]
+				SNew(STextBlock)
+				.Text(FText::FromString(Card.Initial()))
+				.Font(CampusAngular::Display(FMath::RoundToInt(Size * 0.46f)))
+				.ColorAndOpacity(FLinearColor::White)
 			]
 		];
 }
@@ -1640,6 +1643,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSummaryRow(const FCampusSummaryRow&
 	Card.PlayerId = Row.PlayerId;
 	Card.Name = Row.Name;
 	Card.Color = Row.Color;
+	Card.AvatarUrl = Row.AvatarUrl;
 	Card.FriendState = Row.FriendState;
 	Card.Level = FMath::Max(1, Row.Level);
 
@@ -1721,6 +1725,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSummary()
 		MvpCard.PlayerId = Mvp->PlayerId;
 		MvpCard.Name = Mvp->Name;
 		MvpCard.Color = Mvp->Color;
+		MvpCard.AvatarUrl = Mvp->AvatarUrl;
 		MvpCard.FriendState = Mvp->FriendState;
 		MvpCard.Level = FMath::Max(1, Mvp->Level);
 	}

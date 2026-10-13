@@ -96,7 +96,7 @@ void UCampusParty::SetCapacity(int32 InCapacity)
 	Changed();
 }
 
-void UCampusParty::SetLeader(const FString& Name, int32 Level, int32 Rank)
+void UCampusParty::SetLeader(const FString& Name, int32 Level, int32 Rank, const FString& AvatarUrl)
 {
 	FCampusPartyMember Leader;
 	Leader.Name = Name.IsEmpty() ? TEXT("YOU") : Name;
@@ -104,12 +104,15 @@ void UCampusParty::SetLeader(const FString& Name, int32 Level, int32 Rank)
 	Leader.Rank = Rank;
 	Leader.bLeader = true;
 	Leader.bAccepted = true;
+	// My own profile picture, so the plate under my character carries the same face as the badge.
+	Leader.AvatarUrl = AvatarUrl;
 
 	// Nothing to do if the leader already reads exactly like this. The lobby calls SetLeader on
 	// every rebuild and rebuilds on OnChanged, so an unconditional broadcast here would recurse
 	// forever.
 	if (Members.Num() > 0 && Members[0].bLeader && Members[0].Name == Leader.Name
-		&& Members[0].Level == Leader.Level && Members[0].Rank == Leader.Rank)
+		&& Members[0].Level == Leader.Level && Members[0].Rank == Leader.Rank
+		&& Members[0].AvatarUrl == Leader.AvatarUrl)
 	{
 		return;
 	}
@@ -289,7 +292,9 @@ void UCampusParty::ApplyRoster(const TArray<FCampusPartyMember>& InMembers, bool
 			const FCampusPartyMember& A = Next[Index];
 			const FCampusPartyMember& B = Members[Index];
 			bSame = A.Is(B) && A.Name == B.Name && A.Level == B.Level && A.bLeader == B.bLeader
-				&& A.bAccepted == B.bAccepted && A.Presence == B.Presence && A.InviteId == B.InviteId;
+				&& A.bAccepted == B.bAccepted && A.Presence == B.Presence && A.InviteId == B.InviteId
+				// The plate draws the picture too, so a squadmate changing theirs is a real change.
+				&& A.AvatarUrl == B.AvatarUrl;
 		}
 		if (bSame)
 		{

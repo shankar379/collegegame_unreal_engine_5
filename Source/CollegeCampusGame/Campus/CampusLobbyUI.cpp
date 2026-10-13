@@ -6,6 +6,7 @@
 #include "Campus/CampusUI.h"
 
 #include "Campus/CampusAngular.h"
+#include "Campus/CampusAvatar.h"
 #include "Campus/CampusBR.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusGameInstance.h"
@@ -127,7 +128,7 @@ void SCampusLobbyWidget::SyncParty()
 	// Level is the SERVER's number (migration 013). There is no local formula any more, so the plate
 	// and the profile page can never disagree about it.
 	Squad->SetLeader(Api ? Api->PlayerName : TEXT("YOU"), Api ? Api->Level : 1,
-		Save ? FMath::Clamp(Save->Wins / 5, 0, 5) : 0);
+		Save ? FMath::Clamp(Save->Wins / 5, 0, 5) : 0, MyAvatarUrl());
 }
 
 void SCampusLobbyWidget::Construct(const FArguments& InArgs)
@@ -142,6 +143,9 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 		SelectedTeamSize = Save->TeamSize;
 	}
 	CampusOptions::ApplyGraphics(Profile());
+	// The avatar cache borrows this session's API base and bearer; it is the only thing in it that
+	// talks HTTP without going through UCampusBackend (the picture body is not JSON).
+	CampusAvatar::UseSession(Backend());
 	SplashTip = FMath::RandRange(0, UE_ARRAY_COUNT(Tips) - 1);
 	// The roster changes from outside the UI (a finished match hands its squad over), so rebuild on
 	// the delegate instead of diffing it every frame.
@@ -1330,21 +1334,23 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildTopBar()
 		.OnClicked(FOnClicked::CreateLambda([this]() { OpenProfile(FString()); return FReply::Handled(); }))
 		[
 			SNew(SHorizontalBox)
-			// Avatar: a clipped-corner plate with the level number, until there are portraits.
+			// THE PROFILE BADGE. The player's picture (a preset icon, or their own uploaded photo),
+			// clipped to the same corner as everything else in this UI. The LEVEL NUMBER is still
+			// here - it is the fallback, shown while the picture is loading, when the device is
+			// offline, or when talking to a server that predates pictures.
 			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 14.f, 0.f)
 			[
 				SNew(SBox).WidthOverride(54.f).HeightOverride(54.f)
 				[
-					SNew(SCampusAngularPanel)
+					SNew(SCampusAvatar)
+					.Url(MyAvatarUrl())
+					.Size(54.f)
 					.Shape(FCampusShape::Clipped(12.f))
 					.Fill(FLinearColor(0.10f, 0.08f, 0.03f, 0.95f))
 					.Border(CampusAngular::Accent)
 					.BorderWidth(2.f)
 					[
-						SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
-						[
-							SNew(STextBlock).Text(FText::AsNumber(Level)).Font(CampusAngular::Display(26)).ColorAndOpacity(Accent)
-						]
+						SNew(STextBlock).Text(FText::AsNumber(Level)).Font(CampusAngular::Display(26)).ColorAndOpacity(Accent)
 					]
 				]
 			]
@@ -1567,7 +1573,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildNamePlate(const FCampusPartyMember&
 
 	// A member of a REAL party is somebody you can look up: the plate taps through to their profile.
 	// A plate from the AdoptSquad fallback has no player id, so it stays a plain panel.
-	TSharedRef<SWidget> Body = SNew(SVerticalBox)
+	TSharedRef<SWidget> Column = SNew(SVerticalBox)
 		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 		[
 			// CAPPED. The plate is anchored at a screen FRACTION so it sits under its own 3D
@@ -1606,6 +1612,33 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildNamePlate(const FCampusPartyMember&
 					: SNullWidget::NullWidget
 			]
 		];
+
+	// THE PICTURE, ONLY WHEN THE PAYLOAD CARRIED ONE. A plate from the AdoptSquad fallback has no
+	// avatar_url (all it has is a replicated display name), and it then looks exactly as it did before
+	// pictures existed - no empty square where a face is never coming.
+	TSharedRef<SWidget> Body = Column;
+	if (!Member.AvatarUrl.IsEmpty())
+	{
+		const FString Initial = Member.Name.IsEmpty() ? FString(TEXT("?")) : Member.Name.Left(1).ToUpper();
+		Body = SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 10.f, 0.f)
+			[
+				SNew(SCampusAvatar)
+				.Url(Member.AvatarUrl)
+				.Size(36.f)
+				.Shape(FCampusShape::Clipped(8.f))
+				.Fill(FLinearColor(0.08f, 0.09f, 0.11f, 0.95f))
+				.Border(FLinearColor(1.f, 1.f, 1.f, 0.28f))
+				.BorderWidth(1.f)
+				// An invited-but-not-accepted plate is drawn dimmed; its picture dims with it.
+				.Tint(Member.bAccepted ? FLinearColor::White : FLinearColor(1.f, 1.f, 1.f, 0.5f))
+				[
+					SNew(STextBlock).Text(FText::FromString(Initial)).Font(CampusAngular::Display(16))
+					.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.75f))
+				]
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[Column];
+	}
 
 	const FLinearColor Fill = Member.bAccepted
 		? FLinearColor(0.015f, 0.02f, 0.03f, 0.88f)
@@ -2045,6 +2078,9 @@ void SCampusLobbyWidget::RepaintLobby()
 	// The friends icon carries a count of everything waiting on an answer, so the live notice stack
 	// and the incoming-request list are part of the top bar's fingerprint too.
 	Now = HashCombine(Now, Live ? uint32(Live->GetRoster().Incoming.Num() * 31 + Live->GetNotices().Num()) : 0u);
+	// THE PROFILE PICTURE: the URL *and* where its download stands, so the badge re-fills exactly once
+	// - when the picture lands (or fails) - and never because some other player's avatar arrived.
+	Now = HashCombine(Now, CampusAvatar::Fingerprint(MyAvatarUrl()));
 	FillRegion(TopBarBox, TopBarStamp, Now, [this]() { return BuildTopBar(); });
 
 	// BuildMenuColumn reads exactly two things: the free Room Card and the claimable mission count.
@@ -2117,6 +2153,8 @@ void SCampusLobbyWidget::RepaintLobby()
 			Row = HashCombine(Row, GetTypeHash(FString::Printf(TEXT("%s|%s|%d|%d|%d|%d|%s|%s"),
 				*Member.PlayerId, *Member.Name, Member.Level, Member.Rank, Member.bLeader ? 1 : 0,
 				Member.bAccepted ? 1 : 0, *Member.Presence, *Member.InviteId)));
+			// Same rule for the plate thumbnails: one re-fill when a squadmate's picture arrives.
+			Row = HashCombine(Row, CampusAvatar::Fingerprint(Member.AvatarUrl));
 		}
 	}
 	FillRegion(SquadRowBox, SquadRowStamp, Row, [this]() { return BuildSquadRow(); });
@@ -3341,6 +3379,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildAccount()
 			+ SHorizontalBox::Slot().FillWidth(1.f)[Label(FText::FromString(Value.IsEmpty() ? TEXT("-") : Value), 18)];
 	};
 	TSharedRef<SVerticalBox> Body = SNew(SVerticalBox)
+		// THE PICTURE BLOCK, first: the one and only place a profile picture is changed (reached from
+		// the profile page's EDIT). Campus/CampusProfileUI.cpp owns it.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 16.f)[BuildAvatarChooser()]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 14.f)
+		[
+			SNew(SBox).HeightOverride(1.f)[SNew(SCampusAngularPanel).Fill(CampusAngular::Hairline)]
+		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f)[Line(TEXT("Nickname"), Api ? Api->PlayerName : FString())]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f)[Line(TEXT("Account"), bGuest ? TEXT("Guest (this phone only)") : Api->Email)]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f)[Line(TEXT("Roll no."), Api ? Api->RollNo : FString())]
@@ -3407,7 +3452,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildAccount()
 	}
 	// Named ACCOUNT, not PROFILE: the profile PAGE is the new full-screen identity sheet, and two
 	// screens with the same title is how a player stops trusting either of them.
-	return Dialog(LOCTEXT("AccountTitle", "ACCOUNT"), Body, 860.f, true, EScreen::Lobby);
+	// SCROLLED since the picture block landed on top of it: on a 1080p phone in landscape the sheet is
+	// now taller than the safe area, and a dialog whose LOG OUT cannot be reached is a bug report.
+	return Dialog(LOCTEXT("AccountTitle", "ACCOUNT"),
+		StaticCastSharedRef<SWidget>(SNew(SBox).MaxDesiredHeight(560.f)
+		[
+			SNew(SScrollBox) + SScrollBox::Slot()[Body]
+		]), 860.f, true, EScreen::Lobby);
 }
 
 #undef LOCTEXT_NAMESPACE

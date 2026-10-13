@@ -12,6 +12,7 @@
 #include "Campus/CampusUI.h"
 
 #include "Campus/CampusAngular.h"
+#include "Campus/CampusAvatar.h"
 #include "Campus/CampusSocial.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SSpacer.h"
@@ -170,23 +171,22 @@ void SCampusNoticeCard::Construct(const FArguments& InArgs)
 				+ SOverlay::Slot().Padding(FMargin(18.f, 12.f, 16.f, 16.f))
 				[
 					SNew(SHorizontalBox)
-					// The colour IS the avatar: there are no portraits in this project, which is why
-					// the API returns `color` on every card shape.
+					// The sender's PICTURE, with their colour + initial as the fallback behind it (the
+					// API returns `color` on every card shape for exactly that reason).
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(0.f, 2.f, 14.f, 0.f)
 					[
 						SNew(SBox).WidthOverride(56.f).HeightOverride(56.f)
 						[
-							SNew(SCampusAngularPanel)
+							SNew(SCampusAvatar)
+							.Url(Sender.AvatarUrl)
+							.Size(56.f)
 							.Shape(FCampusShape::Clipped(12.f))
 							.Fill(Sender.Color)
 							.Border(FLinearColor(1.f, 1.f, 1.f, 0.35f))
 							.BorderWidth(1.f)
 							[
-								SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
-								[
-									SNew(STextBlock).Text(FText::FromString(Sender.Initial()))
-									.Font(CampusAngular::Display(26)).ColorAndOpacity(FLinearColor::White)
-								]
+								SNew(STextBlock).Text(FText::FromString(Sender.Initial()))
+								.Font(CampusAngular::Display(26)).ColorAndOpacity(FLinearColor::White)
 							]
 						]
 					]

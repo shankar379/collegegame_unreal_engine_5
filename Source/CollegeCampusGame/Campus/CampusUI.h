@@ -465,6 +465,28 @@ private:
 	TSharedRef<SWidget> StatCell(CampusAngular::EGlyph Glyph, const FText& Value, const FText& Caption) const;
 	void CloseProfile();
 
+	// ---- profile picture (Campus/CampusAvatar.h + Campus/CampusAvatarPicker.h)
+	//      Reached ONLY from the profile page's EDIT button, which opens the ACCOUNT sheet: one place
+	//      to change the picture, so there is no second path to keep in step with the server.
+	/** My avatar_url: the server's word when it has spoken, else the one cached in the save (so the
+	 *  badge paints the real picture on the first frame rather than a level number that then flips). */
+	FString MyAvatarUrl() const;
+	/** The ACCOUNT sheet's PROFILE PICTURE block: the current plate, the preset grid, UPLOAD, REMOVE. */
+	TSharedRef<SWidget> BuildAvatarChooser();
+	/** One preset tile, by index into CampusAvatar::Presets(). */
+	TSharedRef<SWidget> BuildAvatarPresetTile(int32 Index);
+	/** Asks for the preset catalogue once per app run; repaints the sheet when it lands. */
+	void EnsureAvatarPresets();
+	/** UPLOAD PHOTO: the system photo picker, then PUT /me/avatar as raw image/jpeg. */
+	void ChangeAvatarPhoto();
+	/** REMOVE PHOTO: DELETE /me/avatar, after which the server puts a random preset on the account. */
+	void RemoveAvatarPhoto();
+	/** A preset tile tap. Optimistic - the plate changes at once - and rolled back if the server says no. */
+	void ChooseAvatarPreset(const FString& PresetId);
+	/** One place that writes a new avatar_url everywhere it is mirrored: the backend's cache, the save,
+	 *  and the open profile page. */
+	void ApplyMyAvatarUrl(const FString& NewUrl);
+
 	TWeakObjectPtr<ACampusLobbyPlayerController> Controller;
 	TSharedPtr<SBox> Content;
 	/** What Content currently holds, so re-showing the same body does not re-attach it. */
@@ -555,6 +577,15 @@ private:
 	EScreen FriendsReturn = EScreen::Lobby;
 	/** Whose profile is open; empty = mine. */
 	FString ProfileTarget;
+	/** A picture change (upload, preset or remove) is in flight: every tile and both buttons disable,
+	 *  so a double tap cannot race two PUTs at the server. */
+	bool bAvatarBusy = false;
+	/** The preset the player just tapped, painted as selected while the server catches up. */
+	FString OptimisticPresetId;
+	/** The preset catalogue has been asked for once. LATCHED, because BuildAvatarChooser runs on every
+	 *  repaint and its failure path repaints: without this, one failed GET would feed itself for ever -
+	 *  the same trap bStorePricesQueried exists for. RETRY in the sheet clears it. */
+	bool bPresetsAsked = false;
 	/** Held by pointer so this header does not have to pull in CampusSocial.h. */
 	TSharedPtr<FCampusProfile> ProfileData;
 	TSharedPtr<FCampusSummary> SummaryData;

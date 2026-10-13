@@ -34,6 +34,13 @@ public:
 	UPROPERTY()
 	FString PlayerName;
 
+	/** The server's last word on my profile picture (`player.avatar_url`), so the lobby badge paints the
+	 *  picture on frame one from the disk cache instead of a level number that flips a second later.
+	 *  The URL is versioned by the server (?v=<n>), so a stale one here can only ever be a stale
+	 *  PICTURE for one launch - never a wrong one, because the bytes are cached under the URL. */
+	UPROPERTY()
+	FString AvatarUrl;
+
 	UPROPERTY()
 	int32 Coins = 500;
 
