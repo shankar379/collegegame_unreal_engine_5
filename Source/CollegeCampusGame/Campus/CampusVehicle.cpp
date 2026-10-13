@@ -972,7 +972,6 @@ void ACampusVehicle::DoRoadkill(float Dt)
 	{
 		return; // no driver, no damage: a rolling driverless wreck cannot kill
 	}
-	const ACampusPlayerState* DriverState = DriverController->GetPlayerState<ACampusPlayerState>();
 	const FVector Centre = Hull->GetComponentLocation();
 	const float SphereRadius = FMath::Sqrt(FMath::Square(HalfLength) + FMath::Square(HalfWidth)) + 60.f;
 	const FVector CarVelocity = GetActorForwardVector() * Speed;
@@ -1012,10 +1011,11 @@ void ACampusVehicle::DoRoadkill(float Dt)
 		RoadkillCooldown.Add(Victim, Now);
 		// Launched either way - that is the shove - but damage only to the other team.
 		Victim->LaunchCharacter(ToVictim * (Closing * RoadkillLaunchShare) + FVector(0.f, 0.f, RoadkillLaunchUp), true, true);
-		const ACampusPlayerState* VictimState = Victim->GetPlayerState<ACampusPlayerState>();
-		if (DriverState && VictimState && DriverState->Team == VictimState->Team)
+		// Friendly fire off, through the same one test ServerFire uses: RED/BLUE in a room, the SQUAD
+		// in battle royale. Running a squadmate over still shoves them; it just costs them nothing.
+		if (CampusBR::AreFriendly(GetWorld(), DriverController, Victim->GetController()))
 		{
-			continue; // friendly fire off, exactly as ServerFire already has it
+			continue;
 		}
 		const float Dealt = RoadkillDamageFor(Closing);
 		if (Dealt > 0.f)
@@ -1093,7 +1093,6 @@ void ACampusVehicle::Explode()
 		return;
 	}
 	AController* Killer = LastDamagedBy.Get();
-	const ACampusPlayerState* KillerState = Killer ? Killer->GetPlayerState<ACampusPlayerState>() : nullptr;
 	const FVector Centre = Hull->GetComponentLocation();
 
 	// Occupants die regardless of team: the 3 s burn was their warning.
@@ -1132,10 +1131,12 @@ void ACampusVehicle::Explode()
 		const float Share = 1.f - Distance / ExplosionRadius;
 		Victim->LaunchCharacter((Victim->GetActorLocation() - Centre).GetSafeNormal() * (500.f + 400.f * Share)
 			+ FVector(0.f, 0.f, 300.f), true, true);
-		const ACampusPlayerState* VictimState = Victim->GetPlayerState<ACampusPlayerState>();
-		if (KillerState && VictimState && KillerState->Team == VictimState->Team)
+		// The killer's own side is spared - the RED/BLUE team in a room, the SQUAD in battle royale.
+		// In a 4v4, 3-minute round a team-kill is pure griefing; in BR a squadmate's car must not be
+		// the thing that ends your match. A car that nobody shot has no side and spares nobody.
+		if (Killer && CampusBR::AreFriendly(GetWorld(), Killer, Victim->GetController()))
 		{
-			continue; // the killer's own team is spared: in a 4v4, 3-minute round a team-kill is pure griefing
+			continue;
 		}
 		Victim->ApplyHit(ExplosionDamage * Share, Killer);
 	}

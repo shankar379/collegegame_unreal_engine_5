@@ -1,4 +1,4 @@
-#include "Campus/CampusTouchControls.h"
+﻿#include "Campus/CampusTouchControls.h"
 
 #include "Campus/CampusAngular.h"
 #include "Campus/CampusBRGameMode.h"
@@ -37,6 +37,9 @@ namespace TouchStyle
 	const FLinearColor Minimap(FColor(0x1D, 0x3B, 0x4F, 230));
 	const FLinearColor Red(FColor(0xE5, 0x3E, 0x3E));
 	const FLinearColor Blue(FColor(0x3E, 0x8E, 0xE5));
+	/** BATTLE ROYALE: the one friendly colour. A squad is marked; everyone else is simply an enemy and
+	 *  gets no colour at all, which is why this is a single value and not a palette of team tints. */
+	const FLinearColor Mate(FColor(0x3C, 0xE0, 0x8A));
 	const FLinearColor LagOrange(FColor(0xFF, 0x8A, 0x3D));
 	const FLinearColor Crosshair(FColor(90, 90, 90, 230));
 
@@ -248,13 +251,9 @@ SCampusTouchControls::FLayout SCampusTouchControls::MakeLayout(const FVector2D& 
 	L.ChipRight = FVector2D(L.Gear.X - L.GearR - 1.2f * U, L.Gear.Y);
 	L.ChipTop = L.Gear.Y - 1.9f * U;
 
-	// Team roster, top-left; the minimap goes under it. The roster block is a fixed height (header
-	// plus four rows) so the minimap never jumps when a teammate dies.
-	L.TeamMin = FVector2D(L.W * 0.012f, L.W * 0.012f);
-	L.TeamSize = FVector2D(FMath::Clamp(L.W * 0.19f, 150.f, 26.f * U), 2.6f * U + 4.f * 3.1f * U);
+	// The roster lives in the scoreboard (tap the timer), so the minimap takes the top-left corner.
 	L.MapSize = 17.f * U;
-	// the team roster now lives in the scoreboard (tap the timer), so the minimap takes its corner
-	L.MapMin = L.TeamMin;
+	L.MapMin = FVector2D(L.W * 0.012f, L.W * 0.012f);
 
 	// Weapons panel, top right, pushed below the gear row. It holds both slots: the top half is the gun
 	// in hand, the bottom half the one on your back. Tapping a half takes that gun.
@@ -1266,68 +1265,6 @@ void SCampusTouchControls::DrawVehicleHud(FSlateWindowElementList& Out, int32 La
 	}
 }
 
-void SCampusTouchControls::DrawTeamList(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
-{
-	const APlayerController* PC = Controller.Get();
-	const UWorld* World = PC ? PC->GetWorld() : nullptr;
-	const ACampusGameState* State = World ? World->GetGameState<ACampusGameState>() : nullptr;
-	const ACampusPlayerState* Mine = PC ? PC->GetPlayerState<ACampusPlayerState>() : nullptr;
-	if (!State || !Mine)
-	{
-		return;
-	}
-	const float U = L.U;
-	const bool bRed = Mine->Team == ECampusTeam::Red;
-	const FLinearColor TeamColor = bRed ? TouchStyle::Red : TouchStyle::Blue;
-
-	DrawNotchedBox(Out, Layer, G, L.TeamMin, L.TeamSize, 1.4f * U, TouchStyle::Chip, TouchStyle::Hairline, 1.f);
-	// Team colour flash down the leading edge, so RED and BLUE read at a glance.
-	DrawSlantedPanel(Out, Layer + 1, G, L.TeamMin, FVector2D(0.45f * U, L.TeamSize.Y), 0.f, TeamColor);
-	DrawText(Out, Layer + 2, G, bRed ? TEXT("RED SQUAD") : TEXT("BLUE SQUAD"),
-		L.TeamMin + FVector2D(1.6f * U, 1.4f * U), FMath::RoundToInt(U * 1.25f), TeamColor, 0.f, 0.5f);
-
-	int32 Row = 0;
-	for (const APlayerState* Player : State->PlayerArray)
-	{
-		const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
-		if (!Campus || Campus->Team != Mine->Team || Row >= 4)
-		{
-			continue;
-		}
-		const float RowY = L.TeamMin.Y + 2.6f * U + Row * 3.1f * U;
-		const bool bMe = Campus == Mine;
-		const ACampusCharacter* Body = Cast<ACampusCharacter>(Campus->GetPawn());
-		// Only the local player's own health is guaranteed to be here; a teammate whose pawn is not
-		// replicated to us (or who is dead) shows as DOWN rather than as a misleading full bar.
-		const float Max = Body ? FMath::Max(1.f, Body->GetMaxHealth()) : 100.f;
-		const float Health = Body ? Body->GetHealth() : 0.f;
-		const float Fraction = FMath::Clamp(Health / Max, 0.f, 1.f);
-
-		FString Name = Campus->GetPlayerName();
-		if (Name.Len() > 10)
-		{
-			Name = Name.Left(9) + TEXT(".");
-		}
-		DrawText(Out, Layer + 2, G, Name.ToUpper(), FVector2D(L.TeamMin.X + 1.6f * U, RowY + 0.9f * U),
-			FMath::RoundToInt(U * 1.2f), bMe ? TouchStyle::Accent : FLinearColor::White, 0.f, 0.5f);
-		// Flat health bar: black trough, team-coloured fill, red when low. No rounded caps.
-		const FVector2D BarMin(L.TeamMin.X + 1.6f * U, RowY + 1.9f * U);
-		const FVector2D BarSize(L.TeamSize.X - 3.2f * U, FMath::Max(4.f, 0.55f * U));
-		DrawRect(Out, Layer + 2, G, BarMin, BarSize, FLinearColor(0.f, 0.f, 0.f, 0.55f));
-		if (Fraction > 0.f)
-		{
-			DrawRect(Out, Layer + 3, G, BarMin, FVector2D(BarSize.X * Fraction, BarSize.Y),
-				Fraction < 0.3f ? TouchStyle::Red : (bMe ? TouchStyle::Accent : TeamColor));
-		}
-		else
-		{
-			DrawText(Out, Layer + 3, G, TEXT("DOWN"), FVector2D(L.TeamMin.X + L.TeamSize.X - 1.6f * U, RowY + 0.9f * U),
-				FMath::RoundToInt(U * 1.05f), TouchStyle::Red, 1.f, 0.5f);
-		}
-		++Row;
-	}
-}
-
 void SCampusTouchControls::DrawConnection(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
 {
 	const APlayerController* PC = Controller.Get();
@@ -1360,28 +1297,52 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 	const ACampusPlayerState* Mine = PC ? PC->GetPlayerState<ACampusPlayerState>() : nullptr;
 	const float U = L.U;
 
-	// Score and clock, top centre: blue | time | red.
+	// The top-centre plate. ROOM: blue | time | red, with the round under it. BATTLE ROYALE: ALIVE and
+	// SQUADS, because there is no second team to score against and no round to count.
+	const ACampusBRGameState* BattleRoyale = Cast<ACampusBRGameState>(State);
 	if (State)
 	{
 		const float Remaining = FMath::Max(0.f, State->EndTime - float(State->GetServerWorldTimeSeconds()));
 		const int32 Seconds = FMath::CeilToInt(Remaining);
 		const FVector2D Top(L.W * 0.5f, 32.f + U);
 		const FVector2D BoxSize(26.f * U, 4.4f * U);
-		// Score / clock plate: clipped corners, team-coloured end flashes.
-		DrawCutCornerBox(Out, Layer, G, Top - BoxSize * 0.5f, BoxSize, 1.5f * U, TouchStyle::ChipStrong, TouchStyle::Hairline, 1.f);
-		DrawSlantedPanel(Out, Layer + 1, G, Top - BoxSize * 0.5f, FVector2D(0.5f * U, BoxSize.Y), 0.f, TouchStyle::Blue);
-		DrawSlantedPanel(Out, Layer + 1, G, Top + FVector2D(BoxSize.X * 0.5f - 0.5f * U, -BoxSize.Y * 0.5f), FVector2D(0.5f * U, BoxSize.Y), 0.f, TouchStyle::Red);
 		const int32 Font = FMath::RoundToInt(U * 1.9f);
-		DrawText(Out, Layer + 2, G, FString::FromInt(State->BlueScore), Top - FVector2D(BoxSize.X * 0.36f, 0.f), Font, TouchStyle::Blue);
-		DrawText(Out, Layer + 2, G, FString::Printf(TEXT("%02d:%02d"), Seconds / 60, Seconds % 60), Top, Font, Remaining < 30.f ? TouchStyle::Red : FLinearColor::White);
-		DrawText(Out, Layer + 2, G, FString::FromInt(State->RedScore), Top + FVector2D(BoxSize.X * 0.36f, 0.f), Font, TouchStyle::Red);
-		// round wins above, the round under the clock
-		const FString RoundText = State->bDecider ? FString(TEXT("DECIDING ROUND"))
-			: (State->Phase == ECampusPhase::RoundOver ? FString::Printf(TEXT("ROUND %d DONE  ·  NEXT IN A MOMENT"), State->Round)
-			: FString::Printf(TEXT("ROUND %d / %d"), FMath::Max(State->Round, 1), State->Rounds));
-		DrawText(Out, Layer + 2, G, RoundText, Top + FVector2D(0.f, BoxSize.Y * 0.85f), FMath::RoundToInt(U * 1.2f), State->bDecider ? TouchStyle::Red : FLinearColor::White);
+		const int32 Small = FMath::RoundToInt(U * 1.05f);
+		const FLinearColor Dim(1.f, 1.f, 1.f, 0.65f);
+		// Score / clock plate: clipped corners, coloured end flashes.
+		DrawCutCornerBox(Out, Layer, G, Top - BoxSize * 0.5f, BoxSize, 1.5f * U, TouchStyle::ChipStrong, TouchStyle::Hairline, 1.f);
+		if (BattleRoyale)
+		{
+			// BOTH flashes are the accent: there is no RED and no BLUE in a battle session, every squad
+			// is its own team. The zone clock goes under this plate (DrawBattleRoyaleHud).
+			DrawSlantedPanel(Out, Layer + 1, G, Top - BoxSize * 0.5f, FVector2D(0.5f * U, BoxSize.Y), 0.f, TouchStyle::Accent);
+			DrawSlantedPanel(Out, Layer + 1, G, Top + FVector2D(BoxSize.X * 0.5f - 0.5f * U, -BoxSize.Y * 0.5f),
+				FVector2D(0.5f * U, BoxSize.Y), 0.f, TouchStyle::Accent);
+			DrawText(Out, Layer + 2, G, TEXT("ALIVE"), FVector2D(Top.X - BoxSize.X * 0.34f, Top.Y - BoxSize.Y * 0.26f), Small, Dim);
+			DrawText(Out, Layer + 2, G, FString::FromInt(BattleRoyale->AliveCombatants),
+				FVector2D(Top.X - BoxSize.X * 0.34f, Top.Y + BoxSize.Y * 0.16f), Font, FLinearColor::White);
+			DrawText(Out, Layer + 2, G, TEXT("SQUADS"), FVector2D(Top.X + BoxSize.X * 0.34f, Top.Y - BoxSize.Y * 0.26f), Small, Dim);
+			DrawText(Out, Layer + 2, G, FString::FromInt(BattleRoyale->AliveSquads),
+				FVector2D(Top.X + BoxSize.X * 0.34f, Top.Y + BoxSize.Y * 0.16f), Font, TouchStyle::Accent);
+			DrawText(Out, Layer + 2, G, FString::Printf(TEXT("/ %d"), BattleRoyale->TotalCombatants), Top, Small, Dim);
+		}
+		else
+		{
+			DrawSlantedPanel(Out, Layer + 1, G, Top - BoxSize * 0.5f, FVector2D(0.5f * U, BoxSize.Y), 0.f, TouchStyle::Blue);
+			DrawSlantedPanel(Out, Layer + 1, G, Top + FVector2D(BoxSize.X * 0.5f - 0.5f * U, -BoxSize.Y * 0.5f), FVector2D(0.5f * U, BoxSize.Y), 0.f, TouchStyle::Red);
+			DrawText(Out, Layer + 2, G, FString::FromInt(State->BlueScore), Top - FVector2D(BoxSize.X * 0.36f, 0.f), Font, TouchStyle::Blue);
+			DrawText(Out, Layer + 2, G, FString::Printf(TEXT("%02d:%02d"), Seconds / 60, Seconds % 60), Top, Font, Remaining < 30.f ? TouchStyle::Red : FLinearColor::White);
+			DrawText(Out, Layer + 2, G, FString::FromInt(State->RedScore), Top + FVector2D(BoxSize.X * 0.36f, 0.f), Font, TouchStyle::Red);
+			// round wins above, the round under the clock
+			const FString RoundText = State->bDecider ? FString(TEXT("DECIDING ROUND"))
+				: (State->Phase == ECampusPhase::RoundOver ? FString::Printf(TEXT("ROUND %d DONE  ·  NEXT IN A MOMENT"), State->Round)
+				: FString::Printf(TEXT("ROUND %d / %d"), FMath::Max(State->Round, 1), State->Rounds));
+			DrawText(Out, Layer + 2, G, RoundText, Top + FVector2D(0.f, BoxSize.Y * 0.85f), FMath::RoundToInt(U * 1.2f), State->bDecider ? TouchStyle::Red : FLinearColor::White);
+		}
 
-		// ALIVE and KILL chips, top right, left of the gear. Two slanted plates, accent numbers.
+		// KILL chip (and, in a room, ALIVE beside it), top right, left of the gear. In BR the alive
+		// count is the plate's: this list only ever sees the handful of combatants that are real
+		// connections or physical bots, never the fifty the session is running.
 		int32 Alive = 0;
 		for (const APlayerState* Player : State->PlayerArray)
 		{
@@ -1403,7 +1364,10 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 				Right = Min.X - 0.6f * U;
 			};
 			Chipped(TEXT("KILL"), Mine ? Mine->Kills : 0, TouchStyle::Accent);
-			Chipped(TEXT("ALIVE"), Alive, FLinearColor::White);
+			if (!BattleRoyale)
+			{
+				Chipped(TEXT("ALIVE"), Alive, FLinearColor::White);
+			}
 		}
 		// Connection strength under the chips.
 		DrawConnection(Out, Layer, G, L);
@@ -1444,7 +1408,11 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 
 	if (!Character)
 	{
-		DrawText(Out, Layer + 1, G, TEXT("RESPAWNING..."), FVector2D(L.W * 0.5f, L.H * 0.45f), FMath::RoundToInt(U * 2.4f), FLinearColor::White);
+		// BR HAS NO RESPAWN. A pawnless player there is out of the match and watching a squadmate, and
+		// promising them a respawn is the HUD lying about the rules of the game type.
+		DrawText(Out, Layer + 1, G, BattleRoyale ? TEXT("ELIMINATED") : TEXT("RESPAWNING..."),
+			FVector2D(L.W * 0.5f, L.H * 0.45f), FMath::RoundToInt(U * 2.4f),
+			BattleRoyale ? TouchStyle::Red : FLinearColor::White);
 		return;
 	}
 
@@ -1679,7 +1647,8 @@ void SCampusTouchControls::DrawMap(FSlateWindowElementList& Out, int32 Layer, co
 		DrawText(Out, Layer + 3, G, TEXT("tap anywhere to close"), FVector2D(Min.X + Size * 0.5f, Min.Y + Size + 2.f * U), FMath::RoundToInt(U * 1.2f), FLinearColor(1.f, 1.f, 1.f, 0.7f));
 	}
 
-	// arrows: you (yellow, bigger) and your teammates (team colour); enemies never show (three.js)
+	// arrows: you (yellow, bigger) and your teammates (ROOM: the team colour. BR: one friendly green,
+	// because the only other side in a battle session is "everyone else"); enemies never show
 	auto Arrow = [&](const FVector2D& C, float YawDeg, const FLinearColor& Color, float Len)
 	{
 		const float R = FMath::DegreesToRadians(YawDeg);
@@ -1699,19 +1668,30 @@ void SCampusTouchControls::DrawMap(FSlateWindowElementList& Out, int32 Layer, co
 	{
 		return;
 	}
+	const bool bBattleRoyale = CampusBR::IsBattleRoyale(World);
 	for (const APlayerState* Player : State->PlayerArray)
 	{
 		const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
 		const APawn* Pawn = Player ? Player->GetPawn() : nullptr;
-		if (!Campus || !Pawn || Campus == Mine || Campus->Team != Mine->Team)
+		if (!Campus || !Pawn || Campus == Mine)
 		{
 			continue;
 		}
+		// TEAMMATES ONLY. In BR that is the squad and nothing else: a solo player has no squadmates and
+		// so has an empty map, which is exactly right.
+		const bool bMate = bBattleRoyale ? CampusBR::AreSquadmates(Campus, Mine) : Campus->Team == Mine->Team;
+		if (!bMate)
+		{
+			continue;
+		}
+		const FLinearColor MateColor = bBattleRoyale ? TouchStyle::Mate
+			: (Campus->Team == ECampusTeam::Red ? TouchStyle::Red : TouchStyle::Blue);
 		const FVector2D C = At(Pawn->GetActorLocation());
-		Arrow(C, Pawn->GetActorRotation().Yaw, Campus->Team == ECampusTeam::Red ? TouchStyle::Red : TouchStyle::Blue, 6.f * Scale);
+		Arrow(C, Pawn->GetActorRotation().Yaw, MateColor, 6.f * Scale);
 		if (bBig)
 		{
-			DrawText(Out, Layer + 6, G, Campus->GetPlayerName(), C - FVector2D(0.f, 16.f * Scale), FMath::RoundToInt(Size / 55.f), FLinearColor::White);
+			DrawText(Out, Layer + 6, G, Campus->GetPlayerName(), C - FVector2D(0.f, 16.f * Scale),
+				FMath::RoundToInt(Size / 55.f), bBattleRoyale ? TouchStyle::Mate : FLinearColor::White);
 		}
 	}
 	if (const APawn* Me = PC->GetPawn())
@@ -1730,6 +1710,19 @@ void SCampusTouchControls::DrawScoreboard(FSlateWindowElementList& Out, int32 La
 	{
 		return;
 	}
+	// Two game types, two boards, one dispatch. The room's board is RED against BLUE and the battle
+	// session's is squad against squad; neither has to know the other exists.
+	if (const ACampusBRGameState* BattleRoyale = Cast<ACampusBRGameState>(State))
+	{
+		DrawSquadBoard(Out, Layer, G, L, BattleRoyale, Mine);
+		return;
+	}
+	DrawTeamBoard(Out, Layer, G, L, State, Mine);
+}
+
+void SCampusTouchControls::DrawTeamBoard(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L,
+	const ACampusGameState* State, const ACampusPlayerState* Mine) const
+{
 	const float U = L.U;
 	DrawRect(Out, Layer, G, FVector2D::ZeroVector, FVector2D(L.W, L.H), FLinearColor(0.f, 0.f, 0.f, 0.55f));
 	const FString Title = State->bDecider ? FString::Printf(TEXT("DECIDING ROUND  ·  RED %d - %d BLUE"), State->RedScore, State->BlueScore)
@@ -1789,8 +1782,136 @@ void SCampusTouchControls::DrawScoreboard(FSlateWindowElementList& Out, int32 La
 	DrawText(Out, Layer + 2, G, TEXT("tap anywhere to close"), FVector2D(L.W * 0.5f, Top + BoxH + U * 2.f), FMath::RoundToInt(U * 1.2f), FLinearColor(1.f, 1.f, 1.f, 0.7f));
 }
 
+void SCampusTouchControls::DrawSquadBoard(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L,
+	const ACampusBRGameState* State, const ACampusPlayerState* Mine) const
+{
+	const float U = L.U;
+	DrawRect(Out, Layer, G, FVector2D::ZeroVector, FVector2D(L.W, L.H), FLinearColor(0.f, 0.f, 0.f, 0.55f));
+	DrawText(Out, Layer + 2, G, FString::Printf(TEXT("MATCH INFO  ·  ALIVE %d / %d  ·  SQUADS %d"),
+		State->AliveCombatants, State->TotalCombatants, State->AliveSquads),
+		FVector2D(L.W * 0.5f, L.H * 0.08f), FMath::RoundToInt(U * 2.f), FLinearColor::White);
+
+	// THE SQUADS THIS CLIENT CAN SEE: the humans and the physical bots, which is every combatant that
+	// owns a player state. The virtual rows that make up the rest of the fifty have none by design,
+	// which is exactly why the heading above carries the session's own counts and this list does not
+	// pretend to be the whole roster.
+	TArray<int32> Squads;
+	TMap<int32, TArray<const ACampusPlayerState*>> Members;
+	for (const APlayerState* Player : State->PlayerArray)
+	{
+		const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
+		const int32 Squad = CampusBR::GetSquadId(Campus);
+		if (!Campus || Squad == 0)
+		{
+			continue;
+		}
+		Members.FindOrAdd(Squad).Add(Campus);
+		Squads.AddUnique(Squad);
+	}
+	const int32 MySquad = CampusBR::GetSquadId(Mine);
+	// Your own squad first, then by number: that is the only row anybody looks for in a hurry.
+	Squads.Sort([MySquad](int32 A, int32 B)
+	{
+		return (A == MySquad) != (B == MySquad) ? A == MySquad : A < B;
+	});
+
+	const int32 Font = FMath::RoundToInt(U * 1.25f);
+	const float Row = U * 2.f;
+	const float Top = L.H * 0.17f;
+	const float ColumnWidth = L.W * 0.3f;
+	const FLinearColor Dim(1.f, 1.f, 1.f, 0.45f);
+	float X = L.W * 0.05f;
+	float Y = Top;
+	for (const int32 Squad : Squads)
+	{
+		const TArray<const ACampusPlayerState*>& Line = Members[Squad];
+		int32 Kills = 0;
+		bool bAlive = false;
+		for (const ACampusPlayerState* Campus : Line)
+		{
+			Kills += Campus->Kills;
+			// Placement is written the moment a combatant is eliminated, so zero IS still standing.
+			bAlive |= Campus->Placement == 0;
+		}
+		const bool bMine = Squad == MySquad;
+		DrawText(Out, Layer + 2, G, FString::Printf(TEXT("SQUAD %d%s  ·  %s  ·  %d KILLS"), Squad,
+			bMine ? TEXT("  (yours)") : TEXT(""), bAlive ? TEXT("ALIVE") : TEXT("OUT"), Kills),
+			FVector2D(X, Y), FMath::RoundToInt(U * 1.4f),
+			!bAlive ? Dim : (bMine ? TouchStyle::Mate : FLinearColor::White), 0.f, 0.5f);
+		Y += Row;
+		for (const ACampusPlayerState* Campus : Line)
+		{
+			const bool bOut = Campus->Placement != 0;
+			const FLinearColor Text = bOut ? Dim : (Campus == Mine ? TouchStyle::Accent : FLinearColor::White);
+			DrawText(Out, Layer + 3, G, Campus->GetPlayerName(), FVector2D(X + U, Y), Font, Text, 0.f, 0.5f);
+			DrawText(Out, Layer + 3, G, bOut ? FString::Printf(TEXT("#%d"), Campus->Placement)
+				: FString::Printf(TEXT("%d K"), Campus->Kills),
+				FVector2D(X + ColumnWidth - 2.f * U, Y), Font, Text, 1.f, 0.5f);
+			Y += Row * 0.85f;
+		}
+		Y += Row * 0.5f;
+		// Columns, because a squad match is twelve blocks and a solo match is fifty.
+		if (Y > L.H * 0.86f)
+		{
+			Y = Top;
+			X += ColumnWidth;
+			if (X + ColumnWidth > L.W)
+			{
+				break;
+			}
+		}
+	}
+	DrawText(Out, Layer + 2, G, TEXT("tap anywhere to close"), FVector2D(L.W * 0.5f, L.H * 0.94f),
+		FMath::RoundToInt(U * 1.2f), FLinearColor(1.f, 1.f, 1.f, 0.7f));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Battle royale overlay
+
+void SCampusTouchControls::DrawSquadMarkers(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
+{
+	const APlayerController* PC = Controller.Get();
+	const UWorld* World = PC ? PC->GetWorld() : nullptr;
+	const ACampusGameState* State = World ? World->GetGameState<ACampusGameState>() : nullptr;
+	const ACampusPlayerState* Mine = PC ? PC->GetPlayerState<ACampusPlayerState>() : nullptr;
+	const int32 MySquad = CampusBR::GetSquadId(Mine);
+	if (!State || MySquad == 0)
+	{
+		// SOLO has no squadmates, so it has no markers. That is the mode working, not a gap.
+		return;
+	}
+	const float U = L.U;
+	// Projection answers in viewport pixels; this widget fills the viewport, so the widget's own
+	// scale is the whole conversion to the local space every other draw here uses.
+	const float Scale = FMath::Max(G.Scale, 0.01f);
+	for (const APlayerState* Player : State->PlayerArray)
+	{
+		const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
+		if (!Campus || Campus == Mine || CampusBR::GetSquadId(Campus) != MySquad)
+		{
+			continue;
+		}
+		const APawn* Pawn = Campus->GetPawn();
+		FVector2D Screen = FVector2D::ZeroVector;
+		if (!Pawn || !PC->ProjectWorldLocationToScreen(Pawn->GetActorLocation() + FVector(0.f, 0.f, 140.f), Screen, false))
+		{
+			continue; // no pawn, or behind the camera
+		}
+		const FVector2D At = Screen / Scale;
+		if (At.X < 0.f || At.Y < 0.f || At.X > L.W || At.Y > L.H)
+		{
+			continue;
+		}
+		const float Size = 0.9f * U;
+		DrawPolyline(Out, Layer, G, {
+			FVector2f(float(At.X) - Size, float(At.Y) - Size),
+			FVector2f(float(At.X), float(At.Y)),
+			FVector2f(float(At.X) + Size, float(At.Y) - Size) },
+			TouchStyle::Mate, FMath::Max(2.f, U * 0.22f));
+		DrawText(Out, Layer, G, Campus->GetPlayerName().ToUpper(),
+			FVector2D(At.X, At.Y - Size * 2.4f), FMath::Max(9, FMath::RoundToInt(U * 1.1f)), TouchStyle::Mate);
+	}
+}
 
 void SCampusTouchControls::DrawBattleRoyaleHud(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
 {
@@ -1810,10 +1931,10 @@ void SCampusTouchControls::DrawBattleRoyaleHud(FSlateWindowElementList& Out, int
 		return FString::Printf(TEXT("%d:%02d"), Whole / 60, Whole % 60);
 	};
 
-	// ALIVE out of the full roster, under the score plate: in BR this is the number that matters.
-	DrawText(Out, Layer + 2, G, FString::Printf(TEXT("ALIVE %d / %d  \u00b7  %d SQUADS"),
-		State->AliveCombatants, State->TotalCombatants, State->AliveSquads),
-		FVector2D(L.W * 0.5f, 32.f + U * 7.6f), Small, FLinearColor::White);
+	// ALIVE and SQUADS are the top-centre plate's (DrawHud), where the room's score used to be.
+
+	// The only marked players in a battle session: your own squad.
+	DrawSquadMarkers(Out, Layer + 4, G, L);
 
 	// Phase banner, screen centre-top: the only thing worth reading before the drop.
 	FString Banner;
@@ -1871,7 +1992,8 @@ void SCampusTouchControls::DrawBattleRoyaleHud(FSlateWindowElementList& Out, int
 	const FString ZoneLine = Zone->IsShrinking()
 		? FString::Printf(TEXT("ZONE CLOSING  \u00b7  %s"), *Clock(Zone->SecondsToEvent()))
 		: FString::Printf(TEXT("ZONE SHRINKING IN %s"), *Clock(Zone->SecondsToEvent()));
-	DrawText(Out, Layer + 2, G, ZoneLine, FVector2D(L.W * 0.5f, 32.f + U * 9.6f), Small,
+	// Directly under the ALIVE / SQUADS plate, where the room's round line sits.
+	DrawText(Out, Layer + 2, G, ZoneLine, FVector2D(L.W * 0.5f, 32.f + U * 4.4f), Small,
 		Zone->IsShrinking() ? TouchStyle::Red : FLinearColor::White);
 
 	// Outside the circle: the one warning that has to be impossible to miss.

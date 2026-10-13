@@ -543,7 +543,11 @@ void ACampusBotController::TickSenses(ACampusCharacter* Self)
 	{
 		ACampusCharacter* Other = Weak.Get();
 		const ACampusPlayerState* Theirs = Other ? Other->GetPlayerState<ACampusPlayerState>() : nullptr;
-		if (!Other || Other == Self || !Theirs || !Mine || Theirs->Team == Mine->Team)
+		// SIDES, through the one shared test: RED/BLUE in a room, the SQUAD in battle royale. Reading
+		// the colours here made every BR bot think all fifty combatants were teammates - they all carry
+		// the same default - so a bot never fired a shot in a battle session.
+		if (!Other || Other == Self || !Theirs || !Mine
+			|| CampusBR::AreFriendly(World, this, Other->GetController()))
 		{
 			continue;
 		}

@@ -616,8 +616,12 @@ public:
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
 private:
+	/** ROOM ONLY: the two team columns, SWITCH TEAM and the host's START. */
 	TSharedRef<SWidget> BuildWaiting();
+	/** ROOM ONLY: RED WINS / BLUE WINS and the round score. */
 	TSharedRef<SWidget> BuildWin();
+	/** BATTLE ROYALE: the placement screen. BOOYAH at #1, "#7 / 50" otherwise - never a team colour. */
+	TSharedRef<SWidget> BuildBattleRoyaleResult();
 	TSharedRef<SWidget> BuildSettings();
 	TSharedRef<SWidget> TeamColumn(uint8 Team);
 

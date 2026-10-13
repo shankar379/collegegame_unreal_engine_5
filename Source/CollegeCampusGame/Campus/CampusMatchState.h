@@ -14,6 +14,36 @@ enum class ECampusTeam : uint8
 	Blue
 };
 
+class AController;
+class UWorld;
+
+/** THE ONE TEST for "this is the fifty-player battle royale, not the 4v4 room", and the squad
+ *  identity every BR rule keys off. Gate anything that says RED or BLUE on IsBattleRoyale and give
+ *  BR the squad version instead; never read ACampusPlayerState::Squad directly.
+ *
+ *  Defined in CampusMatchState.cpp so that the lightest header in the match owns the test and no UI
+ *  file has to pull in the whole BR game mode to ask the question. */
+namespace CampusBR
+{
+	/** True when the level is running ACampusBRGameState (ACampusBRGameMode's state class). */
+	bool IsBattleRoyale(const UWorld* World);
+
+	/** 1-based squad, or 0 for "no squad" - a room match, a state that has not replicated, or a
+	 *  combatant the mode does not know. ZERO IS FRIENDLY WITH NOBODY, on purpose: a default must
+	 *  never put two solo players on one team. */
+	int32 GetSquadId(const APlayerState* PlayerState);
+
+	/** Same squad, and that squad is a real one. Everyone else is an enemy - in SOLO that is every
+	 *  other player and every bot, because each of them is their own squad of one. */
+	bool AreSquadmates(const APlayerState* First, const APlayerState* Second);
+
+	/** THE ONE "do these two hurt each other" test, for both game types and every weapon that asks:
+	 *  bullets, roadkill and a vehicle going up. ROOM: the two RED/BLUE colours, exactly as before.
+	 *  BR: the SQUAD - through the game mode when there is one, because only it knows the bot squads
+	 *  and the truce before the drop, and through the replicated squad otherwise. */
+	bool AreFriendly(const UWorld* World, const AController* First, const AController* Second);
+}
+
 UENUM()
 enum class ECampusPhase : uint8
 {
@@ -35,9 +65,27 @@ public:
 	UPROPERTY(Replicated)
 	ECampusTeam Team = ECampusTeam::Red;
 
+	/** BATTLE ROYALE ONLY (ACampusBRGameMode owns it, replicated so a client can colour its own
+	 *  squadmates and draw the squad scoreboard). 1-based; 0 means NO SQUAD and is friendly with
+	 *  NOBODY - which is what a state that has not replicated yet, and the whole ROOM 4v4 path, read
+	 *  as. The room mode never writes it and never reads it: there the two colours in Team are the
+	 *  teams, exactly as before. Always ask through CampusBR::GetSquadId. */
+	UPROPERTY(Replicated)
+	int32 Squad = 0;
+
+	/** BATTLE ROYALE ONLY: finishing place, written the moment this player is eliminated (1 = won).
+	 *  0 = still alive, which is also what every room match reads. */
+	UPROPERTY(Replicated)
+	int32 Placement = 0;
+
 	/** Server only: the account the API admitted for this connection, and the ticket it came with. */
 	FString AccountId;
 	FString JoinTicket;
+
+	/** Server only, BATTLE ROYALE: the session's team id this connection travelled in with ("?Squad=").
+	 *  ONE TEAM ID IS ONE SQUAD - it is how two phones in the same party end up on the same squad and,
+	 *  just as importantly, how two strangers who queued separately never do. Empty = a team of one. */
+	FString SquadKey;
 
 	UPROPERTY(Replicated)
 	int32 Kills = 0;

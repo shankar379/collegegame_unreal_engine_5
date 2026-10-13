@@ -710,13 +710,26 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 	// late. Neither is gameplay - the BACKEND still decides the seal.
 	const FString SessionId = Match.SessionId;
 	const int32 FillSeconds = Match.FillSeconds;
+	// THE SQUAD RIDES IN WITH THE PHONE. The session's team id is the only thing that can tell a party
+	// of two from two strangers who queued one after the other, and ACampusBRGameMode seats one team
+	// id per squad. Travel options are parsed on "?" and "=", so anything that is not a plain id is
+	// dropped rather than risk mangling the URL; an empty key simply means "a team of one".
+	FString SquadKey;
+	for (const TCHAR Letter : Match.TeamId)
+	{
+		if (FChar::IsAlnum(Letter) || Letter == TEXT('-') || Letter == TEXT('_'))
+		{
+			SquadKey.AppendChar(Letter);
+		}
+	}
+	const FString SquadOption = SquadKey.IsEmpty() ? FString() : FString::Printf(TEXT("?Squad=%s"), *SquadKey);
 	TWeakObjectPtr<ACampusLobbyPlayerController> WeakThis(this);
 
 	if (bHost)
 	{
 		// Mirrors HostRoom: with no puid we tell the net driver to use plain IP sockets, so a LAN
 		// match is hosted on 7777 even when EOS is configured but this phone could not log in.
-		auto OpenAsListen = [WeakThis, Level, Code, Night, Team, Humans, SessionId, FillSeconds](const FString& EosPuid)
+		auto OpenAsListen = [WeakThis, Level, Code, Night, Team, Humans, SessionId, FillSeconds, SquadOption](const FString& EosPuid)
 		{
 			ACampusLobbyPlayerController* Self = WeakThis.Get();
 			if (!Self)
@@ -724,8 +737,8 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 				return;
 			}
 			const TCHAR* Transport = EosPuid.IsEmpty() ? TEXT("?bUseIPSockets") : TEXT("");
-			FString Options = FString::Printf(TEXT("listen%s?Mode=BR?Night=%d?Code=%s?Team=%d"),
-				Transport, Night, *Code, Team);
+			FString Options = FString::Printf(TEXT("listen%s?Mode=BR?Night=%d?Code=%s?Team=%d%s"),
+				Transport, Night, *Code, Team, *SquadOption);
 			if (Humans > 0)
 			{
 				// What the SERVER sized this session for; the game mode clamps it to what a phone can
@@ -770,7 +783,7 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 			OnFailed(TEXT("That match has no address this build can reach."));
 			return;
 		}
-		ClientTravel(FString::Printf(TEXT("%s:%d?Code=%s"), *Match.Address, Match.Port, *Code), TRAVEL_Absolute);
+		ClientTravel(FString::Printf(TEXT("%s:%d?Code=%s%s"), *Match.Address, Match.Port, *Code, *SquadOption), TRAVEL_Absolute);
 		return;
 	}
 	UCampusEOS* Eos = GetEos();
@@ -780,7 +793,7 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 		return;
 	}
 	const FString HostPuid = Match.HostPuid;
-	Eos->EnsureLogin([WeakThis, HostPuid, Code, OnFailed](bool bLoggedIn)
+	Eos->EnsureLogin([WeakThis, HostPuid, Code, SquadOption, OnFailed](bool bLoggedIn)
 	{
 		ACampusLobbyPlayerController* Me = WeakThis.Get();
 		if (!Me)
@@ -792,7 +805,7 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 			OnFailed(TEXT("Could not reach the match network. Check your connection and try again."));
 			return;
 		}
-		Me->ClientTravel(FString::Printf(TEXT("%s?Code=%s"), *UCampusEOS::ConnectUrlFor(HostPuid), *Code), TRAVEL_Absolute);
+		Me->ClientTravel(FString::Printf(TEXT("%s?Code=%s%s"), *UCampusEOS::ConnectUrlFor(HostPuid), *Code, *SquadOption), TRAVEL_Absolute);
 	});
 }
 
@@ -982,6 +995,14 @@ int32 ACampusMatchPlayerController::ComputeReward() const
 	{
 		return 0;
 	}
+	// BATTLE ROYALE pays on PLACEMENT, not on a team colour: Winner is always 0 there, so the room
+	// formula would hand every one of the fifty a winner's purse.
+	if (CampusBR::IsBattleRoyale(GetWorld()))
+	{
+		const int32 Place = Mine->Placement;
+		const int32 Base = Place == 1 ? 100 : (Place > 0 && Place <= 10 ? 70 : 40);
+		return Base + 10 * Mine->Kills;
+	}
 	const int32 Base = State->Winner < 0 ? 60 : (State->Winner == int32(Mine->Team) ? 100 : 40);
 	return Base + 10 * Mine->Kills;
 }
@@ -1010,7 +1031,12 @@ void ACampusMatchPlayerController::RecordResult()
 		// PROFILE_DESIGN §3) and only ever read back from GET /me/profile. A phone that also paid itself
 		// 50 XP would disagree with every other phone about this player's level.
 		Profile->Matches += 1;
-		Profile->Wins += (State && Mine && State->Winner == int32(Mine->Team)) ? 1 : 0;
+		// A BR win is placement #1 - the last squad standing. Winner is a team colour and is always 0
+		// in BR, which would have counted a win for everybody who finished the match.
+		const bool bWon = CampusBR::IsBattleRoyale(GetWorld())
+			? (Mine && Mine->Placement == 1)
+			: (State && Mine && State->Winner == int32(Mine->Team));
+		Profile->Wins += bWon ? 1 : 0;
 		Profile->Kills += Mine ? Mine->Kills : 0;
 		Profile->Persist();
 	}
@@ -1031,7 +1057,7 @@ void ACampusMatchPlayerController::LeaveToLobby()
 		const ACampusPlayerState* Mine = GetPlayerState<ACampusPlayerState>();
 		if (const AGameStateBase* State = GetWorld() ? GetWorld()->GetGameState() : nullptr; State && Mine)
 		{
-			Party->AdoptSquad(State, Mine->GetPlayerName(), uint8(Mine->Team));
+			Party->AdoptSquad(State, Mine);
 		}
 	}
 	// Remember which room we just left, so the lobby can open PLAYER OF THE MATCH even if the

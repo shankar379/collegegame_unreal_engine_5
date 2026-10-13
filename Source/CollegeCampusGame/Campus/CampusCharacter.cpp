@@ -1156,18 +1156,10 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 		}
 		return;
 	}
-	const ACampusPlayerState* MyState = GetPlayerState<ACampusPlayerState>();
-	const ACampusPlayerState* VictimState = Victim->GetPlayerState<ACampusPlayerState>();
-	// Battle royale numbers its squads on the game mode (which also knows the bot squads, and that
-	// nobody can be hurt before the drop); TDM keeps using the two player-state colours.
-	if (const ACampusBRGameMode* BattleRoyale = GetWorld()->GetAuthGameMode<ACampusBRGameMode>())
-	{
-		if (BattleRoyale->AreFriendly(GetController(), Victim->GetController()))
-		{
-			return;
-		}
-	}
-	else if (MyState && VictimState && MyState->Team == VictimState->Team)
+	// One friendly-fire test for both game types: the two RED/BLUE colours in a room, the SQUAD in
+	// battle royale - where squad 0 is friendly with nobody, so solo really is everyone against
+	// everyone, bots included.
+	if (CampusBR::AreFriendly(GetWorld(), GetController(), Victim->GetController()))
 	{
 		return;
 	}

@@ -149,6 +149,10 @@ public:
 	virtual void InitGameState() override;
 	virtual void PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId,
 		FString& ErrorMessage) override;
+	/** Only to catch the joining URL's "?Squad=" (the session's team id) before PostLogin seats the
+	 *  player: by then the options are gone and the squad would have to be guessed from join order. */
+	virtual FString InitNewPlayer(APlayerController* NewPlayerController, const FUniqueNetIdRepl& UniqueId,
+		const FString& Options, const FString& Portal = TEXT("")) override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void Logout(AController* Exiting) override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
@@ -181,11 +185,12 @@ public:
 	/** Called by ACampusCharacter::ApplyHit when a pawn's health hits zero. */
 	void OnKilled(AController* Victim, AController* Killer);
 
-	/** Squadmates (and everyone at all, before the match starts) never damage each other.
-	 *  Knows about bot squads too, which a player state alone could not. */
+	/** Squadmates (and everyone at all, before the match starts) never damage each other. EVERYONE
+	 *  ELSE IS AN ENEMY: in solo that is every other player and every bot, because each of them is
+	 *  their own squad of one. Knows about bot squads too, which a player state alone could not. */
 	bool AreFriendly(const AController* First, const AController* Second) const;
 
-	/** Squad of a controller, or 0 when it is not in this match. */
+	/** Squad of a controller, or 0 when it is not in this match. Squad 0 is friendly with nobody. */
 	int32 SquadOf(const AController* Controller) const;
 
 	/** Host only: the waiting room's START, exactly like TDM's. */
@@ -250,8 +255,12 @@ private:
 	APawn* LivingSquadmatePawn(int32 Squad, const AController* Except) const;
 
 	int32 IndexOf(const AController* Controller) const;
-	/** The next squad with a free seat, filling squads in order. */
-	int32 NextSquadWithRoom() const;
+	/** A HUMAN's squad, from the session's team id it travelled in with. One team id is one squad, so
+	 *  a party of two lands together - and two strangers who queued separately never do, because they
+	 *  carry different ids. SOLO (SquadSize 1) and an empty key are always a team of one. */
+	int32 SquadForKey(const FString& Key);
+	/** How many combatants are already seated on Squad. */
+	int32 SeatsTaken(int32 Squad) const;
 
 	/** POST /v1/br/:code/result. Fire and forget: a 404 from a server that has not shipped the
 	 *  endpoint yet must never hold up the win screen. */
@@ -271,6 +280,11 @@ private:
 
 	/** 1 / 2 / 4, from "?Team=". */
 	int32 SquadSize = 4;
+	/** Squads are handed out 1, 2, 3 ... and NEVER reused: squad 0 stays the "no squad" value, and a
+	 *  number that has been given out is never given to a second, unrelated party. */
+	int32 NextSquadNumber = 1;
+	/** Session team id -> squad number, so every phone on one ticket gets the same squad. */
+	TMap<FString, int32> SquadByKey;
 	float MatchStartTime = 0.f;
 	float NextVirtualTime = 0.f;
 	int32 NextPlacement = 0;

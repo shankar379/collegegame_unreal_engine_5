@@ -9,7 +9,10 @@
 #include "UObject/StrongObjectPtr.h"
 #include "Widgets/SLeafWidget.h"
 
+class ACampusBRGameState;
 class ACampusCharacter;
+class ACampusGameState;
+class ACampusPlayerState;
 class UTexture2D;
 class APlayerController;
 
@@ -75,8 +78,7 @@ private:
 		/** Settings gear, HUD top-right corner (Free Fire puts it there). */
 		FVector2D Gear;
 		float GearR = 0.f;
-		/** Team roster panel, top-left; the minimap sits under it. */
-		FVector2D TeamMin, TeamSize;
+		/** Minimap, top-left corner. */
 		FVector2D MapMin;
 		float MapSize = 0.f;
 		/** ALIVE / KILL chips, left of the gear. */
@@ -151,8 +153,10 @@ private:
 	/** Chip with only the top-right and bottom-left corners cut: the standard HUD plate. */
 	void DrawNotchedBox(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, const FVector2D& Size,
 		float Cut, const FLinearColor& Fill, const FLinearColor& Border = FLinearColor::Transparent, float BorderWidth = 0.f) const;
-	/** The teammate list, top-left: name + flat health bar per player on your team. */
-	void DrawTeamList(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
+	/** BATTLE ROYALE: a green chevron and name over each of YOUR OWN SQUAD, and nothing at all over
+	 *  anybody else - every other combatant is an enemy, and tagging fifty people tags nobody.
+	 *  Draws nothing in solo, where a player has no squadmates, and nothing in a room. */
+	void DrawSquadMarkers(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
 	/** Battle royale overlay: the circle on the minimap, its clock, the alive count, the drop prompts
 	 *  and BOOYAH. Returns immediately in TDM, which has no BR game state. */
 	void DrawBattleRoyaleHud(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
@@ -168,8 +172,14 @@ private:
 	// ---- maps (three.js src/game/maps.js) and the scoreboard
 	/** The campus picture with you (yellow arrow) and your teammates; bBig = full-screen map with grid + names. */
 	void DrawMap(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size, bool bBig, float U) const;
-	/** Tap the timer: both teams side by side, kills / deaths / damage dealt / taken for this room's rounds. */
+	/** Tap the timer. Picks the board that belongs to the game type and draws nothing else. */
 	void DrawScoreboard(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
+	/** ROOM: both teams side by side, kills / deaths / damage dealt / taken for this room's rounds. */
+	void DrawTeamBoard(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L,
+		const ACampusGameState* State, const ACampusPlayerState* Mine) const;
+	/** BATTLE ROYALE: every squad this client can see, with alive status and kills. No RED, no BLUE. */
+	void DrawSquadBoard(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L,
+		const ACampusBRGameState* State, const ACampusPlayerState* Mine) const;
 	bool bBigMap = false;
 	bool bScoreboard = false;
 	void DrawImage(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FSlateBrush* Brush, const FVector2D& Center, const FVector2D& Size, const FLinearColor& Tint, float Angle = 0.f) const;

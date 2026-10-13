@@ -136,6 +136,9 @@ void ACampusBRGameMode::InitGameState()
 	State->MaxPlayers = MaxHumans;
 	State->TotalCombatants = MaxCombatants;
 	State->AliveCombatants = MaxCombatants;
+	// The SESSION's shape, so the HUD's SQUADS counter does not read "1" at the one moment the first
+	// player to arrive is looking at it. RefreshCounts takes over the instant the roster is sealed.
+	State->AliveSquads = FMath::Max(1, MaxCombatants / FMath::Max(1, SquadSize));
 	if (GameSession)
 	{
 		GameSession->MaxPlayers = MaxHumans;
@@ -274,6 +277,28 @@ void ACampusBRGameMode::PreLogin(const FString& Options, const FString& Address,
 	}
 }
 
+FString ACampusBRGameMode::InitNewPlayer(APlayerController* NewPlayerController, const FUniqueNetIdRepl& UniqueId,
+	const FString& Options, const FString& Portal)
+{
+	const FString Error = Super::InitNewPlayer(NewPlayerController, UniqueId, Options, Portal);
+	// "?Squad=" is the SESSION's team id for this phone and the only thing that can tell a party of
+	// two from two strangers who queued one after the other. It has to be read HERE: PostLogin seats
+	// the player, and by then the joining URL is gone and join order is all that is left.
+	if (ACampusPlayerState* PlayerState = NewPlayerController
+		? NewPlayerController->GetPlayerState<ACampusPlayerState>() : nullptr)
+	{
+		PlayerState->SquadKey = UGameplayStatics::ParseOption(Options, TEXT("Squad"));
+		if (PlayerState->SquadKey.IsEmpty() && NewPlayerController->IsLocalPlayerController())
+		{
+			// The LISTEN HOST's own controller is seated from the LEVEL's URL, not from a join URL.
+			// Local only, and deliberately so: handing a joiner who arrived without a team id the
+			// host's key would make a stranger the host's squadmate.
+			PlayerState->SquadKey = UGameplayStatics::ParseOption(OptionsString, TEXT("Squad"));
+		}
+	}
+	return Error;
+}
+
 void ACampusBRGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	ACampusBRGameState* State = GetBRState();
@@ -289,20 +314,24 @@ void ACampusBRGameMode::PostLogin(APlayerController* NewPlayer)
 		}
 		return;
 	}
-	if (ACampusPlayerState* PlayerState = NewPlayer->GetPlayerState<ACampusPlayerState>())
-	{
-		// Every BR player is nominally "Red": friendly fire is decided by SQUAD here, not by the two
-		// TDM colours, and AreFriendly is the one place that is asked.
-		PlayerState->Team = ECampusTeam::Red;
-		PlayerState->bIsHost = NewPlayer->IsLocalPlayerController();
-	}
-
+	ACampusPlayerState* PlayerState = NewPlayer->GetPlayerState<ACampusPlayerState>();
 	FCampusBRCombatant& Slot = Combatants.AddDefaulted_GetRef();
 	Slot.bHuman = true;
 	Slot.bPhysical = true;
 	Slot.Controller = NewPlayer;
-	Slot.Squad = NextSquadWithRoom();
+	// THE SESSION DECIDES THE SQUAD, not the order phones dialled in. Join order would seat two
+	// strangers in one squad in every duo and squad match.
+	Slot.Squad = SquadForKey(PlayerState ? PlayerState->SquadKey : FString());
 	Slot.Name = NewPlayer->PlayerState ? NewPlayer->PlayerState->GetPlayerName() : TEXT("Player");
+
+	if (PlayerState)
+	{
+		// Team is left at its default and NEVER read in BR: there are no two colours here. Squad is
+		// the identity, and it is replicated so a client can mark its own squadmates and nobody else.
+		PlayerState->Squad = Slot.Squad;
+		PlayerState->Placement = 0;
+		PlayerState->bIsHost = NewPlayer->IsLocalPlayerController();
+	}
 
 	Super::PostLogin(NewPlayer);
 
@@ -387,22 +416,36 @@ void ACampusBRGameMode::Logout(AController* Exiting)
 	Super::Logout(Exiting);
 }
 
-int32 ACampusBRGameMode::NextSquadWithRoom() const
+int32 ACampusBRGameMode::SeatsTaken(int32 Squad) const
 {
-	const int32 Squads = FMath::Max(1, MaxCombatants / FMath::Max(1, SquadSize));
-	for (int32 Squad = 1; Squad <= Squads; ++Squad)
+	int32 Taken = 0;
+	for (const FCampusBRCombatant& Each : Combatants)
 	{
-		int32 Taken = 0;
-		for (const FCampusBRCombatant& Each : Combatants)
+		Taken += Each.Squad == Squad ? 1 : 0;
+	}
+	return Taken;
+}
+
+int32 ACampusBRGameMode::SquadForKey(const FString& Key)
+{
+	// SOLO IS ALWAYS A TEAM OF ONE. Not "a squad with one seat taken" - a fresh number per player, so
+	// no default and no missing team id can ever put two solo players on the same side.
+	if (SquadSize <= 1 || Key.IsEmpty())
+	{
+		return NextSquadNumber++;
+	}
+	if (const int32* Found = SquadByKey.Find(Key))
+	{
+		// Only while that squad still has a seat: a team id carrying more phones than this mode seats
+		// is a server fault, and splitting it beats a squad of five.
+		if (SeatsTaken(*Found) < SquadSize)
 		{
-			Taken += Each.Squad == Squad ? 1 : 0;
-		}
-		if (Taken < SquadSize)
-		{
-			return Squad;
+			return *Found;
 		}
 	}
-	return Squads;
+	const int32 Fresh = NextSquadNumber++;
+	SquadByKey.Add(Key, Fresh);
+	return Fresh;
 }
 
 int32 ACampusBRGameMode::IndexOf(const AController* Controller) const
@@ -419,6 +462,18 @@ int32 ACampusBRGameMode::IndexOf(const AController* Controller) const
 
 int32 ACampusBRGameMode::SquadOf(const AController* Controller) const
 {
+	if (!Controller)
+	{
+		return 0;
+	}
+	// The PLAYER STATE first, and not as a fallback: this mode writes it the moment a combatant is
+	// seated and a squad never changes afterwards, so it is the same number the roster holds - in
+	// constant time instead of a scan of fifty, which matters because every bot asks this about every
+	// candidate it can see, four times a second.
+	if (const int32 Squad = CampusBR::GetSquadId(Controller->PlayerState); Squad != 0)
+	{
+		return Squad;
+	}
 	const int32 Index = IndexOf(Controller);
 	return Index == INDEX_NONE ? 0 : Combatants[Index].Squad;
 }
@@ -479,11 +534,24 @@ void ACampusBRGameMode::FillWithBots()
 {
 	// Every remaining slot starts VIRTUAL. Physical pawns are only ever made by promotion, so the
 	// host never pays for ten AI pawns during the countdown, when it is busiest.
+	//
+	// A BOT SQUAD IS ALL BOTS. The seal hands this mode a bot COUNT and nothing that names a bot as a
+	// particular player's teammate filler, so no bot is ever seated on a human's squad: in duo and
+	// squad every bot is an enemy, and in solo every bot is its own squad of one.
+	const int32 Seats = FMath::Max(1, SquadSize);
 	int32 Next = 0;
+	int32 BotSquad = 0;
+	int32 Filled = 0;
 	while (Combatants.Num() < MaxCombatants)
 	{
+		if (BotSquad == 0 || Filled >= Seats)
+		{
+			BotSquad = NextSquadNumber++;
+			Filled = 0;
+		}
 		FCampusBRCombatant& Slot = Combatants.AddDefaulted_GetRef();
-		Slot.Squad = NextSquadWithRoom();
+		Slot.Squad = BotSquad;
+		++Filled;
 		Slot.Name = FString::Printf(TEXT("%s%02d"),
 			CampusBRRoster::BotNames[Next % int32(UE_ARRAY_COUNT(CampusBRRoster::BotNames))], Next + 1);
 		Slot.Where = FVector(CampusBRMap::Center().X, CampusBRMap::Center().Y, 0.f);
@@ -575,12 +643,11 @@ bool ACampusBRGameMode::Promote(int32 Index)
 			}
 			return false;
 		}
-		// A bot needs a player state so the scoreboard, the kill feed and the team HUD see it at all.
+		// A bot needs a player state so the scoreboard, the kill feed and the squad HUD see it at all.
 		Bot->InitPlayerState();
 		if (ACampusPlayerState* BotState = Bot->GetPlayerState<ACampusPlayerState>())
 		{
 			BotState->SetPlayerName(Slot.Name);
-			BotState->Team = ECampusTeam::Red;
 		}
 		Bot->Possess(Pawn);
 		// 50 actors on a phone: a bot nobody can see must not cost bandwidth or a tick.
@@ -592,6 +659,14 @@ bool ACampusBRGameMode::Promote(int32 Index)
 
 	Slot.bPhysical = true;
 	Slot.Controller = Made[0];
+	// THE SQUAD, on the bot's own player state: the bot's target picker, the client's squad markers
+	// and the scoreboard all read it from there, and a bot left on squad 0 would be friendly with
+	// nobody AND marked as nobody's teammate - which is exactly right, but only by accident.
+	if (ACampusPlayerState* BotState = Made[0] ? Made[0]->GetPlayerState<ACampusPlayerState>() : nullptr)
+	{
+		BotState->Squad = Slot.Squad;
+		BotState->Placement = 0;
+	}
 	return true;
 }
 
@@ -797,7 +872,9 @@ void ACampusBRGameMode::OnKilled(AController* Victim, AController* Killer)
 		++VictimState->Deaths;
 	}
 	ACampusPlayerState* KillerState = Killer ? Killer->GetPlayerState<ACampusPlayerState>() : nullptr;
-	if (KillerState && Killer != Victim)
+	// KILL CREDIT KEYS OFF THE SQUAD. Friendly fire is already off upstream, so this is a belt on the
+	// braces - but a credited squadmate kill is exactly the kind of thing that becomes an exploit.
+	if (KillerState && Killer != Victim && !AreFriendly(Killer, Victim))
 	{
 		++KillerState->Kills;
 	}
@@ -821,6 +898,13 @@ void ACampusBRGameMode::Eliminate(int32 Index, const FString& KillerName)
 	State->MulticastFeed(FString::Printf(TEXT("%s  >  %s"), *KillerName, *Slot.Name));
 
 	AController* Controller = Slot.Controller.Get();
+	// The placement goes on the player state so the BR result screen can show "#7" without a second
+	// channel. Non-zero also IS "eliminated" to the client's squad list, which has no other way to
+	// tell a dead squadmate from one whose pawn is simply not relevant to it yet.
+	if (ACampusPlayerState* DeadState = Controller ? Controller->GetPlayerState<ACampusPlayerState>() : nullptr)
+	{
+		DeadState->Placement = Slot.Placement;
+	}
 	if (Controller)
 	{
 		if (APawn* Pawn = Controller->GetPawn())
@@ -878,7 +962,11 @@ void ACampusBRGameMode::RefreshCounts()
 		}
 	}
 	State->AliveCombatants = Alive;
-	State->AliveSquads = Squads.Num();
+	// Same reasoning as TotalCombatants below: while the platform is still FILLING, the roster holds
+	// only the humans who have walked in, so the squad count is the SESSION's shape. Once the roster
+	// is sealed every combatant is on it and the count is the plain truth.
+	State->AliveSquads = bSealed ? Squads.Num()
+		: FMath::Max(Squads.Num(), FMath::Max(Combatants.Num(), MaxCombatants) / FMath::Max(1, SquadSize));
 	// THE SESSION'S SIZE, not the roster's length. While the platform is filling the roster is just the
 	// humans who have walked in, and a HUD reading "PLAYERS 1 / 1" off it told the first player to
 	// arrive that they were the whole match. The bots take the rest of the slots at the seal.
@@ -909,10 +997,18 @@ void ACampusBRGameMode::EndMatch()
 		{
 			WinningSquad = Each.Squad;
 			Each.Placement = 1;
+			if (ACampusPlayerState* Won = Each.Controller.IsValid()
+				? Each.Controller->GetPlayerState<ACampusPlayerState>() : nullptr)
+			{
+				Won->Placement = 1;
+			}
 		}
 	}
 	State->WinningSquad = WinningSquad;
-	State->Winner = 0; // the existing win screen reads Winner; BOOYAH is keyed off WinningSquad
+	// Winner is a RED/BLUE field and means nothing here; it is set only because the shared match
+	// widget uses "Winner >= 0" as "the match is over". The BR result screen reads WinningSquad and
+	// the player's own Placement, never this.
+	State->Winner = 0;
 	State->MulticastFeed(TEXT("BOOYAH!"));
 	ReportResult();
 }

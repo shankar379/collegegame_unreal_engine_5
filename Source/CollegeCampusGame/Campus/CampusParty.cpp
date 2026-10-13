@@ -300,17 +300,28 @@ void UCampusParty::ApplyRoster(const TArray<FCampusPartyMember>& InMembers, bool
 	Changed();
 }
 
-void UCampusParty::AdoptSquad(const AGameStateBase* State, const FString& MyName, uint8 MyTeam)
+void UCampusParty::AdoptSquad(const AGameStateBase* State, const ACampusPlayerState* Mine)
 {
-	if (!State)
+	if (!State || !Mine)
 	{
 		return;
 	}
+	// BATTLE ROYALE adopts by SQUAD. Its player states all carry the same default colour, so the
+	// team test would call all fifty combatants teammates and march them into the lobby.
+	const bool bBattleRoyale = CampusBR::IsBattleRoyale(State->GetWorld());
+	const FString MyName = Mine->GetPlayerName();
 	ClearGuests();
 	for (const APlayerState* Player : State->PlayerArray)
 	{
 		const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
-		if (!Campus || uint8(Campus->Team) != MyTeam)
+		if (!Campus)
+		{
+			continue;
+		}
+		const bool bMine = bBattleRoyale
+			? (Campus == Mine || CampusBR::AreSquadmates(Campus, Mine))
+			: Campus->Team == Mine->Team;
+		if (!bMine)
 		{
 			continue;
 		}

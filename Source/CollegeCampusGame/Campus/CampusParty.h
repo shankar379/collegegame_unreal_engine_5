@@ -20,6 +20,7 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "CampusParty.generated.h"
 
+class ACampusPlayerState;
 class AGameStateBase;
 
 /**
@@ -158,8 +159,11 @@ public:
 	void SetLocalPlayerId(const FString& InPlayerId) { LocalPlayerId = InPlayerId; }
 	const FString& GetLocalPlayerId() const { return LocalPlayerId; }
 
-	/** Takes the squad from a finished match: everyone on the local player's team, in join order. */
-	void AdoptSquad(const AGameStateBase* State, const FString& MyName, uint8 MyTeam);
+	/** Takes the squad from a finished match: everyone on the local player's side, in join order.
+	 *  "Side" is the RED/BLUE team in a custom room and the SQUAD in battle royale - where the two
+	 *  colours mean nothing and adopting by them would drag all fifty combatants into the lobby.
+	 *  Mine is the local player's own state, which is where both numbers live. */
+	void AdoptSquad(const AGameStateBase* State, const ACampusPlayerState* Mine);
 
 	const TArray<FCampusPartyMember>& GetMembers() const { return Members; }
 
