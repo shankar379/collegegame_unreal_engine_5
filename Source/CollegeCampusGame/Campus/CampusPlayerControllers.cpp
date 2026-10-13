@@ -314,8 +314,9 @@ void ACampusLobbyPlayerController::RebuildSquad()
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			Component->SetMobility(EComponentMobility::Movable);
 			Component->SetSkeletalMeshAsset(Mesh);
-			// The mesh faces +X in its own space; the camera looks back along -X.
-			Component->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));
+			// Measured on the phone with no input: at -90 the figure stood in profile facing screen-left
+			// (+Y), so this asset needs a further -90 to face +X, back along the camera's -X view.
+			Component->SetRelativeRotation(FRotator(0.f, 180.f, 0.f));
 			Component->SetAnimationMode(EAnimationMode::AnimationBlueprint);
 			Component->SetAnimInstanceClass(UCampusAnimInstance::StaticClass());
 			Squad[Index] = Actor;
