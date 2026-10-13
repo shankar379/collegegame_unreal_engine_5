@@ -200,6 +200,9 @@ private:
 	void KillVirtual(int32 Index);
 	/** Server: turn a virtual row into a real AI pawn where it stands. */
 	bool Promote(int32 Index);
+	/** A virtual row carries a 2D map position with no height, so standing it up needs the ground
+	 *  under that position. Returns a spawn point one capsule above whatever is actually there. */
+	FVector GroundedSpawn(const FVector& Where) const;
 	/** How many physical bots are alive right now. */
 	int32 PhysicalBotsAlive() const;
 	/** The virtual simulation is switched off for the last two circles: no ghosts in the endgame. */

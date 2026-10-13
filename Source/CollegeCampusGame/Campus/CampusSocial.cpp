@@ -916,12 +916,24 @@ void UCampusSocial::HandleEphemeral(const TSharedPtr<FJsonObject>& Frame)
 {
 	const FString Type = Str(Frame, TEXT("type"));
 	const TSharedPtr<FJsonObject> Payload = Obj(Frame, TEXT("p"));
-	// The queue match can arrive either way (a producer may treat it as ephemeral, since a match the
-	// player is no longer waiting for is worthless). UCampusBRQueue only ever acts on a NEW code, so
-	// receiving it on both paths is harmless.
-	if (Type == TEXT("br.matched"))
+	// A battle session placement can arrive either way (a producer may treat it as ephemeral, since a
+	// session the player is no longer waiting for is worthless). `bs.placed` is the name the design
+	// gives it and `br.matched` is the one migration 015 shipped; the SERVER SENDS BOTH, with the same
+	// payload, until this client is the only one left. UCampusBRQueue acts on a new SESSION ID exactly
+	// once, so receiving it twice here - or on both paths - is harmless.
+	if (Type == TEXT("bs.placed") || Type == TEXT("br.matched"))
 	{
-		OnBRMatched.Broadcast(Payload);
+		OnBRPlaced.Broadcast(Payload);
+		return;
+	}
+	if (Type == TEXT("bs.ended"))
+	{
+		OnBRSessionEnded.Broadcast(Payload);
+		return;
+	}
+	if (Type == TEXT("br.result"))
+	{
+		OnBRResult.Broadcast(Payload);
 		return;
 	}
 	if (Type == TEXT("server.notice"))
@@ -1243,11 +1255,24 @@ void UCampusSocial::ApplyEvent(int64 Seq, const FString& Id, const FString& Type
 				OnSummaryReady.Broadcast(Code);
 			}
 		}
-		else if (Type == TEXT("br.matched"))
+		else if (Type == TEXT("bs.placed") || Type == TEXT("br.matched"))
 		{
-			// The BR queue's push channel. Handed over whole: this file knows nothing about match
-			// objects, and UCampusBRQueue is the one place that parses one.
-			OnBRMatched.Broadcast(Payload);
+			// THE BATTLE SESSION'S PUSH CHANNEL, under both of its names: the server emits `bs.placed`
+			// and `br.matched` with the SAME payload while the shipped client is still on the old one.
+			// Handed over whole - this file knows nothing about session objects, and UCampusBRQueue is
+			// the one place that parses one (and the one place that dedupes the pair).
+			OnBRPlaced.Broadcast(Payload);
+		}
+		else if (Type == TEXT("bs.ended"))
+		{
+			// The host went quiet (or the session went stale) and the server settled it. Nobody is
+			// running the match any more, so the queue takes the player back to the lobby.
+			OnBRSessionEnded.Broadcast(Payload);
+		}
+		else if (Type == TEXT("br.result"))
+		{
+			// The host reported: this is my own line of it, so nobody polls for their own placement.
+			OnBRResult.Broadcast(Payload);
 		}
 		else if (Type == TEXT("profile.milestone"))
 		{

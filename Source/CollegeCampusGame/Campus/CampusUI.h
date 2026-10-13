@@ -352,7 +352,7 @@ private:
 	void CancelMatchmaking();
 	/** MATCHING... / timer / players found / big CANCEL, Free Fire's queue screen. */
 	TSharedRef<SWidget> BuildMatchmaking();
-	/** br.matched (or the fallback poll): host the map, or travel to the host. */
+	/** bs.placed (or the fallback poll): host the map, or travel to the session's server. */
 	void EnterBRMatch(const struct FCampusBRMatch& Match);
 	class UCampusBRQueue* BRQueue() const;
 	TSharedRef<SWidget> BuildStore();
@@ -577,10 +577,12 @@ private:
 	FDelegateHandle SocialNoticeHandle;
 	FDelegateHandle SocialRoomHandle;
 	FDelegateHandle SocialSummaryHandle;
-	/** UCampusBRQueue outlives this widget (it survives level travel), so both come off in the
-	 *  destructor exactly like the social handles above. */
+	/** UCampusBRQueue outlives this widget (it survives level travel), so every one of these comes off
+	 *  in the destructor exactly like the social handles above. */
 	FDelegateHandle BRChangedHandle;
 	FDelegateHandle BRMatchedHandle;
+	FDelegateHandle BREndedHandle;
+	FDelegateHandle BRScoredHandle;
 
 	// form fields
 	FString EmailText;

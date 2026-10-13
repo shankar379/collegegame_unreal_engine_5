@@ -175,6 +175,8 @@ private:
 	TSharedPtr<SCampusTouchControls> TouchControls;
 	/** The BATTLE ROYALE overlay. Present in every match and collapsed in the ones that are not BR. */
 	TSharedPtr<SCampusBRHud> BRHud;
+	/** UCampusBRQueue::OnSessionEnded (bs.ended): the battle session was settled without a result. */
+	FDelegateHandle SessionEndedHandle;
 	int32 AppliedMode = -1;
 
 	bool bResultRecorded = false;

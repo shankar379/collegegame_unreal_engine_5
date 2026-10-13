@@ -2,21 +2,31 @@
 
 #include "Campus/CampusBRZone.h"
 #include "Campus/CampusCharacter.h"
+#include "CollisionQueryParams.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "Materials/MaterialInterface.h"
 #include "Net/UnrealNetwork.h"
+#include "UObject/ConstructorHelpers.h"
 
 namespace CampusBRDive
 {
-	/** Plane height (design: ~100 m) and how long one crossing takes. */
-	constexpr float Altitude = 10000.f;
+	/** Plane height and how long one crossing takes.
+	 *  300 m, NOT the 100 m the first pass used: the chute opens by itself 40 m up (AutoChuteHeight),
+	 *  so at 100 m the whole freefall was 1.5 s and "open your own chute" was a button nobody could
+	 *  reach in time. 300 m gives ~6.5 s of steerable freefall and ~9 s under the canopy. */
+	constexpr float Altitude = 30000.f;
 	constexpr float FlightSeconds = 45.f;
 	/** The line starts and ends outside the map square so the plane is never seen turning. */
 	constexpr float LineOvershoot = 1.3f;
+	/** How much further the plane flies after the last diver is out, as a share of the crossing, before
+	 *  it deletes itself. Without this an aircraft hangs over the map edge for the whole match. */
+	constexpr float ExitShare = 0.12f;
 
 	// Freefall: 40 m/s down with real lateral control, the same numbers on the server and the phone.
 	constexpr float FreefallGravity = 3.5f;
@@ -29,20 +39,213 @@ namespace CampusBRDive
 	constexpr float ChuteFallSpeed = 450.f;
 	constexpr float ChuteLateralSpeed = 700.f;
 
-	/** The chute opens by itself at 25 m above whatever is below. */
-	constexpr float AutoChuteHeight = 2500.f;
-	/** How far down to look for the ground (the whole drop, so the number is always real). */
-	constexpr float GroundTraceLength = 30000.f;
+	/** The chute opens by itself 40 m above whatever is below.
+	 *  At ChuteFallSpeed (4.5 m/s) that is ~9 s under the canopy: long enough for it to appear, be
+	 *  read, and be steered off a roof. 25 m gave 5.5 s, which together with the instant 40 -> 4.5 m/s
+	 *  snap reads as a jerk and a thud. The design doc's 130 m assumed a 10 m/s chute; at 4.5 m/s it
+	 *  would be 29 s of hanging still, longer than the rest of the drop put together. */
+	constexpr float AutoChuteHeight = 4000.f;
+	/** How far down to look for the ground: more than the whole drop, so the number is always real. */
+	constexpr float GroundTraceLength = 60000.f;
 	/** A landed drop lingers this long: the landing frame must never be charged as fall damage. */
 	constexpr float DoneGraceSeconds = 2.f;
 
+	/** Where a diver rides, relative to the aircraft: below and behind the belly. The pawn is hidden
+	 *  up there, so this is really the camera's seat - and the camera must be OUTSIDE the fuselage. */
+	const FVector SeatOffset(-200.f, 0.f, -520.f);
+
 	TArray<TWeakObjectPtr<ACampusBRPlane>> LivePlanes;
 	TArray<TWeakObjectPtr<ACampusBRDrop>> LiveDrops;
+}
 
-	UStaticMesh* BasicShape(const TCHAR* Path)
+/** The art of the plane and the canopy: engine primitives and material instances the campus already
+ *  ships (Scripts/build_campus.py's flat unlit master), so there is no asset to generate and nothing
+ *  new to add to DirectoriesToAlwaysCook. Both are loaded with FObjectFinder from a constructor, which
+ *  is what puts them in the class default object - and that is what the cooker can actually see. */
+namespace CampusBRArt
+{
+	/** Every engine primitive below is 100 cm on each axis and centred on its own origin, so the
+	 *  relative scales further down read straight off as centimetres. The cylinder's long axis is its
+	 *  local +Z, which is why anything built along the fuselage carries a -90 pitch. */
+	UStaticMesh* Cube()
 	{
-		return LoadObject<UStaticMesh>(nullptr, Path);
+		static ConstructorHelpers::FObjectFinder<UStaticMesh> Found(TEXT("/Engine/BasicShapes/Cube.Cube"));
+		return Found.Object;
 	}
+	UStaticMesh* Cylinder()
+	{
+		static ConstructorHelpers::FObjectFinder<UStaticMesh> Found(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+		return Found.Object;
+	}
+	UStaticMesh* Sphere()
+	{
+		static ConstructorHelpers::FObjectFinder<UStaticMesh> Found(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+		return Found.Object;
+	}
+
+	/** Hull white. */
+	UMaterialInterface* Shell()
+	{
+		static ConstructorHelpers::FObjectFinder<UMaterialInterface> Found(
+			TEXT("/Game/Campus/Materials/Instances/MI_Campus_d9d9d9_100.MI_Campus_d9d9d9_100"));
+		return Found.Object;
+	}
+	/** Wings and tail: slate, so the silhouette reads against a bright sky. */
+	UMaterialInterface* Trim()
+	{
+		static ConstructorHelpers::FObjectFinder<UMaterialInterface> Found(
+			TEXT("/Game/Campus/Materials/Instances/MI_Campus_3d4650_100.MI_Campus_3d4650_100"));
+		return Found.Object;
+	}
+	/** Engines, propellers and rigging: near-black. */
+	UMaterialInterface* Metal()
+	{
+		static ConstructorHelpers::FObjectFinder<UMaterialInterface> Found(
+			TEXT("/Game/Campus/Materials/Instances/MI_Campus_1b1c1f_100.MI_Campus_1b1c1f_100"));
+		return Found.Object;
+	}
+	/** Canopy amber - the same accent the HUD uses, and the one colour nobody loses against grass. */
+	UMaterialInterface* CanopyCloth()
+	{
+		static ConstructorHelpers::FObjectFinder<UMaterialInterface> Found(
+			TEXT("/Game/Campus/Materials/Instances/MI_Campus_d4a017_100.MI_Campus_d4a017_100"));
+		return Found.Object;
+	}
+
+	/** Fast enough to read as "running", slow enough not to strobe at 30 fps. */
+	constexpr float PropDegreesPerSecond = 900.f;
+
+	/** The canopy sits over the diver's shoulders (the capsule is 83 cm half-height, so this is the
+	 *  top of the chest), and the dome rides 4.2 m above that. */
+	constexpr float ShoulderHeight = 55.f;
+	constexpr float CanopyRise = 420.f;
+	/** Where the rigging meets the dome, and where it meets the diver. */
+	constexpr float RiggingRadius = 250.f;
+	constexpr float ShoulderRadius = 18.f;
+
+	/** One cosmetic primitive: no collision, no shadow, no decals. Used by the plane and the chute. */
+	void Dress(UStaticMeshComponent* Part, UStaticMesh* Mesh, UMaterialInterface* Material,
+		const FVector& Where, const FRotator& Turn, const FVector& Size)
+	{
+		if (!Part)
+		{
+			return;
+		}
+		if (Mesh)
+		{
+			Part->SetStaticMesh(Mesh);
+		}
+		if (Material)
+		{
+			Part->SetMaterial(0, Material);
+		}
+		Part->SetRelativeLocation(Where);
+		Part->SetRelativeRotation(Turn);
+		Part->SetRelativeScale3D(Size);
+		Part->SetCollisionProfileName(TEXT("NoCollision"));
+		Part->SetCastShadow(false);
+		Part->bReceivesDecals = false;
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// The canopy
+
+ACampusBRChute::ACampusBRChute()
+{
+	PrimaryActorTick.bCanEverTick = false; // it rides the diver's capsule and never moves by itself
+	bReplicates = true;
+	SetReplicateMovement(false); // the attachment is rebuilt from Wearer, not streamed
+	SetCanBeDamaged(false);
+	// A canopy is a landmark - who is dropping where is half of the first minute - so it carries much
+	// further than a body (474 m), and it never changes, so it costs two updates a second to say so.
+	SetNetCullDistanceSquared(2.25e9f);
+	SetNetUpdateFrequency(2.f);
+
+	Harness = CreateDefaultSubobject<USceneComponent>(TEXT("Harness"));
+	SetRootComponent(Harness);
+
+	Canopy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Canopy"));
+	Canopy->SetupAttachment(Harness);
+	// A sphere squashed on Z: 7 m across, 1.2 m deep. From underneath, which is where the wearer is,
+	// that is a dome; from the side it is the lens every parachute silhouette already is.
+	CampusBRArt::Dress(Canopy, CampusBRArt::Sphere(), CampusBRArt::CanopyCloth(),
+		FVector(0.f, 0.f, CampusBRArt::CanopyRise), FRotator::ZeroRotator, FVector(7.f, 7.f, 2.4f));
+
+	// One line per diagonal, each built from the two points it joins - the dome's rim and the
+	// shoulder - so the geometry is stated once and the dome can move without the rigging drifting.
+	auto MakeLine = [this](const TCHAR* Name, int32 Corner) -> UStaticMeshComponent*
+	{
+		const float Angle = FMath::DegreesToRadians(45.f + 90.f * Corner);
+		const FVector2D Around(FMath::Cos(Angle), FMath::Sin(Angle));
+		const FVector Top(Around.X * CampusBRArt::RiggingRadius, Around.Y * CampusBRArt::RiggingRadius,
+			CampusBRArt::CanopyRise - 60.f);
+		const FVector Bottom(Around.X * CampusBRArt::ShoulderRadius, Around.Y * CampusBRArt::ShoulderRadius, 0.f);
+		const FVector Along = Top - Bottom;
+
+		UStaticMeshComponent* Line = CreateDefaultSubobject<UStaticMeshComponent>(Name);
+		Line->SetupAttachment(Harness);
+		// 3 cm of cylinder stretched to the exact span, pointed along it: one component per line.
+		CampusBRArt::Dress(Line, CampusBRArt::Cylinder(), CampusBRArt::Metal(),
+			(Top + Bottom) * 0.5f, FRotationMatrix::MakeFromZ(Along).Rotator(),
+			FVector(0.03f, 0.03f, Along.Size() * 0.01f));
+		return Line;
+	};
+	LineFrontLeft = MakeLine(TEXT("LineFrontLeft"), 0);
+	LineBackLeft = MakeLine(TEXT("LineBackLeft"), 1);
+	LineBackRight = MakeLine(TEXT("LineBackRight"), 2);
+	LineFrontRight = MakeLine(TEXT("LineFrontRight"), 3);
+}
+
+void ACampusBRChute::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(ACampusBRChute, Wearer);
+}
+
+void ACampusBRChute::BeginPlay()
+{
+	Super::BeginPlay();
+	// A client can have Wearer applied before BeginPlay runs; hanging again here is free and covers
+	// the other order too.
+	HangOn(Wearer);
+}
+
+ACampusBRChute* ACampusBRChute::Deploy(ACampusCharacter* Diver)
+{
+	UWorld* World = Diver ? Diver->GetWorld() : nullptr;
+	if (!World)
+	{
+		return nullptr;
+	}
+	FActorSpawnParameters Params;
+	Params.Owner = Diver;
+	ACampusBRChute* Chute = World->SpawnActor<ACampusBRChute>(ACampusBRChute::StaticClass(),
+		FTransform(Diver->GetActorLocation()), Params);
+	if (Chute)
+	{
+		Chute->Wearer = Diver;
+		Chute->HangOn(Diver);
+	}
+	return Chute;
+}
+
+void ACampusBRChute::OnRep_Wearer()
+{
+	HangOn(Wearer);
+}
+
+void ACampusBRChute::HangOn(ACampusCharacter* Who)
+{
+	if (!Who || !Who->GetRootComponent())
+	{
+		return;
+	}
+	// The capsule, not a bone: the canopy hangs off the body's centre line and must not inherit the
+	// mesh's animation, and SnapToTargetNotIncludingScale keeps the dome's size its own.
+	AttachToComponent(Who->GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+	SetActorRelativeLocation(FVector(0.f, 0.f, CampusBRArt::ShoulderHeight));
+	SetActorRelativeRotation(FRotator::ZeroRotator);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -76,23 +279,17 @@ void ACampusBRDrop::Board(ACampusCharacter* InDiver, ACampusBRPlane* InPlane)
 	State = ECampusBRDive::InPlane;
 	CampusBRDive::LiveDrops.AddUnique(this);
 
-	UCharacterMovementComponent* Movement = InDiver->GetCharacterMovement();
-	if (Movement && !bSaved)
-	{
-		SavedGravityScale = Movement->GravityScale;
-		SavedAirControl = Movement->AirControl;
-		SavedMaxAcceleration = Movement->MaxAcceleration;
-		SavedLateralFriction = Movement->FallingLateralFriction;
-		bSaved = true;
-	}
-	if (Movement)
+	CaptureMovement();
+	if (UCharacterMovementComponent* Movement = InDiver->GetCharacterMovement())
 	{
 		Movement->DisableMovement();
 	}
 	// Riding by attachment, not by teleporting every frame: the attachment replicates, so the owning
 	// phone stops predicting a fall and the pawn follows the plane with no net traffic of its own.
+	// The plane's root is deliberately an unscaled scene component, so nothing of the aircraft's own
+	// 16 m worth of part scales can leak into the passenger.
 	InDiver->AttachToActor(InPlane, FAttachmentTransformRules::KeepWorldTransform);
-	InDiver->SetActorRelativeLocation(FVector::ZeroVector);
+	InDiver->SetActorRelativeLocation(CampusBRDive::SeatOffset);
 	InDiver->SetActorHiddenInGame(true);
 	InDiver->SetActorEnableCollision(false);
 }
@@ -123,6 +320,17 @@ void ACampusBRDrop::OpenChute()
 		return;
 	}
 	State = ECampusBRDive::Parachute;
+	if (!Chute)
+	{
+		Chute = ACampusBRChute::Deploy(Diver);
+	}
+}
+
+bool ACampusBRDrop::CanDropNow() const
+{
+	// Jumping on the run-in or the run-out puts you down outside the first circle with no cover and a
+	// 30-second walk; the plane says when its door is useful and the button obeys.
+	return State == ECampusBRDive::InPlane && Plane && Plane->IsOverMap();
 }
 
 bool ACampusBRDrop::HandleJumpPressed()
@@ -130,6 +338,12 @@ bool ACampusBRDrop::HandleJumpPressed()
 	if (State == ECampusBRDive::Done)
 	{
 		return false;
+	}
+	// Aboard but not over the map yet: the press is still CONSUMED. Jump means one thing in a plane,
+	// and letting it fall through would vault the diver off a seat that is not there.
+	if (State == ECampusBRDive::InPlane && !CanDropNow())
+	{
+		return true;
 	}
 	if (HasAuthority())
 	{
@@ -153,7 +367,11 @@ void ACampusBRDrop::ServerJump_Implementation()
 {
 	if (State == ECampusBRDive::InPlane)
 	{
-		Drop();
+		// Re-checked here, not just on the phone: the gate is the server's rule, the UI only draws it.
+		if (CanDropNow())
+		{
+			Drop();
+		}
 	}
 	else if (State == ECampusBRDive::Freefall)
 	{
@@ -161,17 +379,58 @@ void ACampusBRDrop::ServerJump_Implementation()
 	}
 }
 
+void ACampusBRDrop::OnRep_Dive()
+{
+	// One handler for State AND Diver, because either can land in the bunch first and the owning phone
+	// needs both before it can do anything.
+	UCharacterMovementComponent* Movement = Diver ? Diver->GetCharacterMovement() : nullptr;
+	if (!Movement || !Diver->IsLocallyControlled() || HasAuthority())
+	{
+		return;
+	}
+	switch (State)
+	{
+	case ECampusBRDive::InPlane:
+		// The server parked this pawn in MOVE_None; movement mode is not a replicated property, so
+		// without this the phone predicts a 300 m fall and eats a correction every frame of the ride.
+		Movement->DisableMovement();
+		break;
+	case ECampusBRDive::Freefall:
+	case ECampusBRDive::Parachute:
+		if (Movement->MovementMode == MOVE_None)
+		{
+			Movement->SetMovementMode(MOVE_Falling);
+		}
+		break;
+	case ECampusBRDive::Done:
+		// Landed: the phone has its OWN copy of GravityScale and friends to put back, and it must not
+		// wait for the drop actor to be destroyed to do it - until then it predicts zero gravity.
+		RestoreMovement();
+		break;
+	}
+}
+
 float ACampusBRDrop::HeightAboveGround() const
 {
-	if (!Diver)
+	UWorld* World = GetWorld();
+	if (!Diver || !World)
 	{
-		return 0.f;
+		return CampusBRDive::GroundTraceLength;
 	}
-	const FVector Feet = Diver->GetActorLocation() - FVector(0.f, 0.f, Diver->GetCapsuleComponent() ? Diver->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 0.f);
+	const float HalfHeight = Diver->GetCapsuleComponent()
+		? Diver->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 0.f;
+	const FVector Feet = Diver->GetActorLocation() - FVector(0.f, 0.f, HalfHeight);
 	FHitResult Hit;
 	FCollisionQueryParams Params(TEXT("CampusBRGround"), false, Diver);
-	const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Feet,
-		Feet - FVector(0.f, 0.f, CampusBRDive::GroundTraceLength), ECC_Visibility, Params);
+	// THE WORLD below, not whoever is below. Traced by object type rather than on ECC_Visibility so
+	// another diver's capsule (ECC_Pawn) can never be read as ground and pop this chute 40 m over
+	// somebody's head - which is exactly what a crowded hot drop would have done. Terrain, rooftops,
+	// the water plane and parked vehicles are all WorldStatic or WorldDynamic, so all of them count.
+	FCollisionObjectQueryParams Objects;
+	Objects.AddObjectTypesToQuery(ECC_WorldStatic);
+	Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
+	const bool bHit = World->LineTraceSingleByObjectType(Hit, Feet,
+		Feet - FVector(0.f, 0.f, CampusBRDive::GroundTraceLength), Objects, Params);
 	return bHit ? Hit.Distance : CampusBRDive::GroundTraceLength;
 }
 
@@ -182,6 +441,7 @@ void ACampusBRDrop::ApplyDiveMovement()
 	{
 		return;
 	}
+	CaptureMovement(); // the owning phone's first dive frame: remember what it is about to overwrite
 	const bool bChute = State == ECampusBRDive::Parachute;
 	Movement->GravityScale = bChute ? 0.f : CampusBRDive::FreefallGravity;
 	Movement->AirControl = bChute ? 1.f : CampusBRDive::FreefallAirControl;
@@ -205,6 +465,20 @@ void ACampusBRDrop::ApplyDiveMovement()
 	Movement->Velocity = Velocity;
 }
 
+void ACampusBRDrop::CaptureMovement()
+{
+	UCharacterMovementComponent* Movement = Diver ? Diver->GetCharacterMovement() : nullptr;
+	if (!Movement || bSaved)
+	{
+		return;
+	}
+	SavedGravityScale = Movement->GravityScale;
+	SavedAirControl = Movement->AirControl;
+	SavedMaxAcceleration = Movement->MaxAcceleration;
+	SavedLateralFriction = Movement->FallingLateralFriction;
+	bSaved = true;
+}
+
 void ACampusBRDrop::RestoreMovement()
 {
 	UCharacterMovementComponent* Movement = Diver ? Diver->GetCharacterMovement() : nullptr;
@@ -219,11 +493,29 @@ void ACampusBRDrop::RestoreMovement()
 	bSaved = false;
 }
 
+void ACampusBRDrop::CutChute()
+{
+	if (Chute)
+	{
+		Chute->Destroy();
+		Chute = nullptr;
+	}
+}
+
+void ACampusBRDrop::Land()
+{
+	RestoreMovement();
+	CutChute();
+	State = ECampusBRDive::Done;
+	DoneTime = float(GetWorld()->GetTimeSeconds());
+}
+
 void ACampusBRDrop::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 	if (!Diver)
 	{
+		// The pawn is gone (killed, or its player disconnected mid-air): nothing left to deploy.
 		if (HasAuthority())
 		{
 			Destroy();
@@ -241,23 +533,22 @@ void ACampusBRDrop::Tick(float DeltaSeconds)
 		return;
 	}
 
+	if (HasAuthority())
+	{
+		// Landing is checked BEFORE the clamps, so the touchdown frame is never handed a -4.5 m/s
+		// velocity and a zero gravity scale it then has to be talked out of.
+		const UCharacterMovementComponent* Movement = Diver->GetCharacterMovement();
+		if (Movement && Movement->IsMovingOnGround())
+		{
+			Land();
+			return;
+		}
+		if (State == ECampusBRDive::Freefall && HeightAboveGround() < CampusBRDive::AutoChuteHeight)
+		{
+			OpenChute();
+		}
+	}
 	ApplyDiveMovement();
-
-	if (!HasAuthority())
-	{
-		return;
-	}
-	if (State == ECampusBRDive::Freefall && HeightAboveGround() < CampusBRDive::AutoChuteHeight)
-	{
-		OpenChute();
-	}
-	const UCharacterMovementComponent* Movement = Diver->GetCharacterMovement();
-	if (Movement && Movement->IsMovingOnGround())
-	{
-		RestoreMovement();
-		State = ECampusBRDive::Done;
-		DoneTime = float(GetWorld()->GetTimeSeconds());
-	}
 }
 
 void ACampusBRDrop::EndPlay(const EEndPlayReason::Type Reason)
@@ -265,6 +556,7 @@ void ACampusBRDrop::EndPlay(const EEndPlayReason::Type Reason)
 	// Both machines put the movement component back: a client that only ever saw the replicated state
 	// still has its own copy of GravityScale to undo.
 	RestoreMovement();
+	CutChute(); // a canopy must never outlive the dive that opened it
 	CampusBRDive::LiveDrops.Remove(this);
 	Super::EndPlay(Reason);
 }
@@ -282,12 +574,67 @@ ACampusBRPlane::ACampusBRPlane()
 	SetReplicateMovement(false);
 	SetCanBeDamaged(false);
 
-	Body = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Body"));
-	SetRootComponent(Body);
-	Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	Body->SetCastShadow(false);
-	// Cosmetic only: a long box reads as an aircraft from 100 m below, and it costs one draw call.
-	Body->SetWorldScale3D(FVector(16.f, 3.f, 2.5f));
+	// A low-poly cargo plane out of three engine primitives, nose along +X because that is the axis
+	// Launch points down the flight line. Fourteen components, no collision, no shadows, four flat
+	// unlit materials - it is seen from 300 m below, on a phone, for forty-five seconds.
+	//
+	// The ROOT is a bare scene component on purpose. A passenger attaches to the root, and a root that
+	// was itself a scaled mesh would hand its 16 x 2.6 x 2.6 scale to whoever boarded.
+	Hull = CreateDefaultSubobject<USceneComponent>(TEXT("Hull"));
+	SetRootComponent(Hull);
+
+	UStaticMesh* const Cube = CampusBRArt::Cube();
+	UStaticMesh* const Cylinder = CampusBRArt::Cylinder();
+	UMaterialInterface* const Shell = CampusBRArt::Shell();
+	UMaterialInterface* const Trim = CampusBRArt::Trim();
+	UMaterialInterface* const Metal = CampusBRArt::Metal();
+
+	auto MakePart = [this](const TCHAR* Name, UStaticMesh* Mesh, UMaterialInterface* Material,
+		const FVector& Where, const FRotator& Turn, const FVector& Size) -> UStaticMeshComponent*
+	{
+		UStaticMeshComponent* Part = CreateDefaultSubobject<UStaticMeshComponent>(Name);
+		Part->SetupAttachment(Hull);
+		CampusBRArt::Dress(Part, Mesh, Material, Where, Turn, Size);
+		return Part;
+	};
+
+	// The parts list, in centimetres, nose at +X. A cylinder's long axis is its local Z, which is what
+	// the -90 pitch on the fuselage and the engines is for.
+	//
+	// 16 m fuselage, 2.6 m across - a cargo plane's 6:1.
+	Fuselage = MakePart(TEXT("Fuselage"), Cylinder, Shell,
+		FVector::ZeroVector, FRotator(-90.f, 0.f, 0.f), FVector(2.6f, 2.6f, 16.f));
+	// A sphere stretched along the flight axis, capping the front.
+	Nose = MakePart(TEXT("Nose"), CampusBRArt::Sphere(), Shell,
+		FVector(790.f, 0.f, 0.f), FRotator::ZeroRotator, FVector(3.2f, 2.6f, 2.4f));
+	// High wings, 18 m tip to tip, 3 degrees of dihedral so they are not a plank.
+	WingLeft = MakePart(TEXT("WingLeft"), Cube, Trim,
+		FVector(100.f, 555.f, 110.f), FRotator(0.f, 0.f, 3.f), FVector(3.2f, 8.5f, 0.35f));
+	WingRight = MakePart(TEXT("WingRight"), Cube, Trim,
+		FVector(100.f, -555.f, 110.f), FRotator(0.f, 0.f, -3.f), FVector(3.2f, 8.5f, 0.35f));
+	// The tail: the one part that says "aircraft" from directly below.
+	Fin = MakePart(TEXT("Fin"), Cube, Trim,
+		FVector(-720.f, 0.f, 310.f), FRotator::ZeroRotator, FVector(2.6f, 0.3f, 3.6f));
+	StabiliserLeft = MakePart(TEXT("StabiliserLeft"), Cube, Trim,
+		FVector(-700.f, 195.f, 60.f), FRotator::ZeroRotator, FVector(1.8f, 3.2f, 0.3f));
+	StabiliserRight = MakePart(TEXT("StabiliserRight"), Cube, Trim,
+		FVector(-700.f, -195.f, 60.f), FRotator::ZeroRotator, FVector(1.8f, 3.2f, 0.3f));
+	// Two engines, 2.8 m nacelles poking forward of the wing's leading edge.
+	NacelleLeft = MakePart(TEXT("NacelleLeft"), Cylinder, Metal,
+		FVector(230.f, 420.f, 110.f), FRotator(-90.f, 0.f, 0.f), FVector(1.f, 1.f, 2.8f));
+	NacelleRight = MakePart(TEXT("NacelleRight"), Cylinder, Metal,
+		FVector(230.f, -420.f, 110.f), FRotator(-90.f, 0.f, 0.f), FVector(1.f, 1.f, 2.8f));
+	// 4.2 m propellers: two crossed slabs each, hung off the HULL and not off the nacelle, because the
+	// nacelle is a scaled cylinder and a child of it would inherit that scale and shear. Each slab's
+	// long axis is its local Y, so rolling it about local X sweeps a disc across the flight axis.
+	BladeLeftA = MakePart(TEXT("BladeLeftA"), Cube, Metal,
+		FVector(380.f, 420.f, 110.f), FRotator::ZeroRotator, FVector(0.3f, 4.2f, 0.08f));
+	BladeLeftB = MakePart(TEXT("BladeLeftB"), Cube, Metal,
+		FVector(380.f, 420.f, 110.f), FRotator(0.f, 0.f, 90.f), FVector(0.3f, 4.2f, 0.08f));
+	BladeRightA = MakePart(TEXT("BladeRightA"), Cube, Metal,
+		FVector(380.f, -420.f, 110.f), FRotator::ZeroRotator, FVector(0.3f, 4.2f, 0.08f));
+	BladeRightB = MakePart(TEXT("BladeRightB"), Cube, Metal,
+		FVector(380.f, -420.f, 110.f), FRotator(0.f, 0.f, 90.f), FVector(0.3f, 4.2f, 0.08f));
 }
 
 void ACampusBRPlane::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -303,9 +650,13 @@ void ACampusBRPlane::BeginPlay()
 {
 	Super::BeginPlay();
 	CampusBRDive::LivePlanes.AddUnique(this);
-	if (Body && !Body->GetStaticMesh())
+	// Nothing to see until Launch has handed it a line. Done HERE and not in the constructor because
+	// SetupAttachment does not fill AttachChildren until the components register, so a propagating
+	// SetVisibility in the constructor would hide the root and leave every part of the plane on screen.
+	// On the host that is the frame between SpawnActor and Launch; on a phone it is the whole wait.
+	if (Hull)
 	{
-		Body->SetStaticMesh(CampusBRDive::BasicShape(TEXT("/Engine/BasicShapes/Cube.Cube")));
+		Hull->SetVisibility(LaunchTime > 0.f && FlightSeconds > 0.f, true);
 	}
 }
 
@@ -400,9 +751,35 @@ float ACampusBRPlane::FlightAlpha() const
 	return FMath::Clamp((CampusBRServerTime(GetWorld()) - LaunchTime) / FlightSeconds, 0.f, 1.f);
 }
 
+FVector ACampusBRPlane::FlightLocation() const
+{
+	if (FlightSeconds <= 0.f)
+	{
+		return FVector(Finish);
+	}
+	// NOT clamped at the top end: past the end of the line the aircraft keeps going in a straight line
+	// and leaves, which is the whole reason it can delete itself instead of parking over the map edge.
+	const float Travel = FMath::Max((CampusBRServerTime(GetWorld()) - LaunchTime) / FlightSeconds, 0.f);
+	return FMath::Lerp(FVector(Start), FVector(Finish), Travel);
+}
+
+FQuat ACampusBRPlane::Heading() const
+{
+	const FVector Along = FVector(Finish) - FVector(Start);
+	return Along.IsNearlyZero() ? FQuat::Identity : FRotationMatrix::MakeFromX(Along).ToQuat();
+}
+
+bool ACampusBRPlane::IsOverMap() const
+{
+	const FVector Where = FlightLocation();
+	const FVector2D Middle = CampusBRMap::Center();
+	const float Half = CampusBRMap::HalfSpan();
+	return FMath::Abs(Where.X - Middle.X) <= Half && FMath::Abs(Where.Y - Middle.Y) <= Half;
+}
+
 FVector ACampusBRPlane::SeatLocation() const
 {
-	return FMath::Lerp(FVector(Start), FVector(Finish), FlightAlpha());
+	return FlightLocation() + Heading().RotateVector(CampusBRDive::SeatOffset);
 }
 
 ACampusBRDrop* ACampusBRPlane::Board(ACampusCharacter* Diver)
@@ -428,7 +805,9 @@ bool ACampusBRPlane::IsEmpty() const
 {
 	for (const TObjectPtr<ACampusBRDrop>& Drop : Drops)
 	{
-		if (Drop && Drop->GetState() == ECampusBRDive::InPlane)
+		// A drop whose diver has gone (killed on the slab, or disconnected during the ride) is not a
+		// passenger. Without that test one lost pawn would keep the plane "occupied" for ever.
+		if (Drop && Drop->GetDiver() && Drop->GetState() == ECampusBRDive::InPlane)
 		{
 			return false;
 		}
@@ -447,18 +826,66 @@ void ACampusBRPlane::EjectAll()
 	}
 }
 
+void ACampusBRPlane::SpinPropellers(float DeltaSeconds)
+{
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return; // nothing is drawing this, and nothing in the game reads the angle
+	}
+	PropAngle = FMath::Fmod(PropAngle + CampusBRArt::PropDegreesPerSecond * DeltaSeconds, 360.f);
+	// Roll about the blade's own X, which is the flight axis. The B blade keeps the 90 degrees it was
+	// built with, so each pair stays crossed and reads as one disc.
+	const FQuat Turn(FVector::XAxisVector, FMath::DegreesToRadians(PropAngle));
+	const FQuat Crossed(FVector::XAxisVector, FMath::DegreesToRadians(PropAngle + 90.f));
+	UStaticMeshComponent* const Pairs[4] = { BladeLeftA, BladeRightA, BladeLeftB, BladeRightB };
+	for (int32 Index = 0; Index < UE_ARRAY_COUNT(Pairs); ++Index)
+	{
+		if (UStaticMeshComponent* Blade = Pairs[Index])
+		{
+			Blade->SetRelativeRotation(Index < 2 ? Turn : Crossed);
+		}
+	}
+}
+
 void ACampusBRPlane::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	if (LaunchTime <= 0.f)
+	const bool bFlying = LaunchTime > 0.f && FlightSeconds > 0.f;
+	if (Hull && Hull->GetVisibleFlag() != bFlying)
+	{
+		Hull->SetVisibility(bFlying, true);
+	}
+	if (!bFlying)
 	{
 		return;
 	}
-	const float Alpha = FlightAlpha();
-	SetActorLocation(FMath::Lerp(FVector(Start), FVector(Finish), Alpha));
-	if (HasAuthority() && Alpha >= 1.f)
+	// The ROTATION is set here, on every machine, from the replicated endpoints - not left to the one
+	// SetActorLocationAndRotation that Launch does on the server. Movement is not replicated for this
+	// actor, so a client that joined after the initial bunch would otherwise fly a plane-shaped object
+	// sideways down the line. With a cube nobody could tell; with a plane everybody can.
+	SetActorLocationAndRotation(FlightLocation(), Heading());
+	SpinPropellers(DeltaSeconds);
+
+	if (!HasAuthority())
 	{
-		EjectAll(); // end of the line: everybody out, nobody rides past the map
+		return;
+	}
+	const bool bOver = IsOverMap();
+	bEnteredMap |= bOver;
+	const float Alpha = FlightAlpha();
+	// Two ways out, and both are needed: leaving the far edge of the map square is the real deadline
+	// (eject there and a diver can still glide back inside the first circle), and the end of the line
+	// is the backstop for a route that somehow never crossed the square at all.
+	if (Alpha >= 1.f || (bEnteredMap && !bOver))
+	{
+		EjectAll();
+	}
+	// Done its job: fly on out of sight and go. Leaving it alive meant an aeroplane hanging motionless
+	// over the map edge for the remaining nine minutes of the match.
+	if (Alpha >= 1.f && IsEmpty()
+		&& CampusBRServerTime(GetWorld()) - LaunchTime > FlightSeconds * (1.f + CampusBRDive::ExitShare))
+	{
+		Destroy();
 	}
 }
 
@@ -468,14 +895,25 @@ void ACampusBRPlane::Tick(float DeltaSeconds)
 ACampusBRWaitingArea::ACampusBRWaitingArea()
 {
 	PrimaryActorTick.bCanEverTick = false;
-	bReplicates = false; // the host and every client build the identical slab from code at the same place
+	// Only the game mode spawns it, so it must replicate or clients have no floor (predict a fall,
+	// get corrected every frame). Always relevant: everyone stands on it.
+	bReplicates = true;
+	bAlwaysRelevant = true;
 	SetCanBeDamaged(false);
 
 	Slab = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Slab"));
 	SetRootComponent(Slab);
-	Slab->SetWorldScale3D(FVector(40.f, 40.f, 0.5f));
+	// It had collision but no mesh, so the lobby gathered on an invisible floor 40 m up. One cube and
+	// the campus concrete instance, set in the constructor so the cooker sees both.
+	Slab->SetStaticMesh(CampusBRArt::Cube());
+	if (UMaterialInterface* Concrete = CampusBRArt::Shell())
+	{
+		Slab->SetMaterial(0, Concrete);
+	}
+	Slab->SetRelativeScale3D(FVector(40.f, 40.f, 0.5f));
 	Slab->SetCollisionProfileName(TEXT("BlockAll"));
 	Slab->SetCastShadow(false);
+	Slab->bReceivesDecals = false;
 }
 
 FVector ACampusBRWaitingArea::Place()

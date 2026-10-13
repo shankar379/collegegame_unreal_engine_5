@@ -34,6 +34,12 @@ public:
 	UPROPERTY(Config)
 	FString ApiHost;
 
+	/** Which matchmaking queue this build stands in. The battle session queue is one ZSET per mode x
+	 *  REGION (backend docs/BATTLE_SESSION.md §1), and a region the API has no matchmaker for is a 409
+	 *  BS_REGION_UNKNOWN rather than a queue nobody is watching - so this must match BS_REGIONS. */
+	UPROPERTY(Config)
+	FString MatchRegion = TEXT("IN");
+
 	FString ApiBaseUrl() const
 	{
 		FString Base = ApiBaseOverride.TrimStartAndEnd();

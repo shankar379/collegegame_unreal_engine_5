@@ -1,5 +1,6 @@
 #include "Campus/CampusBRGameMode.h"
 
+#include "Campus/CampusBR.h"
 #include "Campus/CampusBRPlane.h"
 #include "Campus/CampusBRZone.h"
 #include "Campus/CampusBackend.h"
@@ -7,6 +8,7 @@
 #include "Campus/CampusNetSettings.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "AIController.h"
+#include "CollisionQueryParams.h"
 #include "Engine/World.h"
 #include "GameFramework/GameSession.h"
 #include "HttpModule.h"
@@ -170,6 +172,30 @@ void ACampusBRGameMode::EnterPhase(ECampusBRPhase NewPhase)
 	case ECampusBRPhase::Ended:
 		break;
 	}
+
+	// THE HOST'S 20-SECOND BEAT (backend docs/BATTLE_SESSION.md §4), and the whole hook for it: the
+	// match phase IS the battle session's state, so there is one seam and no second state machine.
+	// It starts in Waiting (the Waiting Area counts: the server is already in COUNTDOWN) and stops at
+	// Ended, where the result route closes the session instead. No-op off a session-hosted level.
+	if (UCampusBRHostBeat* Beat = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBRHostBeat>() : nullptr)
+	{
+		static const auto BeatFor = [](ECampusBRPhase Phase)
+		{
+			switch (Phase)
+			{
+			case ECampusBRPhase::Flight:  return ECampusBRBeat::InFlight;
+			case ECampusBRPhase::Playing: return ECampusBRBeat::InProgress;
+			case ECampusBRPhase::Ended:   return ECampusBRBeat::Ended;
+			default:                      return ECampusBRBeat::Countdown;
+			}
+		};
+		TWeakObjectPtr<ACampusBRGameMode> WeakThis(this);
+		Beat->Report(this, State->RoomCode, BeatFor(NewPhase), [WeakThis]()
+		{
+			const ACampusBRGameState* Live = WeakThis.IsValid() ? WeakThis->GetBRState() : nullptr;
+			return Live ? Live->AliveCombatants : 0;
+		});
+	}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -324,6 +350,28 @@ void ACampusBRGameMode::FillWithBots()
 	RefreshCounts();
 }
 
+FVector ACampusBRGameMode::GroundedSpawn(const FVector& Where) const
+{
+	// Straight down from well above the tallest roof, against the world only - a bot must not be
+	// stood on another pawn's head. Capsule half height is 83 cm; 95 leaves it a clean 12 cm drop.
+	constexpr float StartAbove = 20000.f;
+	constexpr float Reach = 60000.f;
+	constexpr float FeetClearance = 95.f;
+	const FVector Top(Where.X, Where.Y, StartAbove);
+	FHitResult Hit;
+	FCollisionQueryParams Params(TEXT("CampusBRPromote"), false);
+	FCollisionObjectQueryParams Objects;
+	Objects.AddObjectTypesToQuery(ECC_WorldStatic);
+	Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
+	if (GetWorld()->LineTraceSingleByObjectType(Hit, Top, Top - FVector(0.f, 0.f, Reach), Objects, Params))
+	{
+		return Hit.Location + FVector(0.f, 0.f, FeetClearance);
+	}
+	// Nothing under that map position at all (a hole, or streaming has not caught up): the old
+	// behaviour, which at least spawns something that can be shot.
+	return Where + FVector(0.f, 0.f, 120.f);
+}
+
 int32 ACampusBRGameMode::PhysicalBotsAlive() const
 {
 	int32 Count = 0;
@@ -348,7 +396,12 @@ bool ACampusBRGameMode::Promote(int32 Index)
 	}
 	FCampusBRCombatant& Slot = Combatants[Index];
 	const TArray<int32> Squads = { Slot.Squad };
-	const TArray<FVector> Where = { Slot.Where };
+	// TickVirtual drifts these rows in two dimensions and writes Z = 0, so the raw value is a
+	// point at sea level: on this campus that is either inside the terrain (the bot spawns buried
+	// and stands there for the rest of the match) or well above it (it spawns falling, and a bot
+	// has no drop to suppress its fall damage). Put it on the ground instead.
+	const FVector Ground = GroundedSpawn(Slot.Where);
+	const TArray<FVector> Where = { Ground };
 	TArray<AController*> Made;
 
 	if (UObject* Factory = CampusBRRoster::BotFactory.Get())
@@ -370,7 +423,7 @@ bool ACampusBRGameMode::Promote(int32 Index)
 		FActorSpawnParameters Params;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 		ACampusCharacter* Pawn = GetWorld()->SpawnActor<ACampusCharacter>(ACampusCharacter::StaticClass(),
-			FTransform(Slot.Where + FVector(0.f, 0.f, 120.f)), Params);
+			FTransform(Ground), Params);
 		AController* Bot = Pawn ? GetWorld()->SpawnActor<AController>(ControllerClass, FTransform::Identity, Params) : nullptr;
 		if (!Pawn || !Bot)
 		{
@@ -411,6 +464,13 @@ void ACampusBRGameMode::StartFlight()
 		return;
 	}
 	State->Phase = ECampusPhase::Playing; // the HUD and the touch controls key off this
+	// The waiting slab has done its job. It is 40 m up, 40 m square and BlockAll, so leaving it in the
+	// world leaves a mid-air floor a diver can auto-chute onto and be stranded on until the zone burns.
+	if (WaitingArea)
+	{
+		WaitingArea->Destroy();
+		WaitingArea = nullptr;
+	}
 	Plane = GetWorld()->SpawnActor<ACampusBRPlane>(ACampusBRPlane::StaticClass(), FTransform::Identity);
 	if (!Plane)
 	{
@@ -692,7 +752,9 @@ void ACampusBRGameMode::EndMatch()
 	{
 		ZoneActor->Freeze();
 	}
-	State->BRPhase = ECampusBRPhase::Ended;
+	// Through EnterPhase rather than straight onto the field: it does exactly this plus clear the phase
+	// timer, and it is where the host's heartbeat is stopped (the result below ends the session).
+	EnterPhase(ECampusBRPhase::Ended);
 	State->Phase = ECampusPhase::Ended;
 
 	int32 WinningSquad = -1;

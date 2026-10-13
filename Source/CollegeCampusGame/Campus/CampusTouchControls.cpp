@@ -1835,8 +1835,11 @@ void SCampusTouchControls::DrawBattleRoyaleHud(FSlateWindowElementList& Out, int
 	{
 		if (Drop->GetState() == ECampusBRDive::InPlane)
 		{
-			Banner = TEXT("TAP JUMP TO DROP");
-			BannerTint = TouchStyle::Accent;
+			// The press is only honoured once the plane is over the map square (ACampusBRDrop::
+			// CanDropNow): say so, rather than letting the player tap a button that does nothing.
+			const bool bOpen = Drop->CanDropNow();
+			Banner = bOpen ? TEXT("TAP JUMP TO DROP") : TEXT("THE PLANE IS NOT OVER THE MAP YET");
+			BannerTint = bOpen ? TouchStyle::Accent : FLinearColor::White;
 		}
 		else if (Drop->GetState() == ECampusBRDive::Freefall)
 		{

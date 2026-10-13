@@ -186,6 +186,17 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 		});
 		SocialStateHandle = Live->OnStateChanged.AddLambda([this]()
 		{
+			const UCampusSocial* Live2 = Social();
+			// The socket just came up, which is exactly when a battle session we were placed into while
+			// it was down has to be found: `bs.placed` expires at the countdown, so a late reconnect
+			// never replays it. One throttled read answers the question the socket cannot.
+			if (Live2 && Live2->IsLive())
+			{
+				if (UCampusBRQueue* Queue = BRQueue())
+				{
+					Queue->ColdCheck();
+				}
+			}
 			if (Current == EScreen::Friends || Current == EScreen::FriendPick)
 			{
 				Refresh();
@@ -209,8 +220,8 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 				Refresh();
 			});
 		});
-		// br.matched arrives on the same socket, but the BR queue owns the parsing, so the lobby
-		// listens to the queue and not to the channel - see Campus/CampusBR.h.
+		// bs.placed / bs.ended / br.result arrive on the same socket, but the BR queue owns the
+		// parsing, so the lobby listens to the queue and not to the channel - see Campus/CampusBR.h.
 		SocialSummaryHandle = Live->OnSummaryReady.AddLambda([this](const FString& Code)
 		{
 			// Mid-match this only records the code; the lobby's Tick opens the screen on arrival.
@@ -234,10 +245,41 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 		});
 		BRMatchedHandle = Queue->OnMatched.AddLambda([this](const FCampusBRMatch& Match)
 		{
-			// Fires exactly once per match (socket and fallback poll are deduped on the code), so this
-			// cannot travel twice and tear the level down mid-load.
+			// Fires exactly once per battle session (`bs.placed`, its legacy twin `br.matched` and the
+			// fallback read are all deduped on the session id), so this cannot travel twice and tear
+			// the level down mid-load. A MEMBER lands here too: the leader queued the team, and this is
+			// how the rest of the squad is pulled in.
 			EnterBRMatch(Match);
 		});
+		// bs.ended: the host went quiet and the server settled the session. A player who was still in
+		// the lobby (the travel had not finished) is told here; one who was already in the match is
+		// brought back by ACampusMatchPlayerController and reads the same line on arrival.
+		BREndedHandle = Queue->OnSessionEnded.AddLambda([this](const FString& Why)
+		{
+			bBusy = false;
+			if (UCampusBRQueue* Live2 = BRQueue())
+			{
+				// We are showing it now, so the lobby after the next travel must not show it again.
+				Live2->TakeEndedNotice();
+			}
+			Toast(Why);
+			Show(EScreen::Lobby);
+		});
+		BRScoredHandle = Queue->OnScored.AddLambda([this](const FCampusBRResult& Scored)
+		{
+			// The host reported and the XP is paid; the placement is what the player wants to hear.
+			Toast(FString::Printf(TEXT("#%d  ·  %d KILLS  ·  +%d XP"),
+				Scored.Placement, Scored.Kills, Scored.XpAwarded));
+		});
+		// A session that ended while this player was in the match level has no lobby to speak to, so
+		// the sentence waited in the subsystem for this one.
+		if (const FString Notice = Queue->TakeEndedNotice(); !Notice.IsEmpty())
+		{
+			Toast(Notice);
+		}
+		// The phone that missed its `bs.placed` frame (app restarted, socket down past the event's
+		// expiry) has no other way to learn it was placed. Throttled inside the subsystem.
+		Queue->ColdCheck();
 	}
 
 	ChildSlot
@@ -410,6 +452,8 @@ SCampusLobbyWidget::~SCampusLobbyWidget()
 	{
 		Queue->OnChanged.Remove(BRChangedHandle);
 		Queue->OnMatched.Remove(BRMatchedHandle);
+		Queue->OnSessionEnded.Remove(BREndedHandle);
+		Queue->OnScored.Remove(BRScoredHandle);
 	}
 }
 
@@ -1799,7 +1843,14 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStartButton()
 	{
 		// A member cannot start their own room out from under the squad: they would spend a Room Card
 		// and leave everyone else standing in the lobby.
+		//
+		// BATTLE SESSION: one ticket is one TEAM and it is the leader's (backend docs/BATTLE_SESSION.md
+		// §5), so the plate says whose press it is. The member does nothing and is pulled in by
+		// `bs.placed` the moment the matchmaker places the squad.
 		const FString LeaderName = Live->GetServerParty().LeaderName().ToUpper();
+		const FText Waiting = IsBattleRoyaleSelected()
+			? LOCTEXT("LeaderStarts", "LEADER STARTS")
+			: FText::Format(LOCTEXT("WaitingForLeader", "WAITING FOR {0}"), FText::FromString(LeaderName));
 		return SNew(SBox).IsEnabled(false).MinDesiredWidth(300.f).MinDesiredHeight(96.f)
 			[
 				SNew(SCampusAngularPanel)
@@ -1812,7 +1863,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStartButton()
 					SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
 					[
 						SNew(STextBlock)
-						.Text(FText::Format(LOCTEXT("WaitingForLeader", "WAITING FOR {0}"), FText::FromString(LeaderName)))
+						.Text(Waiting)
 						.Font(CampusAngular::Display(24))
 						.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.6f))
 						.Justification(ETextJustify::Center)

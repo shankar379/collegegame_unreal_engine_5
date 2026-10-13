@@ -92,9 +92,16 @@ void SCampusLobbyWidget::StartBattleRoyale()
 		Toast(TEXT("Sign in to play Battle Royale."));
 		return;
 	}
+	// ONE TICKET IS ONE TEAM, and it is the LEADER's: a member who reaches this (a stale button, a
+	// leader change mid-tap) is told whose press it is instead of cutting a second ticket.
+	const UCampusSocial* Live = Social();
+	if (Live && Live->HasParty() && !Live->IsPartyLeader())
+	{
+		Toast(FString::Printf(TEXT("%s STARTS FOR THE SQUAD."), *Live->GetServerParty().LeaderName().ToUpper()));
+		return;
+	}
 	// The squad decides the queue: with a server party it is the party's mode, exactly as HostRoom
 	// does for a Custom Room, so four players never queue as four solos.
-	const UCampusSocial* Live = Social();
 	const bool bPartyLeader = Live && Live->HasParty() && Live->IsPartyLeader();
 	const int32 Team = bPartyLeader ? Live->GetServerParty().Mode : SelectedTeamSize;
 	const UCampusSave* Save = Profile();
@@ -137,6 +144,13 @@ void SCampusLobbyWidget::EnterBRMatch(const FCampusBRMatch& Match)
 	Controller->JoinBRMatch(Match, [this](const FString& Error)
 	{
 		bBusy = false;
+		// The travel failed but the SESSION IS STILL OURS until the server ends it, so let it be
+		// offered again - otherwise the player is stuck in the lobby, unable to queue (the server
+		// answers BR_ALREADY_IN_MATCH) and unable to walk into the session they are a member of.
+		if (UCampusBRQueue* Queue = BRQueue())
+		{
+			Queue->AllowRetry();
+		}
 		Toast(Error.IsEmpty() ? TEXT("Could not join the match.") : Error);
 		Show(EScreen::Lobby);
 	});
@@ -202,6 +216,25 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMatchmaking()
 				[
 					BrLine(Subtitle, 20, Accent)
 				]
+				// THE SESSION ID (BS-SQUAD-IN-000206). It appears the moment the team is placed and is
+				// the one string a player can read out - to a friend, or to us when they report a bug.
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 8.f, 0.f, 0.f)
+				[
+					SNew(SBox)
+					.Visibility_Lambda([this]()
+					{
+						const UCampusBRQueue* Live = BRQueue();
+						return Live && !Live->GetSessionId().IsEmpty()
+							? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+					})
+					[
+						BrLine(TAttribute<FText>::CreateLambda([this]()
+						{
+							const UCampusBRQueue* Live = BRQueue();
+							return FText::FromString(Live ? Live->GetSessionId() : FString());
+						}), 15, CampusAngular::TextMuted, false)
+					]
+				]
 				// The timer counts UP. A down-count would be a promise the queue cannot keep; the
 				// server's estimate goes under it, clearly labelled as an estimate.
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 22.f, 0.f, 0.f)
@@ -222,8 +255,11 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMatchmaking()
 					SNew(SBox)
 					.Visibility_Lambda([this]()
 					{
+						// The estimate is for a WAIT. Once the session is formed the countdown below is a
+						// real promise, and two numbers where one is now meaningless is worse than one.
 						const UCampusBRQueue* Live = BRQueue();
-						return Live && Live->GetEta() > 0 ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+						return Live && Live->GetEta() > 0 && !Live->IsMatched()
+							? EVisibility::HitTestInvisible : EVisibility::Collapsed;
 					})
 					[
 						BrLine(TAttribute<FText>::CreateLambda([this]()
@@ -258,12 +294,41 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMatchmaking()
 								const UCampusBRQueue* Live = BRQueue();
 								const int32 Found = Live ? Live->GetFound() : 0;
 								const int32 Slots = Live ? Live->GetTotalSlots() : 50;
+								// ONCE THE SESSION IS FORMED THE FILL IS A FACT, not a search: the
+								// server has told us how many humans it packed and how many of the
+								// fifty slots the match will spawn as bots.
+								const int32 Bots = Live ? Live->GetBots() : 0;
+								if (Live && Live->IsMatched() && Bots > 0)
+								{
+									return FText::Format(LOCTEXT("BrFill", "PLAYERS {0}   ·   BOTS {1}   ·   {2} SLOTS"),
+										FText::AsNumber(Found), FText::AsNumber(Bots), FText::AsNumber(Slots));
+								}
 								return FText::Format(LOCTEXT("BrFound", "PLAYERS FOUND   {0} / {1}"),
 									FText::AsNumber(Found), FText::AsNumber(Slots));
 							})
 							.Font(CampusAngular::Numeric(22))
 							.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.88f))
 						]
+					]
+				]
+				// THE COUNTDOWN, off the server's clock (the session is in COUNTDOWN the instant it is
+				// formed). This is the only down-count on the screen that the server actually promised.
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 12.f, 0.f, 0.f)
+				[
+					SNew(SBox)
+					.Visibility_Lambda([this]()
+					{
+						const UCampusBRQueue* Live = BRQueue();
+						return Live && Live->IsMatched() && Live->GetCountdown() > 0
+							? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+					})
+					[
+						BrLine(TAttribute<FText>::CreateLambda([this]()
+						{
+							const UCampusBRQueue* Live = BRQueue();
+							return FText::Format(LOCTEXT("BrDrop", "DROPPING IN {0}"),
+								FText::AsNumber(Live ? Live->GetCountdown() : 0));
+						}), 18, Accent)
 					]
 				]
 				// The socket is how a match arrives; when it is down we poll every five seconds and
@@ -298,9 +363,12 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMatchmaking()
 					SNew(SBox)
 					.Visibility_Lambda([this]()
 					{
-						// Once a match is found, cancelling is a lie - the travel is already running.
+						// Once a session is formed, cancelling is a lie - the travel is already running.
+						// And a MEMBER has nothing to cancel: the ticket is the leader's and the server
+						// refuses them by design, so offering the button would be a second lie.
 						const UCampusBRQueue* Live = BRQueue();
-						return Live && Live->IsMatched() ? EVisibility::Hidden : EVisibility::Visible;
+						return Live && (Live->IsMatched() || Live->MustWaitForLeader())
+							? EVisibility::Hidden : EVisibility::Visible;
 					})
 					[
 						CampusStyle::Button(LOCTEXT("BrCancel", "CANCEL"),

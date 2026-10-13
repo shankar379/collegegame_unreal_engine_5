@@ -106,7 +106,11 @@ namespace
 		{
 			return FString();
 		}
-		const FProperty* Property = BrHudFind(Object, TEXT("Phase"), TEXT("BRPhase"), TEXT("BrPhase"), TEXT("State"));
+		// BRPhase BEFORE Phase. ACampusBRGameState carries both: the battle-royale phase (waiting /
+		// countdown / flight / playing / ended) and the plain match phase it inherits, which reads
+		// "waiting" for the whole lobby AND the countdown and "playing" from the plane onward. Reading
+		// the coarse one first is what stopped the drop countdown ever appearing.
+		const FProperty* Property = BrHudFind(Object, TEXT("BRPhase"), TEXT("BrPhase"), TEXT("Phase"), TEXT("State"));
 		if (!Property)
 		{
 			return FString();
@@ -282,6 +286,7 @@ void FCampusBRView::Read(const APlayerController* PC)
 	{
 		TotalSlots = FMath::Max(1, int32(Number));
 	}
+	bWaiting = Phase.Contains(TEXT("wait")) || Phase.Contains(TEXT("fill")) || Phase.Contains(TEXT("lobby"));
 	if (Joined > 0 && Needed > 0)
 	{
 		bHasFill = true;
@@ -622,7 +627,11 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 						SNew(SBox)
 						.Visibility_Lambda([this]()
 						{
-							return View.bHasFill && !View.bEnded && !View.bInPlane && !View.bParachuting
+							// bWaiting, not just "a player count is readable": the count is readable all
+							// match long, so this banner used to sit over the middle of the screen through
+							// the drop and the whole fight.
+							return View.bWaiting && View.bHasFill && !View.bEnded && !View.bInPlane
+								&& !View.bFreefall && !View.bParachuting
 								? EVisibility::HitTestInvisible : EVisibility::Collapsed;
 						})
 						[
@@ -682,7 +691,7 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 							}
 							if (View.bFreefall)
 							{
-								return LOCTEXT("BrFreefall", "FREEFALL  ·  THE CHUTE OPENS BY ITSELF");
+								return LOCTEXT("BrFreefall", "OPEN IT YOURSELF  ·  OR IT OPENS AT 40 m");
 							}
 							return LOCTEXT("BrJumpHint", "TAP JUMP WHEN THE VALLEY IS UNDER YOU");
 						})
@@ -694,10 +703,15 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 					]
 					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 					[
+						// ONE button, two jobs - which is exactly what the drop does: the first press
+						// leaves the plane, the second pulls the canopy. It must therefore survive into
+						// freefall, where it used to collapse and leave the manual chute unreachable on
+						// a phone. It goes away once the canopy is out, because there is nothing left
+						// to press.
 						SNew(SBox).WidthOverride(200.f).HeightOverride(200.f)
 						.Visibility_Lambda([this]()
 						{
-							return View.bInPlane && !View.bFreefall && !View.bParachuting && !View.bEnded
+							return (View.bInPlane || View.bFreefall) && !View.bParachuting && !View.bEnded
 								? EVisibility::Visible : EVisibility::Collapsed;
 						})
 						[
@@ -711,8 +725,20 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 							[
 								SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
 								[
-									SNew(STextBlock).Text(LOCTEXT("BrJump", "JUMP"))
-									.Font(CampusAngular::Display(46)).ColorAndOpacity(FLinearColor::Black)
+									SNew(STextBlock)
+									.Text_Lambda([this]()
+									{
+										return View.bFreefall ? LOCTEXT("BrOpenChute", "OPEN\nCHUTE")
+											: LOCTEXT("BrJump", "JUMP");
+									})
+									.Font_Lambda([this]()
+									{
+										// "OPEN CHUTE" over two lines needs a smaller face to stay inside
+										// the same 200 x 200 touch target.
+										return CampusAngular::Display(View.bFreefall ? 30 : 46);
+									})
+									.Justification(ETextJustify::Center)
+									.ColorAndOpacity(FLinearColor::Black)
 								]
 							]
 						]

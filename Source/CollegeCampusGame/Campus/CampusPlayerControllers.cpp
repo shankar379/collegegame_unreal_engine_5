@@ -691,19 +691,27 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 		return;
 	}
 	const UCampusBRQueue* Queue = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBRQueue>() : nullptr;
+	// AmHost() is already false for a DEDICATED session: nobody opens a listen server there, every
+	// phone - the nominal host included - travels to the address the allocator handed out.
 	const bool bHost = Queue && Queue->AmHost();
 	const FString Level = CampusBR::LevelForMap(Match.Map);
-	const FString Code = Match.Code;
+	// The six-character code is what /v1/br/:handle takes first, and it is what the host's game mode
+	// beats and reports with (ACampusBRGameMode::InitGameState reads "?Code=").
+	const FString Code = Match.Handle();
 	// The SERVER's day_night is what the match runs on, not the chip in the lobby: two phones in the
 	// same match must light the same map.
 	const int32 Night = Match.bNight ? 1 : 0;
+	// THE SESSION OWNS THE SHAPE OF THE MATCH, not the lobby's chips: a DUO session hosted with the
+	// game mode's default would seat four to a squad and put teammates on different teams.
+	const int32 Team = CampusBR::TeamSizeForMode(Match.Mode);
+	const int32 Humans = Match.MaxHumans > 0 ? Match.MaxHumans : 0;
 	TWeakObjectPtr<ACampusLobbyPlayerController> WeakThis(this);
 
 	if (bHost)
 	{
 		// Mirrors HostRoom: with no puid we tell the net driver to use plain IP sockets, so a LAN
 		// match is hosted on 7777 even when EOS is configured but this phone could not log in.
-		auto OpenAsListen = [WeakThis, Level, Code, Night](const FString& EosPuid)
+		auto OpenAsListen = [WeakThis, Level, Code, Night, Team, Humans](const FString& EosPuid)
 		{
 			ACampusLobbyPlayerController* Self = WeakThis.Get();
 			if (!Self)
@@ -711,7 +719,14 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 				return;
 			}
 			const TCHAR* Transport = EosPuid.IsEmpty() ? TEXT("?bUseIPSockets") : TEXT("");
-			const FString Options = FString::Printf(TEXT("listen%s?Mode=BR?Night=%d?Code=%s"), Transport, Night, *Code);
+			FString Options = FString::Printf(TEXT("listen%s?Mode=BR?Night=%d?Code=%s?Team=%d"),
+				Transport, Night, *Code, Team);
+			if (Humans > 0)
+			{
+				// What the SERVER sized this session for; the game mode clamps it to what a phone can
+				// actually carry, so an over-generous number cannot melt the host.
+				Options += FString::Printf(TEXT("?Humans=%d"), Humans);
+			}
 			UGameplayStatics::OpenLevel(Self, FName(*Level), true, Options);
 		};
 		UCampusEOS* Eos = GetEos();
@@ -732,9 +747,12 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 
 	// A joiner. The code rides along as a URL option so the host's game mode can check it with the
 	// API, the same way a Custom Room's ticket does.
+	//
+	// DEDICATED (the AWS path, allocator `dedicated`): open <address>:<port> directly. It is the same
+	// travel a LAN room uses, which is why flipping BS_ALLOCATOR on the backend needs no client change.
 	if (!Match.IsEos())
 	{
-		if (!Match.HasLan())
+		if (!Match.HasAddress())
 		{
 			OnFailed(TEXT("That match has no address this build can reach."));
 			return;
@@ -794,6 +812,17 @@ void ACampusMatchPlayerController::BeginPlay()
 		Social->SetScreenState(ECampusPresence::Match);
 	}
 
+	// A BATTLE SESSION whose host went quiet is settled by the server, and every phone in it is told
+	// (`bs.ended`). Nobody is running the match any more, so staying in it is staring at a frozen map:
+	// the player goes back to the lobby, where the queue's notice names what happened.
+	if (UCampusBRQueue* Queue = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBRQueue>() : nullptr)
+	{
+		SessionEndedHandle = Queue->OnSessionEnded.AddLambda([this](const FString&)
+		{
+			LeaveToLobby();
+		});
+	}
+
 	if (const UCampusSave* Profile = GetProfile())
 	{
 		ServerSetName(Profile->PlayerName);
@@ -841,6 +870,16 @@ void ACampusMatchPlayerController::EndPlay(const EEndPlayReason::Type EndPlayRea
 	Widget.Reset();
 	TouchControls.Reset();
 	BRHud.Reset();
+	// The queue subsystem outlives this level, so the handle comes off here or the next match would
+	// fire into a dead `this`.
+	if (SessionEndedHandle.IsValid())
+	{
+		if (UCampusBRQueue* Queue = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBRQueue>() : nullptr)
+		{
+			Queue->OnSessionEnded.Remove(SessionEndedHandle);
+		}
+		SessionEndedHandle.Reset();
+	}
 	Super::EndPlay(EndPlayReason);
 }
 
