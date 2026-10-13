@@ -35,11 +35,14 @@ struct FCampusBRView
 
 	bool bHasFill = false;
 	int32 Humans = 0;
-	int32 MaxHumans = 0;
 	int32 TotalSlots = 50;
 	/** Still gathering on the waiting platform. The fill banner and the countdown belong to THIS and
 	 *  not to "we have a player count", which is true for the whole match. */
 	bool bWaiting = false;
+	/** The backend has sealed the session: the banner stops asking for players and starts counting. */
+	bool bSealed = false;
+	/** BS-SQUAD-IN-000731 when the host travelled in with one: the one string a player can read out. */
+	FString SessionId;
 
 	/** Seconds until the waiting room ends. */
 	bool bHasCountdown = false;

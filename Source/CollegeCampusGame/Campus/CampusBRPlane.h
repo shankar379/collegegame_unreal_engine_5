@@ -302,13 +302,26 @@ class ACampusBRWaitingArea : public AActor
 public:
 	ACampusBRWaitingArea();
 
-	/** Spawn transform for the Nth player waiting here (a grid on the slab, all facing the campus). */
+	/** The Nth cell of the slab's grid, facing the campus. The scatter inside a cell is derived from
+	 *  Index and never changes, because FreeSlot tests a cell for clearance and then hands out that
+	 *  exact transform - the two have to agree. */
 	FTransform SlotFor(int32 Index) const;
+
+	/** A RANDOM FREE CELL, for a player who has just arrived while the session is still filling. Cells
+	 *  are tried in a random order and one with a pawn already standing inside 1.5 m is skipped, so
+	 *  fifty arrivals spread over the slab instead of stacking on whoever joined first. */
+	FTransform FreeSlot() const;
+
+	/** Cells on the slab. More than fifty, so the last of the fifty still has a choice. */
+	static int32 SlotCount();
 
 	/** The slab's own place: a corner of the map square, high above anything that can be shot. */
 	static FVector Place();
 
 private:
+	/** No pawn standing on the slab within the design's 1.5 m of this spot. */
+	bool IsSpotClear(const FVector& Where) const;
+
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<UStaticMeshComponent> Slab;
 };

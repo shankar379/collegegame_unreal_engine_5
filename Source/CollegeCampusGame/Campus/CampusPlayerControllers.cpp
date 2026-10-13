@@ -705,13 +705,18 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 	// game mode's default would seat four to a squad and put teammates on different teams.
 	const int32 Team = CampusBR::TeamSizeForMode(Match.Mode);
 	const int32 Humans = Match.MaxHumans > 0 ? Match.MaxHumans : 0;
+	// The session id and the fill cap ride in with the host: the id so the game state can replicate it
+	// to the whole platform (the HUD prints it), the cap so the mode's safety net knows when a seal is
+	// late. Neither is gameplay - the BACKEND still decides the seal.
+	const FString SessionId = Match.SessionId;
+	const int32 FillSeconds = Match.FillSeconds;
 	TWeakObjectPtr<ACampusLobbyPlayerController> WeakThis(this);
 
 	if (bHost)
 	{
 		// Mirrors HostRoom: with no puid we tell the net driver to use plain IP sockets, so a LAN
 		// match is hosted on 7777 even when EOS is configured but this phone could not log in.
-		auto OpenAsListen = [WeakThis, Level, Code, Night, Team, Humans](const FString& EosPuid)
+		auto OpenAsListen = [WeakThis, Level, Code, Night, Team, Humans, SessionId, FillSeconds](const FString& EosPuid)
 		{
 			ACampusLobbyPlayerController* Self = WeakThis.Get();
 			if (!Self)
@@ -726,6 +731,14 @@ void ACampusLobbyPlayerController::JoinBRMatch(const FCampusBRMatch& Match, TFun
 				// What the SERVER sized this session for; the game mode clamps it to what a phone can
 				// actually carry, so an over-generous number cannot melt the host.
 				Options += FString::Printf(TEXT("?Humans=%d"), Humans);
+			}
+			if (!SessionId.IsEmpty())
+			{
+				Options += FString::Printf(TEXT("?Session=%s"), *SessionId);
+			}
+			if (FillSeconds > 0)
+			{
+				Options += FString::Printf(TEXT("?Fill=%d"), FillSeconds);
 			}
 			UGameplayStatics::OpenLevel(Self, FName(*Level), true, Options);
 		};

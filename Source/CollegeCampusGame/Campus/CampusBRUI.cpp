@@ -1,10 +1,14 @@
 // BATTLE ROYALE matchmaking overlay (Slate, lobby level). Free Fire's queue screen:
 //
-//        MATCHING...                      the one line that says what is happening
+//        SEARCHING FOR SESSION...         the one line that says what is happening
 //        VARSITY VALLEY  ·  SQUAD  ·  NIGHT
 //           0:14                          counting UP, because nobody can promise a down-count
 //        PLAYERS FOUND  7 / 50            honest: it is what the server has told us
 //        [          CANCEL          ]     one big target, nothing else to mis-tap
+//
+// IT IS BRIEF BY DESIGN. The backend places a team inside one or two seconds - often in the reply to
+// the START itself - and the moment it does, EnterBRMatch travels: the session is still FILLING and the
+// waiting area is where the rest of the fifty turn up. This screen is the SEARCH, not the gather.
 //
 // It is a SCREEN and not a dialog: a queue the player can tap behind is a queue they will leave by
 // accident. START is gone while this is up, and CANCEL is the only way out.
@@ -45,6 +49,12 @@ namespace
 		const int32 Whole = FMath::Max(0, int32(Seconds));
 		return FString::Printf(TEXT("%d:%02d"), Whole / 60, Whole % 60);
 	}
+
+	/** TWO retries, a second and a half apart. The common failure is a listen server whose level has not
+	 *  finished loading yet, which answers on the next try; a host that is genuinely gone never will, and
+	 *  a player must not be left staring at a dead loading screen either way. */
+	constexpr int32 BrTravelRetries = 2;
+	constexpr float BrTravelRetryDelay = 1.5f;
 
 	TSharedRef<SWidget> BrLine(TAttribute<FText> Text, int32 Size, const FLinearColor& Color, bool bBold = true)
 	{
@@ -107,8 +117,14 @@ void SCampusLobbyWidget::StartBattleRoyale()
 	const UCampusSave* Save = Profile();
 	const bool bNight = Save && Save->bBrNight;
 
+	// A fresh search owes nothing to the last one's travel.
+	BRTravelKey.Reset();
+	BRTravelTries = 0;
+	BRRetryIn = 0.f;
+	bBRTravelFailed = false;
 	// Show the overlay FIRST: the request may take a second on a tunnelled API, and a START that
-	// looks dead for a second is a START the player taps twice.
+	// looks dead for a second is a START the player taps twice. The reply often CARRIES the session, in
+	// which case the queue places us and EnterBRMatch travels before this screen is seen at all.
 	Show(EScreen::Matchmaking);
 	Queue->Join(Team, bNight, [this](bool bOk, const FString& Error)
 	{
@@ -124,8 +140,15 @@ void SCampusLobbyWidget::StartBattleRoyale()
 
 void SCampusLobbyWidget::CancelMatchmaking()
 {
+	// Nothing pending may dial a session the player has just walked away from.
+	BRTravelKey.Reset();
+	BRTravelTries = 0;
+	BRRetryIn = 0.f;
+	bBRTravelFailed = false;
 	if (UCampusBRQueue* Queue = BRQueue())
 	{
+		// Takes the team out of the queue, or out of a session that is still FILLING. A sealed session
+		// never reaches here - the button is gone by then.
 		Queue->Leave(nullptr);
 	}
 	Show(EScreen::Lobby);
@@ -137,6 +160,17 @@ void SCampusLobbyWidget::EnterBRMatch(const FCampusBRMatch& Match)
 	{
 		return;
 	}
+	// A NEW session resets the retry budget; a retry of the one we are already on spends from it.
+	if (BRTravelKey != Match.Key())
+	{
+		BRTravelKey = Match.Key();
+		BRTravelTries = 0;
+	}
+	BRRetryIn = 0.f;
+	bBRTravelFailed = false;
+	// TRAVEL NOW, while the session is still FILLING: the waiting area is where the rest of the fifty
+	// arrive, and holding the player in the lobby until it is full is the old model.
+	//
 	// Never teleport out of the lobby with no explanation - that reads as a crash. The same busy
 	// overlay the squad hand-off uses names what is happening and stays up for the travel.
 	Busy(BRQueue() && BRQueue()->AmHost() ? TEXT("Starting the match...") : TEXT("Joining the match..."));
@@ -144,15 +178,34 @@ void SCampusLobbyWidget::EnterBRMatch(const FCampusBRMatch& Match)
 	Controller->JoinBRMatch(Match, [this](const FString& Error)
 	{
 		bBusy = false;
+		UCampusBRQueue* Queue = BRQueue();
 		// The travel failed but the SESSION IS STILL OURS until the server ends it, so let it be
 		// offered again - otherwise the player is stuck in the lobby, unable to queue (the server
 		// answers BR_ALREADY_IN_MATCH) and unable to walk into the session they are a member of.
-		if (UCampusBRQueue* Queue = BRQueue())
+		if (Queue)
 		{
 			Queue->AllowRetry();
 		}
-		Toast(Error.IsEmpty() ? TEXT("Could not join the match.") : Error);
-		Show(EScreen::Lobby);
+		if (Queue && BRTravelTries < BrTravelRetries)
+		{
+			// Tick dials again when this runs out. The host is most likely still loading its level.
+			++BRTravelTries;
+			BRRetryIn = BrTravelRetryDelay;
+			Toast(FString::Printf(TEXT("RECONNECTING TO THE SESSION  %d / %d"), BRTravelTries, BrTravelRetries));
+			Show(EScreen::Matchmaking);
+			return;
+		}
+		// Out of tries: BACK TO SEARCHING, with the cancel in reach again. One forced read, because a
+		// session that is still ours has to be offered again rather than silently dropped.
+		BRTravelKey.Reset();
+		BRTravelTries = 0;
+		bBRTravelFailed = true;
+		Toast(Error.IsEmpty() ? TEXT("Could not reach the session host. Searching again...") : Error);
+		if (Queue)
+		{
+			Queue->ColdCheck(true);
+		}
+		Show(EScreen::Matchmaking);
 	});
 }
 
@@ -202,12 +255,18 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMatchmaking()
 							{
 								return LOCTEXT("BrOff", "MATCHMAKING UNAVAILABLE");
 							}
+							const FText Searching = LOCTEXT("BrSearching", "SEARCHING FOR SESSION...");
+							// A travel that ran out of tries IS searching again, whatever the queue still
+							// calls the session we hold: the line has to say what is actually happening.
+							if (bBRTravelFailed)
+							{
+								return Searching;
+							}
 							switch (Live->GetState())
 							{
-							case ECampusBRState::Matched: return LOCTEXT("BrMatched", "MATCH FOUND");
-							case ECampusBRState::Joining: return LOCTEXT("BrJoining", "JOINING THE QUEUE...");
+							case ECampusBRState::Matched: return LOCTEXT("BrMatched", "SESSION FOUND");
 							case ECampusBRState::Idle:    return LOCTEXT("BrIdle", "NOT IN THE QUEUE");
-							default:                      return LOCTEXT("BrMatching", "MATCHING...");
+							default:                      return Searching;
 							}
 						}), 46, FLinearColor::White)
 					]
@@ -294,11 +353,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMatchmaking()
 								const UCampusBRQueue* Live = BRQueue();
 								const int32 Found = Live ? Live->GetFound() : 0;
 								const int32 Slots = Live ? Live->GetTotalSlots() : 50;
-								// ONCE THE SESSION IS FORMED THE FILL IS A FACT, not a search: the
+								// ONCE THE SESSION IS SEALED THE FILL IS A FACT, not a search: the
 								// server has told us how many humans it packed and how many of the
-								// fifty slots the match will spawn as bots.
+								// fifty slots the match will spawn as bots. While it is still FILLING
+								// the bot number is only a projection, and printing a projection as a
+								// fact is how a player learns not to trust the screen.
 								const int32 Bots = Live ? Live->GetBots() : 0;
-								if (Live && Live->IsMatched() && Bots > 0)
+								if (Live && Live->IsSealed() && Bots > 0)
 								{
 									return FText::Format(LOCTEXT("BrFill", "PLAYERS {0}   ·   BOTS {1}   ·   {2} SLOTS"),
 										FText::AsNumber(Found), FText::AsNumber(Bots), FText::AsNumber(Slots));
@@ -363,11 +424,17 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMatchmaking()
 					SNew(SBox)
 					.Visibility_Lambda([this]()
 					{
-						// Once a session is formed, cancelling is a lie - the travel is already running.
-						// And a MEMBER has nothing to cancel: the ticket is the leader's and the server
+						// CANCEL WORKS RIGHT UP TO THE SEAL: DELETE /br/queue takes the team out of the
+						// queue AND out of a session that is still FILLING (the server closes it and
+						// requeues everyone else). Once it is SEALED the server refuses with 409
+						// BS_SESSION_STARTED, so the button goes - and while a travel is actually running,
+						// cancelling would be a lie.
+						//
+						// A MEMBER has nothing to cancel either: the ticket is the leader's and the server
 						// refuses them by design, so offering the button would be a second lie.
 						const UCampusBRQueue* Live = BRQueue();
-						return Live && (Live->IsMatched() || Live->MustWaitForLeader())
+						const bool bTravelling = bBusy && !bBRTravelFailed;
+						return Live && (Live->IsSealed() || bTravelling || Live->MustWaitForLeader())
 							? EVisibility::Hidden : EVisibility::Visible;
 					})
 					[

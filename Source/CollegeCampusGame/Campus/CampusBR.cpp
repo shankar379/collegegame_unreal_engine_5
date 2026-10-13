@@ -49,20 +49,43 @@ namespace
 	/** The fallback poll interval. Only ever used while the social socket is down - see CampusBR.h. */
 	constexpr float PollSeconds = 5.f;
 
-	/** The host beats every 20 s; six missed beats (120 s) and the server settles the session. */
+	/** The beat, per the backend contract: every 5 s while the session is still FILLING (the server
+	 *  deletes a session nobody has beaten within 10 s as empty), every 20 s once it is sealed. */
+	constexpr float FillingBeatSeconds = 5.f;
 	constexpr float BeatSeconds = 20.f;
+
+	/** How long the beat may run with no game mode to bound it: the travel and the level load. A travel
+	 *  that never lands stops beating instead of holding a session open for a player who is not coming. */
+	constexpr float LobbyGraceSeconds = 120.f;
 
 	/** A cold read of /br/queue/me is cheap but the tunnel is metered: once a minute at most. */
 	constexpr double ColdCheckSeconds = 60.0;
 
+	/** THE ONLY TWO STATES A HOST MAY ANNOUNCE. "COUNTDOWN" is REJECTED with a 400 - the seal is the
+	 *  server's decision, not the host's - and the session is already FILLING when the beat starts, so
+	 *  both of those beat BARE ("I am still here", which is the whole job of most beats). */
+	bool BrAnnounceable(ECampusBRBeat Beat)
+	{
+		return Beat == ECampusBRBeat::InFlight || Beat == ECampusBRBeat::InProgress;
+	}
+
 	const TCHAR* BeatName(ECampusBRBeat Beat)
 	{
-		switch (Beat)
-		{
-		case ECampusBRBeat::InFlight:   return TEXT("IN_FLIGHT");
-		case ECampusBRBeat::InProgress: return TEXT("IN_PROGRESS");
-		default:                        return TEXT("COUNTDOWN");
-		}
+		return Beat == ECampusBRBeat::InProgress ? TEXT("IN_PROGRESS") : TEXT("IN_FLIGHT");
+	}
+
+	/** The session states that mean SEALED on the wire (BATTLE_SESSION_DESIGN §3): the empty slots
+	 *  became bots, or the countdown is running. Read alongside the explicit `sealed` flag. */
+	bool BrIsSealedState(const FString& State)
+	{
+		return State.Equals(TEXT("BACKFILLED"), ESearchCase::IgnoreCase)
+			|| State.Equals(TEXT("COUNTDOWN"), ESearchCase::IgnoreCase);
+	}
+
+	bool BrBool(const TSharedPtr<FJsonObject>& Json, const TCHAR* Field)
+	{
+		bool Out = false;
+		return Json.IsValid() && Json->TryGetBoolField(Field, Out) ? Out : false;
 	}
 }
 
@@ -127,6 +150,16 @@ void UCampusBRQueue::Initialize(FSubsystemCollectionBase& Collection)
 			}
 			TakeMatch(Inner.IsValid() ? Inner : Payload);
 		});
+		// THE SEAL'S FIRST DOOR. The second is the heartbeat response (UCampusBRHostBeat::TakeBeatState);
+		// both end in TakeSeal, which acts on one session exactly once.
+		SealedHandle = Social->OnBRSealed.AddLambda([this](const TSharedPtr<FJsonObject>& Payload)
+		{
+			TakeSeal(Payload);
+		});
+		LeftHandle = Social->OnBRLeft.AddLambda([this](const TSharedPtr<FJsonObject>& Payload)
+		{
+			TakeLeft(Payload);
+		});
 		EndedHandle = Social->OnBRSessionEnded.AddLambda([this](const TSharedPtr<FJsonObject>& Payload)
 		{
 			TakeEnded(Payload);
@@ -144,10 +177,14 @@ void UCampusBRQueue::Deinitialize()
 	if (UCampusSocial* Social = Live())
 	{
 		Social->OnBRPlaced.Remove(PlacedHandle);
+		Social->OnBRSealed.Remove(SealedHandle);
+		Social->OnBRLeft.Remove(LeftHandle);
 		Social->OnBRSessionEnded.Remove(EndedHandle);
 		Social->OnBRResult.Remove(ResultHandle);
 	}
 	PlacedHandle.Reset();
+	SealedHandle.Reset();
+	LeftHandle.Reset();
 	EndedHandle.Reset();
 	ResultHandle.Reset();
 	Super::Deinitialize();
@@ -319,7 +356,11 @@ void UCampusBRQueue::Leave(FDone Done)
 	// Only the leader's ticket exists, and deleting it takes the WHOLE TEAM out of the queue - that is
 	// the server's contract, not an extra call. A member has nothing to delete and is refused with
 	// NOT_PARTY_LEADER, so they only reset locally.
-	const bool bWasQueued = IsQueued() && !MustWaitForLeader();
+	//
+	// IT ALSO CANCELS A SESSION THAT IS STILL FILLING: the backend closes it and requeues everyone else
+	// (they get `bs.ended` with requeued). Once the session is SEALED there is nothing to cancel - the
+	// server answers 409 BS_SESSION_STARTED - so the call is not even made.
+	const bool bWasQueued = (IsQueued() || (IsMatched() && !IsSealed())) && !MustWaitForLeader();
 	// The UI must be free the instant CANCEL is tapped: the local state goes back now and the
 	// DELETE is best-effort. A queue entry the server still holds is dropped by its own TTL.
 	Reset();
@@ -352,6 +393,7 @@ void UCampusBRQueue::Reset()
 	Found = 0;
 	ShownSecond = -1;
 	PlacedKey.Reset();
+	SealedKey.Reset();
 	CountdownReadAt = 0.0;
 	StopTimer();
 }
@@ -416,6 +458,17 @@ void UCampusBRQueue::Refresh(FDone Done)
 		if (bOk)
 		{
 			Self->ReadQueue(Json);
+		}
+		else if (BrErrorCode(Json).Contains(TEXT("NOT_QUEUED")))
+		{
+			// A 404 here is the one failure that IS an answer: there is no ticket for us. It is how a
+			// requeue that did not take is found out, and a timer counting up against nothing is worse
+			// than being sent back to the lobby.
+			Self->LastError = TEXT("Matchmaking stopped. Press START to try again.");
+			Self->EndedNotice = Self->LastError;
+			Self->Reset();
+			Self->OnChanged.Broadcast();
+			Self->OnSessionEnded.Broadcast(Self->LastError);
 		}
 		if (Done)
 		{
@@ -509,6 +562,8 @@ void UCampusBRQueue::TakeMatch(const TSharedPtr<FJsonObject>& Json)
 	Next.Mode = BrStr(Json, TEXT("mode"));
 	Next.Region = BrStr(Json, TEXT("region"));
 	Next.State = BrStr(Json, TEXT("state"));
+	// The server's own flag first; an older body that only carries the state is still right about it.
+	Next.bSealed = BrBool(Json, TEXT("sealed")) || BrIsSealedState(Next.State);
 	Next.HostPlayerId = BrStr(Json, TEXT("host_player_id"));
 	Next.TeamId = BrStr(Json, TEXT("team_id"));
 	Next.Map = BrStr(Json, TEXT("map"));
@@ -522,6 +577,9 @@ void UCampusBRQueue::TakeMatch(const TSharedPtr<FJsonObject>& Json)
 	const int32 ReportedBots = int32(BrNum(Json, TEXT("bots")));
 	Next.Bots = ReportedBots > 0 ? ReportedBots : FMath::Max(0, Next.TotalSlots - Next.Humans);
 	Next.CountdownSeconds = int32(BrNum(Json, TEXT("countdown_s")));
+	// Seconds until the FILL CAP. The host carries it into the level, where it is all the safety net
+	// needs to know when a seal has gone missing.
+	Next.FillSeconds = int32(BrNum(Json, TEXT("fill_s")));
 	FDateTime Starts;
 	if (FDateTime::ParseIso8601(*BrStr(Json, TEXT("starts_at")), Starts))
 	{
@@ -559,8 +617,126 @@ void UCampusBRQueue::TakeMatch(const TSharedPtr<FJsonObject>& Json)
 	if (bNew)
 	{
 		PlacedKey = Next.Key();
+		// THE HOST BEATS FROM THE LOBBY, NOW - not when the level finishes loading. The server deletes a
+		// session nobody has beaten inside ten seconds as empty, and a level load is longer than that.
+		// This is the first moment this phone can know it hosts (the POST reply or `bs.placed`), so it is
+		// where the beat starts.
+		if (AmHost())
+		{
+			if (UCampusBRHostBeat* Beat = GetGameInstance()
+				? GetGameInstance()->GetSubsystem<UCampusBRHostBeat>() : nullptr)
+			{
+				Beat->Begin(Match.Handle());
+			}
+		}
 		OnMatched.Broadcast(Match);
 	}
+}
+
+void UCampusBRQueue::TakeSeal(const TSharedPtr<FJsonObject>& Json)
+{
+	if (!Json.IsValid())
+	{
+		return;
+	}
+	// Bare, or wrapped the way a placement is. One shape, whichever producer sent it.
+	TSharedPtr<FJsonObject> Inner = BrObj(Json, TEXT("battle_session"));
+	if (!Inner.IsValid())
+	{
+		Inner = BrObj(Json, TEXT("match"));
+	}
+	const TSharedPtr<FJsonObject>& Source = Inner.IsValid() ? Inner : Json;
+
+	const FString Sealed = BrStr(Source, TEXT("session_id"));
+	const FString Code = BrStr(Source, TEXT("code"));
+	// ONLY THE SESSION THIS PHONE IS IN. A late seal for a session we already finished must never close
+	// the one we are standing in now (the same rule TakeEnded follows).
+	const bool bOther = (!Sealed.IsEmpty() && !Match.SessionId.IsEmpty() && Sealed != Match.SessionId)
+		|| (!Code.IsEmpty() && !Match.Code.IsEmpty() && Code != Match.Code);
+	if (bOther)
+	{
+		return;
+	}
+	// THE DEDUPE, as for a placement: `bs.sealed` and the heartbeat response carry the same decision.
+	FString Key = Sealed.IsEmpty() ? Code : Sealed;
+	if (Key.IsEmpty())
+	{
+		Key = Match.Key();
+	}
+	if (!Key.IsEmpty() && Key == SealedKey)
+	{
+		return;
+	}
+	SealedKey = Key;
+
+	const int32 Humans = int32(BrNum(Source, TEXT("humans")));
+	int32 Bots = int32(BrNum(Source, TEXT("bots")));
+	const int32 Slots = int32(BrNum(Source, TEXT("total_slots")));
+	// The server owns the subtraction, but one that sends only the two counts is still right about them.
+	if (Bots <= 0 && Slots > 0 && Humans > 0)
+	{
+		Bots = FMath::Max(0, Slots - Humans);
+	}
+	float Countdown = float(BrNum(Source, TEXT("countdown_s")));
+	// `starts_at` is the authority when the countdown field is absent: measured against the server's own
+	// clock when it sent one, so a phone with a wrong wall clock cannot shorten or stretch the drop.
+	if (Countdown <= 0.f)
+	{
+		FDateTime Starts;
+		FDateTime ServerNow;
+		if (FDateTime::ParseIso8601(*BrStr(Source, TEXT("starts_at")), Starts))
+		{
+			if (!FDateTime::ParseIso8601(*BrStr(Source, TEXT("server_time")), ServerNow))
+			{
+				ServerNow = FDateTime::UtcNow();
+			}
+			Countdown = FMath::Max(0.f, float((Starts - ServerNow).GetTotalSeconds()));
+		}
+	}
+
+	// Mirror it into the session we hold, so a player still on the matchmaking screen (the travel is
+	// slower than the socket) sees the real fill and the real countdown rather than the placement's.
+	Match.bSealed = true;
+	Match.State = TEXT("COUNTDOWN");
+	Match.FillSeconds = 0;
+	if (Humans > 0)
+	{
+		Match.Humans = Humans;
+		Found = FMath::Max(Found, Humans);
+	}
+	if (Bots > 0)
+	{
+		Match.Bots = Bots;
+	}
+	if (Countdown > 0.f)
+	{
+		Match.CountdownSeconds = int32(Countdown);
+		CountdownReadAt = FPlatformTime::Seconds();
+	}
+	UE_LOG(LogTemp, Log, TEXT("[CampusBR] session sealed (%s): %d humans, %d bots, %.0f s"),
+		*BrStr(Source, TEXT("reason")), Humans, Bots, Countdown);
+	OnChanged.Broadcast();
+	OnSessionSealed.Broadcast(Humans, Bots, Countdown);
+}
+
+void UCampusBRQueue::TakeLeft(const TSharedPtr<FJsonObject>& Json)
+{
+	const FString Left = BrStr(Json, TEXT("session_id"));
+	const FString Code = BrStr(Json, TEXT("code"));
+	// Only the session we are in, for the same reason as TakeEnded.
+	const bool bMine = Match.IsValid()
+		&& ((!Left.IsEmpty() && Left == Match.SessionId) || (!Code.IsEmpty() && Code == Match.Code));
+	if (!bMine)
+	{
+		return;
+	}
+	// The leader cancelled while the session was still filling. The members are out of a session that no
+	// longer exists, so they go back to the lobby with the reason - not to a platform nobody will seal.
+	LastError = TEXT("The squad leader cancelled the match.");
+	EndedNotice = LastError;
+	Reset();
+	OnChanged.Broadcast();
+	OnSessionEnded.Broadcast(LastError);
 }
 
 void UCampusBRQueue::TakeEnded(const TSharedPtr<FJsonObject>& Json)
@@ -576,6 +752,23 @@ void UCampusBRQueue::TakeEnded(const TSharedPtr<FJsonObject>& Json)
 		return;
 	}
 	const FString Reason = BrStr(Json, TEXT("reason"));
+	// REQUEUED: the server put our ticket straight back in the queue, so this is not the end of
+	// anything the player has to be told about - it is a search that is still running. Throwing them out
+	// to the lobby here would make a recovery look like a failure.
+	if (BrBool(Json, TEXT("requeued")))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[CampusBR] session ended (%s) and the ticket was requeued"), *Reason);
+		Match = FCampusBRMatch();
+		PlacedKey.Reset();
+		SealedKey.Reset();
+		CountdownReadAt = 0.0;
+		Found = 0;
+		State = ECampusBRState::Queued;
+		// The overlay's timer is what tells the player the search is alive; it stopped when we matched.
+		StartTimer();
+		OnChanged.Broadcast();
+		return;
+	}
 	// Two reasons, one sentence: a player does not care whether the host went quiet or the session
 	// went stale, only that nobody is running it any more.
 	LastError = Reason == TEXT("stale")
@@ -682,6 +875,39 @@ UCampusBackend* UCampusBRHostBeat::Api() const
 	return GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBackend>() : nullptr;
 }
 
+void UCampusBRHostBeat::Begin(const FString& InHandle)
+{
+	// THE LOBBY'S CALL, the instant this phone learns it hosts. No owner yet - there is no game mode and
+	// no level - so the beat is bounded by LobbyGraceSeconds until Report claims it.
+	Start(InHandle);
+}
+
+void UCampusBRHostBeat::Start(const FString& InHandle)
+{
+	const UCampusBackend* Backend = Api();
+	// No handle means this is not a battle session (editor play, a custom room), and no credential means
+	// a DEDICATED server is running the match - it carries no player token yet (docs/BATTLE_SESSION.md
+	// §3), so there is nothing to authorise a beat with.
+	if (InHandle.IsEmpty() || !Backend || !Backend->IsSignedIn())
+	{
+		return;
+	}
+	Handle = InHandle;
+	if (TickHandle.IsValid())
+	{
+		return;
+	}
+	// The session is already FILLING on the server, so the first beat is BARE: announcing a state it is
+	// already in is a 409 BS_BAD_STATE.
+	Announced = ECampusBRBeat::Filling;
+	Wanted = ECampusBRBeat::Filling;
+	UnownedFor = 0.f;
+	TickHandle = FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateUObject(this, &UCampusBRHostBeat::Tick), 0.f);
+	// IMMEDIATELY, not in five seconds: the server deletes a session nobody has beaten within ten.
+	Send();
+}
+
 void UCampusBRHostBeat::Report(AActor* InOwner, const FString& InHandle, ECampusBRBeat Beat, FAliveCount InAlive)
 {
 	if (Beat == ECampusBRBeat::Ended)
@@ -690,35 +916,28 @@ void UCampusBRHostBeat::Report(AActor* InOwner, const FString& InHandle, ECampus
 		Stop();
 		return;
 	}
-	const UCampusBackend* Backend = Api();
-	// No handle means this level was not opened from a battle session (editor play, a custom room), and
-	// no credential means a DEDICATED server is running the match - it carries no player token yet
-	// (docs/BATTLE_SESSION.md §3), so there is nothing to authorise a beat with.
-	if (InHandle.IsEmpty() || !Backend || !Backend->IsSignedIn() || !InOwner || InOwner->GetNetMode() == NM_Client)
+	if (!InOwner || InOwner->GetNetMode() == NM_Client)
 	{
 		return;
 	}
+	Start(InHandle);
+	if (!TickHandle.IsValid())
+	{
+		return;
+	}
+	// The game mode claims the beat: from here on ITS life is the beat's life.
 	Owner = InOwner;
-	Handle = InHandle;
+	bOwned = true;
 	if (InAlive)
 	{
 		Alive = MoveTemp(InAlive);
 	}
-	const bool bFirst = !TickHandle.IsValid();
-	if (bFirst)
-	{
-		// The server put the session in COUNTDOWN when it placed the team, so that is where we start
-		// and the first beat is BARE. Announcing a state it is already in is a 409.
-		Announced = ECampusBRBeat::Countdown;
-		Wanted = ECampusBRBeat::Countdown;
-		NextBeatIn = BeatSeconds;
-		TickHandle = FTSTicker::GetCoreTicker().AddTicker(
-			FTickerDelegate::CreateUObject(this, &UCampusBRHostBeat::Tick), 0.f);
-	}
+	const ECampusBRBeat Previous = Wanted;
 	Wanted = Beat;
-	// From the moment the host is placed (the Waiting Area counts) and on every phase change after it:
-	// a transition the players can see must not wait up to twenty seconds to be reported.
-	if (bFirst || Wanted != Announced)
+	// A transition the players can see must not wait for the next scheduled beat - but only the two
+	// states a host may actually announce are worth a request of their own. FILLING -> COUNTDOWN is the
+	// server's own move and is never sent.
+	if (Wanted != Previous && BrAnnounceable(Wanted))
 	{
 		Send();
 	}
@@ -734,7 +953,9 @@ void UCampusBRHostBeat::Stop()
 	Handle.Reset();
 	Owner.Reset();
 	Alive = nullptr;
+	bOwned = false;
 	bSending = false;
+	UnownedFor = 0.f;
 }
 
 void UCampusBRHostBeat::Send()
@@ -752,10 +973,12 @@ void UCampusBRHostBeat::Send()
 		return;
 	}
 	bSending = true;
-	NextBeatIn = BeatSeconds;
+	// Five seconds while the session is filling, twenty once it is sealed and the match is running.
+	NextBeatIn = Wanted == ECampusBRBeat::Filling ? FillingBeatSeconds : BeatSeconds;
 	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
-	// The STATE is sent only when it is a move: "I am still here" is the whole job of the other beats.
-	const bool bMoving = Wanted != Announced;
+	// The STATE is sent only when it is a move AND a move a host is allowed to announce: "I am still
+	// here" is the whole job of every other beat. COUNTDOWN is never sent - it is the server's to make.
+	const bool bMoving = Wanted != Announced && BrAnnounceable(Wanted);
 	if (bMoving)
 	{
 		Body->SetStringField(TEXT("state"), BeatName(Wanted));
@@ -779,6 +1002,9 @@ void UCampusBRHostBeat::Send()
 		if (bOk)
 		{
 			Self->Announced = Sent;
+			// THE SEAL'S SECOND DOOR: the server can answer the beat with the sealed state and the fill
+			// numbers instead of (or as well as) pushing `bs.sealed`.
+			Self->TakeBeatState(Json);
 			return;
 		}
 		const FString Code = BrErrorCode(Json);
@@ -799,11 +1025,41 @@ void UCampusBRHostBeat::Send()
 	});
 }
 
+void UCampusBRHostBeat::TakeBeatState(const TSharedPtr<FJsonObject>& Json)
+{
+	if (!Json.IsValid())
+	{
+		return;
+	}
+	TSharedPtr<FJsonObject> Session = BrObj(Json, TEXT("battle_session"));
+	if (!Session.IsValid())
+	{
+		Session = BrObj(Json, TEXT("match"));
+	}
+	const TSharedPtr<FJsonObject>& Source = Session.IsValid() ? Session : Json;
+	// THE BEAT ITSELF CAN SEAL THE SESSION: the fill cap runs out on the server, and this response is
+	// how a host whose socket is down finds out. `sealed` is the flag; the state is the older way of
+	// saying the same thing. Nothing to disambiguate - a host never announces COUNTDOWN.
+	if (!BrBool(Source, TEXT("sealed")) && !BrIsSealedState(BrStr(Source, TEXT("state"))))
+	{
+		return;
+	}
+	// One owner for the parsing and the dedupe: the queue. This function only decides whether the body
+	// is a seal at all.
+	if (UCampusBRQueue* Queue = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBRQueue>() : nullptr)
+	{
+		Queue->TakeSeal(Source);
+	}
+}
+
 bool UCampusBRHostBeat::Tick(float DeltaTime)
 {
 	// The match is gone (the player quit, the level tore down): a beat for a session nobody is in would
-	// keep it alive in the matchmaker's eyes, which is exactly what the sweep exists to prevent.
-	if (!Owner.IsValid() || Handle.IsEmpty())
+	// keep it alive in the matchmaker's eyes, which is exactly what the sweep exists to prevent. Before
+	// a game mode has claimed the beat there is no actor to watch, so the travel gets a grace period and
+	// no more - a travel that never lands must not hold a session open for a player who is not coming.
+	UnownedFor = bOwned ? 0.f : UnownedFor + DeltaTime;
+	if (Handle.IsEmpty() || (bOwned && !Owner.IsValid()) || UnownedFor > LobbyGraceSeconds)
 	{
 		// Returning false is what removes this ticker, so drop the handle FIRST: Stop() must not try to
 		// remove the delegate it is currently running inside.

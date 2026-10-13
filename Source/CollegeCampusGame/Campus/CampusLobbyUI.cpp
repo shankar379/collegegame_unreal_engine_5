@@ -560,6 +560,22 @@ void SCampusLobbyWidget::Tick(const FGeometry& AllottedGeometry, const double In
 		}
 	}
 
+	// THE BATTLE SESSION TRAVEL RETRY (see EnterBRMatch). A host that was still loading its level when
+	// we dialled it answers on the next try, so the session is dialled again rather than thrown away.
+	if (BRRetryIn > 0.f)
+	{
+		BRRetryIn = FMath::Max(0.f, BRRetryIn - InDeltaTime);
+		if (BRRetryIn <= 0.f)
+		{
+			// The session object has ONE owner. Read it back from the queue instead of holding a copy
+			// that may have been sealed, ended or replaced since the travel failed.
+			if (UCampusBRQueue* Queue = BRQueue(); Queue && Queue->IsMatched())
+			{
+				EnterBRMatch(Queue->GetMatch());
+			}
+		}
+	}
+
 	if (UCampusGameInstance* Instance = Controller.IsValid() ? Controller->GetCampusInstance() : nullptr)
 	{
 		if (!Instance->PendingMessage.IsEmpty() && Current != EScreen::Splash)

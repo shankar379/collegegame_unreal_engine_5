@@ -8,6 +8,10 @@
 //                                                                       battle_session{...}}
 //   POST   /v1/br/:handle/heartbeat                                 -> host only, every 20 s
 //   ws     "bs.placed" / "br.matched"                               -> the session object, pushed
+//   ws     "bs.sealed"                                              -> joins are closed: {humans, bots,
+//                                                                       countdown_s}. The host seals the
+//                                                                       match on it; it also rides back
+//                                                                       on the heartbeat response.
 //   ws     "bs.ended"                                               -> the host went quiet
 //   ws     "br.result"                                              -> my placement and XP
 //
@@ -50,8 +54,11 @@ struct FCampusBRMatch
 	/** "solo" | "duo" | "squad", the server's word on the team size this session was packed for. */
 	FString Mode;
 	FString Region;
-	/** "QUEUED" .. "ENDED" (BATTLE_SESSION_DESIGN §3), upper case on the wire. */
+	/** "FILLING" .. "ENDED" (BATTLE_SESSION_DESIGN §3), upper case on the wire. */
 	FString State;
+	/** The server's own flag: joins are closed, the roster is fixed. While it is false the session is
+	 *  still FILLING, which is the only time DELETE /br/queue can cancel it. */
+	bool bSealed = false;
 	/** "eos" (P2P, works over the internet) or "dedicated" (Address:Port - the AWS path). */
 	FString ConnectType;
 	FString HostPuid;
@@ -69,8 +76,11 @@ struct FCampusBRMatch
 	int32 Bots = 0;
 	int32 MaxHumans = 0;
 	int32 TotalSlots = 50;
-	/** Seconds left on the server's COUNTDOWN when this object was cut. */
+	/** Seconds left on the server's COUNTDOWN when this object was cut. 0 while the session is filling. */
 	int32 CountdownSeconds = 0;
+	/** Seconds until the FILL CAP, after which the server seals with bots. 0 once sealed. The host
+	 *  carries it into the level ("?Fill=") so the game mode's safety net knows when a seal is late. */
+	int32 FillSeconds = 0;
 	/** Server clock; only used for the "STARTING" beat, never for gameplay timing. */
 	FDateTime StartsAt = FDateTime();
 
@@ -103,16 +113,25 @@ struct FCampusBRResult
 /** Where this phone is in the queue. Idle is also where a cancel and a failure land. */
 enum class ECampusBRState : uint8 { Idle, Joining, Queued, Matched, Leaving };
 
-/** The session states a HOST may announce on POST /v1/br/:handle/heartbeat. Waiting and Countdown beat
- *  BARE on purpose: the server is already in COUNTDOWN when it places the team, and announcing
- *  COUNTDOWN again is a 409 BS_BAD_STATE. Ended stops the beat; the result route closes the session. */
-enum class ECampusBRBeat : uint8 { Countdown, InFlight, InProgress, Ended };
+/** The session states a HOST may announce on POST /v1/br/:handle/heartbeat.
+ *
+ *  FILLING is where the beat STARTS, the instant the host opens the level: the session is still taking
+ *  players and the server put it in FILLING when it allocated, so that first beat is BARE - announcing
+ *  a state the session is already in is a 409 BS_BAD_STATE. The move to COUNTDOWN is the SERVER's to
+ *  make (it owns the seal), so the host only announces it once it has actually sealed. Ended stops the
+ *  beat; the result route closes the session. */
+enum class ECampusBRBeat : uint8 { Filling, Countdown, InFlight, InProgress, Ended };
 
 /** A session object arrived (socket or poll). Declared outside the class, like the social delegates,
  *  so UHT never has to parse it. */
 DECLARE_MULTICAST_DELEGATE_OneParam(FCampusBRMatched, const FCampusBRMatch&);
 /** bs.ended: the session was settled with no result. The payload is the sentence to show. */
 DECLARE_MULTICAST_DELEGATE_OneParam(FCampusBREnded, const FString&);
+/** THE SEAL (Humans, Bots, CountdownS). The BACKEND decides it - the session filled, or the fill cap
+ *  ran out and the empty slots became bots - and the HOST acts on it by calling
+ *  ACampusBRGameMode::SealSession. Humans is what the server PLACED and is advisory: the game mode
+ *  counts who is actually standing on the platform. A zero CountdownS means "use your own ten". */
+DECLARE_MULTICAST_DELEGATE_ThreeParams(FCampusBRSealed, int32, int32, float);
 DECLARE_MULTICAST_DELEGATE_OneParam(FCampusBRScored, const FCampusBRResult&);
 
 namespace CampusBR
@@ -156,12 +175,20 @@ public:
 	 *  bForce skips the throttle for the one case that cannot wait: the server has just told us we are
 	 *  in a session (BR_ALREADY_IN_MATCH) and the only way out is to read it and walk in. */
 	void ColdCheck(bool bForce = false);
+	/** THE SEAL, from whichever door it arrived through - the `bs.sealed` socket event or the body of a
+	 *  heartbeat response. Reads {session_id, humans, bots, countdown_s} DEFENSIVELY (bare, or wrapped
+	 *  in `battle_session` / `match`), ignores a seal for a session this phone is not in, and broadcasts
+	 *  OnSessionSealed exactly once per session. Confirming the field names is all the wiring left. */
+	void TakeSeal(const TSharedPtr<FJsonObject>& Json);
 	/** The travel failed, so the session we already hold must be allowed to fire OnMatched again.
 	 *  Without this a player whose EOS login dropped on the way in is stuck in the lobby, queued out
 	 *  of a session they are still a member of. */
 	void AllowRetry();
 
 	ECampusBRState GetState() const { return State; }
+	/** The session we hold has been SEALED: joins are closed, cancelling is refused (409
+	 *  BS_SESSION_STARTED) and the countdown is the server's promise. */
+	bool IsSealed() const { return Match.bSealed; }
 	bool IsBusy() const { return State == ECampusBRState::Joining || State == ECampusBRState::Leaving; }
 	bool IsQueued() const { return State == ECampusBRState::Queued || State == ECampusBRState::Joining; }
 	bool IsMatched() const { return State == ECampusBRState::Matched; }
@@ -200,6 +227,9 @@ public:
 	FCampusBRMatched OnMatched;
 	/** bs.ended: the host went quiet and the server settled the session. */
 	FCampusBREnded OnSessionEnded;
+	/** The backend sealed the session. ONLY THE HOST acts on it (ACampusBRGameMode binds this in
+	 *  InitGameState and calls SealSession); on every other phone it is just news. */
+	FCampusBRSealed OnSessionSealed;
 	/** br.result: the host reported and this is my line of it. */
 	FCampusBRScored OnScored;
 
@@ -212,7 +242,10 @@ private:
 	void ReadQueue(const TSharedPtr<FJsonObject>& Json);
 	/** Reads one session object and, if its session id is new, fires OnMatched exactly once. */
 	void TakeMatch(const TSharedPtr<FJsonObject>& Json);
-	/** bs.ended. */
+	/** bs.left: the LEADER cancelled a session that was still filling, so the members go back. */
+	void TakeLeft(const TSharedPtr<FJsonObject>& Json);
+	/** bs.ended. `requeued` keeps the player on the SEARCHING screen - their ticket is back in the
+	 *  queue, and throwing them out to the lobby would make a recovery look like a failure. */
 	void TakeEnded(const TSharedPtr<FJsonObject>& Json);
 	/** br.result. */
 	void TakeResult(const TSharedPtr<FJsonObject>& Json);
@@ -237,6 +270,9 @@ private:
 	/** Session id (or code) already handed to the lobby. THE dedupe: the server emits `bs.placed` AND
 	 *  `br.matched` with the same payload, and travelling twice tears the level down mid-load. */
 	FString PlacedKey;
+	/** Session already SEALED, for the same reason as PlacedKey: the seal arrives on the socket AND on
+	 *  the heartbeat response, and one session is sealed once. */
+	FString SealedKey;
 	/** FPlatformTime::Seconds() of the last ColdCheck, so a reconnect storm cannot spend the quota. */
 	double LastColdCheckAt = 0.0;
 	/** Engine time the countdown was read at, so GetCountdown can tick between reads. */
@@ -245,20 +281,27 @@ private:
 	/** Set by bs.ended, cleared by the first lobby that reads it. */
 	FString EndedNotice;
 	FDelegateHandle PlacedHandle;
+	FDelegateHandle SealedHandle;
+	FDelegateHandle LeftHandle;
 	FDelegateHandle EndedHandle;
 	FDelegateHandle ResultHandle;
 	FTSTicker::FDelegateHandle TickHandle;
 };
 
 /**
- * THE HOST'S 20-SECOND BEAT (POST /v1/br/:handle/heartbeat). Six missed beats and the server settles
- * the session and sends every player `bs.ended`, so a host whose phone died on the loading screen
- * frees its lobby in two minutes instead of forty-five.
+ * THE HOST'S BEAT (POST /v1/br/:handle/heartbeat). Every 5 s while the session is FILLING, every 20 s
+ * once it is sealed. Miss enough of them and the server settles the session and sends every player
+ * `bs.ended`, so a host whose phone died on the loading screen frees its lobby in minutes.
  *
- * It lives in the game instance and not in the game mode because the beat has to outlive a seamless
- * travel, and it is driven by ONE call from ACampusBRGameMode::EnterPhase: the match phase IS the
- * session state. Owner bounds its life - when the game mode goes (the player quit, the level tore
- * down) the next tick stops the beat rather than beating for a match nobody is in.
+ * IT STARTS IN THE LOBBY, NOT IN THE MATCH. The server deletes a session nobody has beaten within TEN
+ * SECONDS as empty - and ten seconds is less than a level load - so UCampusBRQueue calls Begin() the
+ * instant it reads a placement naming this phone as host, long before there is a game mode. The game
+ * mode then calls Report() to take ownership and announce the phases it is allowed to announce.
+ *
+ * It lives in the game instance and not in the game mode because the beat has to outlive the travel.
+ * Owner bounds its life ONCE A GAME MODE HAS CLAIMED IT - when the mode goes (the player quit, the
+ * level tore down) the next tick stops the beat rather than beating for a match nobody is in. Before
+ * that it is bounded by LobbyGraceSeconds: a travel that never lands must not beat forever.
  */
 UCLASS()
 class UCampusBRHostBeat : public UGameInstanceSubsystem
@@ -271,24 +314,42 @@ public:
 
 	virtual void Deinitialize() override;
 
-	/** Starts the beat on the first call and announces every state change after it; Ended stops it.
-	 *  No-op with no handle, with nobody signed in (a dedicated server carries no player credential
-	 *  yet - see docs/BATTLE_SESSION.md §3) or off the authority. */
+	/** THE LOBBY'S CALL, made the moment this phone learns it is the host (UCampusBRQueue::TakeMatch).
+	 *  Beats FILLING immediately - inside the server's ten-second empty-session window - and keeps
+	 *  beating through the travel and the level load. No-op when already running. */
+	void Begin(const FString& InHandle);
+
+	/** THE GAME MODE'S CALL: claims the beat (InOwner bounds its life from here on) and announces the
+	 *  states a host is allowed to announce. Ended stops it. No-op with no handle, with nobody signed in
+	 *  (a dedicated server carries no player credential yet - see docs/BATTLE_SESSION.md §3) or off the
+	 *  authority. */
 	void Report(AActor* InOwner, const FString& InHandle, ECampusBRBeat Beat, FAliveCount InAlive);
 	void Stop();
 
 private:
 	UCampusBackend* Api() const;
+	/** Arms the ticker and sends the first beat. Shared by Begin and Report. */
+	void Start(const FString& InHandle);
 	void Send();
+	/** THE SECOND DOOR FOR THE SEAL: the beat itself can seal the session, so its response carries
+	 *  {sealed, humans, bots, countdown_s, starts_at}. There is nothing to disambiguate - a host NEVER
+	 *  announces COUNTDOWN (the server answers 400; the seal is the server's alone) - so any sealed body
+	 *  is news. Handed to UCampusBRQueue::TakeSeal, which owns the parsing and the dedupe. */
+	void TakeBeatState(const TSharedPtr<FJsonObject>& Json);
 	bool Tick(float DeltaTime);
 
 	TWeakObjectPtr<AActor> Owner;
 	FString Handle;
 	FAliveCount Alive;
 	/** The last state the SERVER accepted, and the one we want it in. Equal = beat bare. */
-	ECampusBRBeat Announced = ECampusBRBeat::Countdown;
-	ECampusBRBeat Wanted = ECampusBRBeat::Countdown;
+	ECampusBRBeat Announced = ECampusBRBeat::Filling;
+	ECampusBRBeat Wanted = ECampusBRBeat::Filling;
+	/** A game mode has claimed the beat, so Owner is now what bounds its life. False while it is still
+	 *  the lobby's beat, where there is no actor to watch. */
+	bool bOwned = false;
 	bool bSending = false;
 	float NextBeatIn = 0.f;
+	/** How long the beat has run without an owner. The travel has to land inside this. */
+	float UnownedFor = 0.f;
 	FTSTicker::FDelegateHandle TickHandle;
 };

@@ -441,6 +441,11 @@ public:
 	/** bs.placed (and its legacy twin br.matched, same payload): this team was placed in a battle
 	 *  session. UCampusBRQueue reads the object and dedupes the two names on the session id. */
 	FCampusSocialJson OnBRPlaced;
+	/** bs.sealed: joins are closed - the session filled, or the fill cap ran out and the empty slots
+	 *  became bots. UCampusBRQueue reads {humans, bots, countdown_s}; the HOST acts on it. */
+	FCampusSocialJson OnBRSealed;
+	/** bs.left: the LEADER cancelled a session that was still filling, so its members are out of it. */
+	FCampusSocialJson OnBRLeft;
 	/** bs.ended: the session was settled with no result - the host went quiet, or it went stale. */
 	FCampusSocialJson OnBRSessionEnded;
 	/** br.result: this player's placement and XP, after the host reported. */

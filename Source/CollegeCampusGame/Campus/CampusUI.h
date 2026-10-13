@@ -352,7 +352,9 @@ private:
 	void CancelMatchmaking();
 	/** MATCHING... / timer / players found / big CANCEL, Free Fire's queue screen. */
 	TSharedRef<SWidget> BuildMatchmaking();
-	/** bs.placed (or the fallback poll): host the map, or travel to the session's server. */
+	/** bs.placed (or the POST reply, or the fallback poll): host the map, or travel to the session's
+	 *  server. Travels IMMEDIATELY - the session is still FILLING and the waiting area is where the rest
+	 *  of it arrives. A failed travel is retried twice before the player goes back to searching. */
 	void EnterBRMatch(const struct FCampusBRMatch& Match);
 	class UCampusBRQueue* BRQueue() const;
 	TSharedRef<SWidget> BuildStore();
@@ -583,6 +585,15 @@ private:
 	FDelegateHandle BRMatchedHandle;
 	FDelegateHandle BREndedHandle;
 	FDelegateHandle BRScoredHandle;
+	/** The battle session the travel is working on, and how many tries it has spent on it. Only the KEY
+	 *  is kept: the session object itself has one owner, UCampusBRQueue, and a retry reads it from
+	 *  there rather than holding a copy that can go stale. */
+	FString BRTravelKey;
+	int32 BRTravelTries = 0;
+	/** Seconds until the next travel retry; 0 = nothing pending (see Tick). */
+	float BRRetryIn = 0.f;
+	/** The travel ran out of tries, so the overlay is SEARCHING again and the cancel is back in reach. */
+	bool bBRTravelFailed = false;
 
 	// form fields
 	FString EmailText;

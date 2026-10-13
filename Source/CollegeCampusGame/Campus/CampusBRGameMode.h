@@ -96,6 +96,12 @@ public:
 	/** How many humans this host will take before it starts filling with bots. */
 	UPROPERTY(Replicated)
 	int32 HumanCap = 8;
+
+	/** BS-SQUAD-IN-000731: the battle session this level is running, from the host's "?Session=" travel
+	 *  option. Empty in editor play and in a custom room. The HUD prints it so a player can read it out;
+	 *  no gameplay keys off it. */
+	UPROPERTY(Replicated)
+	FString SessionId;
 };
 
 /** One of the fifty. Humans and physical bots carry a controller; virtual ones are only this row. */
@@ -141,10 +147,29 @@ public:
 	ACampusBRGameMode();
 
 	virtual void InitGameState() override;
+	virtual void PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId,
+		FString& ErrorMessage) override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void Logout(AController* Exiting) override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual void Tick(float DeltaSeconds) override;
+	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
+
+	/** THE ONE SEAM THE BACKEND PULLS (Docs/BATTLE_SESSION_DESIGN.md §4). It closes joins, fills the
+	 *  remaining slots with bots exactly as the old local timeout did, and starts the countdown to the
+	 *  plane. Bound to UCampusBRQueue::OnSessionSealed on the host, so wiring the real event is a few
+	 *  lines in the subsystem and nothing here.
+	 *
+	 *  IDEMPOTENT: the seal arrives twice by design (the socket's `bs.sealed` AND the heartbeat
+	 *  response), and the second one is a confirmation, not a second match.
+	 *
+	 *  Humans is what the server PLACED and is advisory - THE SEAL COUNTS WHO IS PRESENT, so a placed
+	 *  player whose travel failed costs nobody their match; Bots fills the rest of the fifty. A
+	 *  CountdownSeconds of zero or less keeps this mode's own ten. */
+	void SealSession(int32 Humans, int32 Bots, float InCountdownSeconds);
+
+	/** Joins are closed and the roster is fixed. */
+	bool IsSealed() const { return bSealed; }
 
 	/** The travel options that pick this mode, for a lobby that has a BR button.
 	 *  Returns "" for every other map choice, so the call is safe to make unconditionally. */
@@ -176,9 +201,15 @@ public:
 	UPROPERTY(EditAnywhere, Category="BR")
 	int32 MaxPhysicalBots = 10;
 
-	/** Hard cap on the gather: a queue that feels like a match, not a lobby. */
+	/** The BACKEND's fill cap, mirrored here only so the safety net below knows when the seal is late.
+	 *  This mode does NOT start a countdown on it: the server decides the seal (design §4). */
 	UPROPERTY(EditAnywhere, Category="BR")
 	float WaitingSeconds = 25.f;
+
+	/** How long past the fill cap the mode waits for a seal before sealing itself. THE SAFETY NET: a
+	 *  lost `bs.sealed` and a heartbeat that 500s must not leave a player standing on a slab forever. */
+	UPROPERTY(EditAnywhere, Category="BR")
+	float SealGraceSeconds = 15.f;
 
 	UPROPERTY(EditAnywhere, Category="BR")
 	float CountdownSeconds = 10.f;
@@ -187,6 +218,10 @@ private:
 	ACampusBRGameState* GetBRState() const;
 
 	void EnterPhase(ECampusBRPhase NewPhase);
+	/** Humans actually connected right now - not the ones the matchmaker placed. */
+	int32 HumansPresent() const;
+	/** The safety net fired: no seal arrived in time, so this host seals its own session. */
+	void SealLocally();
 	void FillWithBots();
 	void StartFlight();
 	void BeginPlaying();
@@ -239,5 +274,12 @@ private:
 	float MatchStartTime = 0.f;
 	float NextVirtualTime = 0.f;
 	int32 NextPlacement = 0;
+	/** Set by SealSession: joins are refused and the countdown owns the clock. */
+	bool bSealed = false;
 	FTimerHandle PhaseTimer;
+	/** Kept apart from PhaseTimer on purpose - EnterPhase clears that one, and the safety net has to
+	 *  survive every phase change until a seal actually lands. */
+	FTimerHandle SealSafetyTimer;
+	/** UCampusBRQueue::OnSessionSealed, taken off in EndPlay: the subsystem outlives this level. */
+	FDelegateHandle SealedHandle;
 };

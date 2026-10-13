@@ -9,6 +9,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Materials/MaterialInterface.h"
@@ -57,6 +58,22 @@ namespace CampusBRDive
 
 	TArray<TWeakObjectPtr<ACampusBRPlane>> LivePlanes;
 	TArray<TWeakObjectPtr<ACampusBRDrop>> LiveDrops;
+}
+
+namespace CampusBRWait
+{
+	/** The slab's grid: eight across, seven deep, 4 m apart. 56 cells for the fifty, so the last to
+	 *  arrive still has somewhere of their own to stand. */
+	constexpr int32 Columns = 8;
+	constexpr int32 Rows = 7;
+	constexpr float Spacing = 400.f;
+	/** Scatter inside a cell. Deliberately under (Spacing - MinSeparation) / 2, so two players in
+	 *  NEIGHBOURING cells can never be pushed closer than the 1.5 m rule allows. */
+	constexpr float Jitter = 110.f;
+	/** Nobody spawns within 1.5 m of another pawn (Docs/BATTLE_SESSION_DESIGN.md §4). */
+	constexpr float MinSeparation = 150.f;
+	/** Height band that counts as "on the slab": the match floor is 40 m below it. */
+	constexpr float SameFloor = 400.f;
 }
 
 /** The art of the plane and the canopy: engine primitives and material instances the campus already
@@ -926,19 +943,71 @@ FVector ACampusBRWaitingArea::Place()
 	return FVector(Middle.X - Half * 0.82f, Middle.Y - Half * 0.82f, 4000.f);
 }
 
+int32 ACampusBRWaitingArea::SlotCount()
+{
+	return CampusBRWait::Columns * CampusBRWait::Rows;
+}
+
 FTransform ACampusBRWaitingArea::SlotFor(int32 Index) const
 {
-	// 50 slots on the slab: eight across, 4 m apart, all looking toward the campus.
-	constexpr int32 PerRow = 8;
-	constexpr float Spacing = 400.f;
-	const int32 Column = Index % PerRow;
-	const int32 Row = Index / PerRow;
+	const int32 Cell = FMath::Abs(Index) % SlotCount();
+	const int32 Column = Cell % CampusBRWait::Columns;
+	const int32 Row = Cell / CampusBRWait::Columns;
+	// Scatter inside the cell, seeded from the cell: fifty players standing on an exact 4 m lattice read
+	// as a parade square, and a cell that moved between the clearance test and the spawn would let two
+	// arrivals land on the same square metre.
+	const FRandomStream Scatter(Cell * 7919 + 13);
 	const FVector Base = GetActorLocation();
 	const FVector Where(
-		Base.X + (Column - (PerRow - 1) * 0.5f) * Spacing,
-		Base.Y + (Row - 3.f) * Spacing,
+		Base.X + (Column - (CampusBRWait::Columns - 1) * 0.5f) * CampusBRWait::Spacing
+			+ Scatter.FRandRange(-CampusBRWait::Jitter, CampusBRWait::Jitter),
+		Base.Y + (Row - (CampusBRWait::Rows - 1) * 0.5f) * CampusBRWait::Spacing
+			+ Scatter.FRandRange(-CampusBRWait::Jitter, CampusBRWait::Jitter),
 		Base.Z + 120.f);
 	const FVector2D Middle = CampusBRMap::Center();
 	const FRotator Facing = FRotationMatrix::MakeFromX(FVector(Middle.X, Middle.Y, Base.Z) - Where).Rotator();
 	return FTransform(FRotator(0.f, Facing.Yaw, 0.f), Where);
+}
+
+bool ACampusBRWaitingArea::IsSpotClear(const FVector& Where) const
+{
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return true;
+	}
+	for (TActorIterator<APawn> It(World); It; ++It)
+	{
+		const APawn* Pawn = *It;
+		if (!Pawn || Pawn->IsPendingKillPending())
+		{
+			continue;
+		}
+		const FVector At = Pawn->GetActorLocation();
+		// FLAT distance, and only against pawns on this floor: the whole campus is 40 m below, and a
+		// player standing under the slab is not in the way of one spawning on top of it.
+		if (FMath::Abs(At.Z - Where.Z) < CampusBRWait::SameFloor
+			&& FVector::DistSquared2D(At, Where) < FMath::Square(CampusBRWait::MinSeparation))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+FTransform ACampusBRWaitingArea::FreeSlot() const
+{
+	const int32 Cells = SlotCount();
+	const int32 First = FMath::RandHelper(Cells);
+	for (int32 Step = 0; Step < Cells; ++Step)
+	{
+		const FTransform Candidate = SlotFor((First + Step) % Cells);
+		if (IsSpotClear(Candidate.GetLocation()))
+		{
+			return Candidate;
+		}
+	}
+	// Every cell taken (more pawns on the slab than cells, which fifty cannot reach): the random cell is
+	// still a floor to stand on, and the spawn's collision handling nudges the pawn clear of the rest.
+	return SlotFor(First);
 }

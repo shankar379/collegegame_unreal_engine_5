@@ -42,6 +42,14 @@ namespace CampusBRRoster
 	};
 
 	TWeakObjectPtr<UObject> BotFactory;
+
+	/** ONE sentence for both doors - PreLogin's refusal and the kick - so a late joiner cannot be told
+	 *  two different stories about the same closed session. */
+	FText SealRefusal()
+	{
+		return NSLOCTEXT("CampusBR", "BrSessionSealed",
+			"That battle session has already started. Press START for the next one.");
+	}
 }
 
 void ACampusBRGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -56,6 +64,7 @@ void ACampusBRGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
 	DOREPLIFETIME(ACampusBRGameState, HumansJoined);
 	DOREPLIFETIME(ACampusBRGameState, Zone);
 	DOREPLIFETIME(ACampusBRGameState, HumanCap);
+	DOREPLIFETIME(ACampusBRGameState, SessionId);
 }
 
 ACampusBRGameMode::ACampusBRGameMode()
@@ -109,10 +118,19 @@ void ACampusBRGameMode::InitGameState()
 	}
 	State->RoomCode = Code;
 	State->MatchMap = FName(TEXT("RealMap"));
+	// BS-SQUAD-IN-000731, carried in by the host's travel URL. The HUD prints it; nothing keys off it.
+	State->SessionId = UGameplayStatics::ParseOption(OptionsString, TEXT("Session"));
 
 	const int32 TeamOption = UGameplayStatics::GetIntOption(OptionsString, TEXT("Team"), 4);
 	SquadSize = TeamOption == 1 || TeamOption == 2 ? TeamOption : 4;
 	MaxHumans = FMath::Clamp(UGameplayStatics::GetIntOption(OptionsString, TEXT("Humans"), MaxHumans), 1, 16);
+	// The SERVER's fill cap ("?Fill=", from the session's fill_s), which is all the safety net needs.
+	// Only as a deadline to measure the missing seal against - this mode never counts down on it.
+	const int32 FillOption = UGameplayStatics::GetIntOption(OptionsString, TEXT("Fill"), 0);
+	if (FillOption > 0)
+	{
+		WaitingSeconds = float(FMath::Clamp(FillOption, 5, 120));
+	}
 	State->TeamSize = SquadSize;
 	State->HumanCap = MaxHumans;
 	State->MaxPlayers = MaxHumans;
@@ -129,6 +147,46 @@ void ACampusBRGameMode::InitGameState()
 	State->Zone = ZoneActor;
 	State->Phase = ECampusPhase::Waiting;
 	EnterPhase(ECampusBRPhase::Waiting);
+
+	// THE BACKEND OWNS THE SEAL (Docs/BATTLE_SESSION_DESIGN.md §4). The queue subsystem hands it over
+	// whichever door it came through - `bs.sealed` or the heartbeat response - and this one binding is
+	// the whole wire between the two. A client binds it too and simply never gets one for a session it
+	// does not host, so there is no authority test to get wrong here.
+	if (UCampusBRQueue* Queue = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBRQueue>() : nullptr)
+	{
+		SealedHandle = Queue->OnSessionSealed.AddLambda([this](int32 Humans, int32 Bots, float Countdown)
+		{
+			SealSession(Humans, Bots, Countdown);
+		});
+		// The seal can be OLDER THAN THIS LEVEL: a host that was slow to load, or a player rejoining a
+		// session that has already been backfilled. Act on what we already hold rather than waiting for
+		// an event that has been and gone.
+		if (Queue->IsSealed())
+		{
+			const FCampusBRMatch& Session = Queue->GetMatch();
+			SealSession(Session.Humans, Session.Bots, float(Session.CountdownSeconds));
+		}
+	}
+	// THE SAFETY NET. A seal that never arrives (the socket dropped, the beat 500ed) must not leave a
+	// player standing on a slab forever, so the mode seals itself a grace period past the fill cap.
+	if (!bSealed)
+	{
+		GetWorldTimerManager().SetTimer(SealSafetyTimer, FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			SealLocally();
+		}), FMath::Max(1.f, WaitingSeconds + SealGraceSeconds), false);
+	}
+}
+
+void ACampusBRGameMode::EndPlay(const EEndPlayReason::Type Reason)
+{
+	// The queue subsystem outlives this level, so its delegate must not outlive this mode.
+	if (UCampusBRQueue* Queue = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBRQueue>() : nullptr)
+	{
+		Queue->OnSessionSealed.Remove(SealedHandle);
+	}
+	SealedHandle.Reset();
+	Super::EndPlay(Reason);
 }
 
 void ACampusBRGameMode::EnterPhase(ECampusBRPhase NewPhase)
@@ -145,11 +203,11 @@ void ACampusBRGameMode::EnterPhase(ECampusBRPhase NewPhase)
 	switch (NewPhase)
 	{
 	case ECampusBRPhase::Waiting:
-		State->BRPhaseEndTime = Now + WaitingSeconds;
-		GetWorldTimerManager().SetTimer(PhaseTimer, FTimerDelegate::CreateWeakLambda(this, [this]()
-		{
-			EnterPhase(ECampusBRPhase::Countdown);
-		}), WaitingSeconds, false);
+		// NO CLOCK OF ITS OWN. The waiting area fills while the BACKEND decides the seal (full, or the
+		// fill cap running out), and the only timer on this phase is the safety net armed in
+		// InitGameState. The stamp IS that deadline, so the HUD is never shown a promise the mode is not
+		// the one making.
+		State->BRPhaseEndTime = Now + WaitingSeconds + SealGraceSeconds;
 		break;
 
 	case ECampusBRPhase::Countdown:
@@ -173,20 +231,22 @@ void ACampusBRGameMode::EnterPhase(ECampusBRPhase NewPhase)
 		break;
 	}
 
-	// THE HOST'S 20-SECOND BEAT (backend docs/BATTLE_SESSION.md §4), and the whole hook for it: the
-	// match phase IS the battle session's state, so there is one seam and no second state machine.
-	// It starts in Waiting (the Waiting Area counts: the server is already in COUNTDOWN) and stops at
-	// Ended, where the result route closes the session instead. No-op off a session-hosted level.
+	// THE HOST'S BEAT (backend docs/BATTLE_SESSION.md §4), and the whole hook for it: the match phase IS
+	// the battle session's state, so there is one seam and no second state machine. The beat was already
+	// started by the LOBBY (the server deletes an unbeaten session at ten seconds, long before a level
+	// loads); this claims it, so from here the beat lives and dies with the match. Stops at Ended, where
+	// the result route closes the session instead. No-op off a session-hosted level.
 	if (UCampusBRHostBeat* Beat = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCampusBRHostBeat>() : nullptr)
 	{
 		static const auto BeatFor = [](ECampusBRPhase Phase)
 		{
 			switch (Phase)
 			{
-			case ECampusBRPhase::Flight:  return ECampusBRBeat::InFlight;
-			case ECampusBRPhase::Playing: return ECampusBRBeat::InProgress;
-			case ECampusBRPhase::Ended:   return ECampusBRBeat::Ended;
-			default:                      return ECampusBRBeat::Countdown;
+			case ECampusBRPhase::Waiting:   return ECampusBRBeat::Filling;
+			case ECampusBRPhase::Flight:    return ECampusBRBeat::InFlight;
+			case ECampusBRPhase::Playing:   return ECampusBRBeat::InProgress;
+			case ECampusBRPhase::Ended:     return ECampusBRBeat::Ended;
+			default:                        return ECampusBRBeat::Countdown;
 			}
 		};
 		TWeakObjectPtr<ACampusBRGameMode> WeakThis(this);
@@ -201,9 +261,34 @@ void ACampusBRGameMode::EnterPhase(ECampusBRPhase NewPhase)
 // ---------------------------------------------------------------------------------------------
 // Joining
 
+void ACampusBRGameMode::PreLogin(const FString& Options, const FString& Address, const FUniqueNetIdRepl& UniqueId,
+	FString& ErrorMessage)
+{
+	Super::PreLogin(Options, Address, UniqueId, ErrorMessage);
+	// SEALED MEANS SEALED. The roster is fixed, the bots are in it and the plane is on its way, so a
+	// late dial is refused HERE - before a connection, a slot or a pawn exists - with a sentence the
+	// joiner can read instead of a loading screen that never ends.
+	if (bSealed && ErrorMessage.IsEmpty())
+	{
+		ErrorMessage = CampusBRRoster::SealRefusal().ToString();
+	}
+}
+
 void ACampusBRGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	ACampusBRGameState* State = GetBRState();
+	// The second door, for a connection that was already past PreLogin when the seal landed. The player
+	// is told why rather than being dropped into a match that has left the platform - which to them
+	// looks like the game losing them.
+	if (bSealed && !NewPlayer->IsLocalPlayerController())
+	{
+		Super::PostLogin(NewPlayer);
+		if (GameSession)
+		{
+			GameSession->KickPlayer(NewPlayer, CampusBRRoster::SealRefusal());
+		}
+		return;
+	}
 	if (ACampusPlayerState* PlayerState = NewPlayer->GetPlayerState<ACampusPlayerState>())
 	{
 		// Every BR player is nominally "Red": friendly fire is decided by SQUAD here, not by the two
@@ -223,19 +308,73 @@ void ACampusBRGameMode::PostLogin(APlayerController* NewPlayer)
 
 	if (State)
 	{
-		int32 Humans = 0;
-		for (const FCampusBRCombatant& Each : Combatants)
-		{
-			Humans += Each.bHuman ? 1 : 0;
-		}
+		const int32 Humans = HumansPresent();
 		State->HumansJoined = Humans;
-		// Full house: stop waiting for people who are not coming.
-		if (Humans >= MaxHumans && State->BRPhase == ECampusBRPhase::Waiting)
+		// A FULL HOUSE IS NOT A CLOCK RUNNING OUT, it is a fact: nobody else CAN join a host that is at
+		// its connection cap, so there is nothing left to wait for. It goes through the same door the
+		// backend uses, and SealSession is idempotent if the server's own seal is already on its way.
+		if (Humans >= MaxHumans)
 		{
-			EnterPhase(ECampusBRPhase::Countdown);
+			SealSession(Humans, 0, CountdownSeconds);
 		}
 	}
 	RefreshCounts();
+}
+
+int32 ACampusBRGameMode::HumansPresent() const
+{
+	int32 Count = 0;
+	for (const FCampusBRCombatant& Each : Combatants)
+	{
+		Count += Each.bHuman && Each.Controller.IsValid() ? 1 : 0;
+	}
+	return Count;
+}
+
+void ACampusBRGameMode::SealSession(int32 Humans, int32 Bots, float InCountdownSeconds)
+{
+	const ACampusBRGameState* State = GetBRState();
+	// The seal arrives twice by design (the socket AND the heartbeat response, and the lobby may have
+	// held one from before this level): the second one is a confirmation, not a second match.
+	if (!State || bSealed || State->BRPhase != ECampusBRPhase::Waiting)
+	{
+		return;
+	}
+	bSealed = true;
+	GetWorldTimerManager().ClearTimer(SealSafetyTimer);
+
+	// THE ROSTER IS WHO IS PRESENT PLUS BOTS. The server's human count is what it PLACED; a placed
+	// player who never arrived must not hold a slot that nothing will ever fill, and the bots the
+	// server asked for fill the rest of the fifty.
+	const int32 Present = HumansPresent();
+	const int32 Ceiling = FMath::Max(MaxCombatants, Present);
+	MaxCombatants = Bots > 0 ? FMath::Clamp(Present + Bots, Present, Ceiling) : Ceiling;
+	if (InCountdownSeconds > 0.f)
+	{
+		CountdownSeconds = FMath::Clamp(InCountdownSeconds, 1.f, 60.f);
+	}
+	// Close the door at the engine's own level too, so a late dial is refused by the session rather
+	// than queued behind a match that has already started.
+	if (GameSession)
+	{
+		GameSession->MaxPlayers = FMath::Max(1, Present);
+	}
+	UE_LOG(LogTemp, Log, TEXT("[CampusBR] sealed: %d present (%d placed), %d bots, %.0f s countdown"),
+		Present, Humans, MaxCombatants - Present, CountdownSeconds);
+	EnterPhase(ECampusBRPhase::Countdown);
+}
+
+void ACampusBRGameMode::SealLocally()
+{
+	if (bSealed)
+	{
+		return;
+	}
+	// The one case this exists for: a seal that was sent and never arrived. Sealing with what is here
+	// beats stranding a player on a platform, so the solo tester always reaches the plane.
+	UE_LOG(LogTemp, Warning, TEXT("[CampusBR] no seal after %.0f s - sealing locally"),
+		WaitingSeconds + SealGraceSeconds);
+	SealSession(HumansPresent(), 0, CountdownSeconds);
 }
 
 void ACampusBRGameMode::Logout(AController* Exiting)
@@ -314,8 +453,10 @@ void ACampusBRGameMode::RestartPlayer(AController* NewPlayer)
 	{
 		return;
 	}
-	const int32 Index = IndexOf(NewPlayer);
-	const FTransform Where = WaitingArea ? WaitingArea->SlotFor(FMath::Max(Index, 0))
+	// A RANDOM FREE SPOT, not the Nth slot. Players arrive while the session is still filling and leave
+	// again, so an index-per-player stacked two of them on the same square metre the moment anybody
+	// dropped out - and fifty in a lattice looked like a parade, not a lobby.
+	const FTransform Where = WaitingArea ? WaitingArea->FreeSlot()
 		: FTransform(ACampusBRWaitingArea::Place() + FVector(0.f, 0.f, 200.f));
 	RestartPlayerAtTransform(NewPlayer, Where);
 }
@@ -326,7 +467,8 @@ void ACampusBRGameMode::RequestStart(APlayerController* Requester)
 	const ACampusPlayerState* PlayerState = Requester ? Requester->GetPlayerState<ACampusPlayerState>() : nullptr;
 	if (State && PlayerState && PlayerState->bIsHost && State->BRPhase == ECampusBRPhase::Waiting)
 	{
-		EnterPhase(ECampusBRPhase::Countdown);
+		// The host's own START is a local seal, through the one door everything else uses.
+		SealSession(HumansPresent(), 0, CountdownSeconds);
 	}
 }
 
@@ -737,7 +879,10 @@ void ACampusBRGameMode::RefreshCounts()
 	}
 	State->AliveCombatants = Alive;
 	State->AliveSquads = Squads.Num();
-	State->TotalCombatants = Combatants.Num();
+	// THE SESSION'S SIZE, not the roster's length. While the platform is filling the roster is just the
+	// humans who have walked in, and a HUD reading "PLAYERS 1 / 1" off it told the first player to
+	// arrive that they were the whole match. The bots take the rest of the slots at the seal.
+	State->TotalCombatants = FMath::Max(Combatants.Num(), MaxCombatants);
 }
 
 void ACampusBRGameMode::EndMatch()

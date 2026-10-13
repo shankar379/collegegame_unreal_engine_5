@@ -926,6 +926,18 @@ void UCampusSocial::HandleEphemeral(const TSharedPtr<FJsonObject>& Frame)
 		OnBRPlaced.Broadcast(Payload);
 		return;
 	}
+	// The seal. Ephemeral by nature: a seal for a session the player already left is worthless, and the
+	// host has a second door for it anyway (the heartbeat response).
+	if (Type == TEXT("bs.sealed"))
+	{
+		OnBRSealed.Broadcast(Payload);
+		return;
+	}
+	if (Type == TEXT("bs.left"))
+	{
+		OnBRLeft.Broadcast(Payload);
+		return;
+	}
 	if (Type == TEXT("bs.ended"))
 	{
 		OnBRSessionEnded.Broadcast(Payload);
@@ -1262,6 +1274,17 @@ void UCampusSocial::ApplyEvent(int64 Seq, const FString& Id, const FString& Type
 			// Handed over whole - this file knows nothing about session objects, and UCampusBRQueue is
 			// the one place that parses one (and the one place that dedupes the pair).
 			OnBRPlaced.Broadcast(Payload);
+		}
+		else if (Type == TEXT("bs.sealed"))
+		{
+			// Joins are closed and the countdown is the server's promise. Handed over whole: this file
+			// knows nothing about session objects, and UCampusBRQueue is the one place that parses one.
+			OnBRSealed.Broadcast(Payload);
+		}
+		else if (Type == TEXT("bs.left"))
+		{
+			// The leader cancelled a session that was still filling: its members go back to the lobby.
+			OnBRLeft.Broadcast(Payload);
 		}
 		else if (Type == TEXT("bs.ended"))
 		{

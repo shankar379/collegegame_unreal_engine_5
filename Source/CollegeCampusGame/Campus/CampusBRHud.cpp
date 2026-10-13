@@ -79,6 +79,28 @@ namespace
 		return BrHudNumber(Object, BrHudFind(Object, A, B, C, D), Out);
 	}
 
+	/** A string (or name) property, for the session id. */
+	bool BrHudReadString(const UObject* Object, FString& Out, const TCHAR* A, const TCHAR* B = nullptr)
+	{
+		const FProperty* Property = BrHudFind(Object, A, B);
+		if (!Object || !Property)
+		{
+			return false;
+		}
+		const void* Value = Property->ContainerPtrToValuePtr<void>(Object);
+		if (const FStrProperty* AsString = CastField<FStrProperty>(Property))
+		{
+			Out = AsString->GetPropertyValue(Value);
+			return true;
+		}
+		if (const FNameProperty* AsName = CastField<FNameProperty>(Property))
+		{
+			Out = AsName->GetPropertyValue(Value).ToString();
+			return true;
+		}
+		return false;
+	}
+
 	bool BrHudReadVector(const UObject* Object, FVector& Out, const TCHAR* A, const TCHAR* B = nullptr,
 		const TCHAR* C = nullptr)
 	{
@@ -267,7 +289,6 @@ void FCampusBRView::Read(const APlayerController* PC)
 	}
 
 	int32 Joined = 0;
-	int32 Needed = 0;
 	if (BrHudReadNumber(GameState, Number, TEXT("Humans"), TEXT("HumansJoined"), TEXT("JoinedHumans"), TEXT("HumanCount")))
 	{
 		Joined = int32(Number);
@@ -276,23 +297,18 @@ void FCampusBRView::Read(const APlayerController* PC)
 	{
 		Joined = GameState->PlayerArray.Num();
 	}
-	// HumanCap is how many humans THIS host will take before it fills with bots: that is the number
-	// the waiting banner must count towards, not the 50 total slots.
-	if (BrHudReadNumber(GameState, Number, TEXT("HumanCap"), TEXT("MaxHumans"), TEXT("HumansNeeded")))
-	{
-		Needed = int32(Number);
-	}
+	// PLAYERS x / 50: the banner counts towards the SESSION's fifty slots, which is what a battle
+	// session is, and not towards this host's connection cap - the empty slots become bots.
 	if (BrHudReadNumber(GameState, Number, TEXT("TotalCombatants"), TEXT("TotalSlots"), TEXT("MaxAlive")))
 	{
 		TotalSlots = FMath::Max(1, int32(Number));
 	}
 	bWaiting = Phase.Contains(TEXT("wait")) || Phase.Contains(TEXT("fill")) || Phase.Contains(TEXT("lobby"));
-	if (Joined > 0 && Needed > 0)
-	{
-		bHasFill = true;
-		Humans = Joined;
-		MaxHumans = Needed;
-	}
+	// SEALED is the countdown phase: the backend has closed joins and the drop is coming.
+	bSealed = Phase.Contains(TEXT("count"));
+	bHasFill = Joined > 0;
+	Humans = Joined;
+	BrHudReadString(GameState, SessionId, TEXT("SessionId"), TEXT("BattleSessionId"));
 
 	float Seconds = 0.f;
 	// BRPhaseEndTime is a server world-time stamp: the waiting timeout, then the countdown.
@@ -627,11 +643,11 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 						SNew(SBox)
 						.Visibility_Lambda([this]()
 						{
-							// bWaiting, not just "a player count is readable": the count is readable all
-							// match long, so this banner used to sit over the middle of the screen through
-							// the drop and the whole fight.
-							return View.bWaiting && View.bHasFill && !View.bEnded && !View.bInPlane
-								&& !View.bFreefall && !View.bParachuting
+							// The waiting AREA, not just "a player count is readable": the count is
+							// readable all match long, so this banner used to sit over the middle of the
+							// screen through the drop and the whole fight.
+							return (View.bWaiting || View.bSealed) && View.bHasFill && !View.bEnded
+								&& !View.bInPlane && !View.bFreefall && !View.bParachuting
 								? EVisibility::HitTestInvisible : EVisibility::Collapsed;
 						})
 						[
@@ -642,14 +658,50 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 							.BorderWidth(2.f)
 							.ContentPadding(FMargin(26.f, 12.f))
 							[
-								SNew(STextBlock)
-								.Text_Lambda([this]()
-								{
-									return FText::Format(LOCTEXT("BrWaiting", "WAITING FOR PLAYERS   {0} / {1}"),
-										FText::AsNumber(View.Humans), FText::AsNumber(View.MaxHumans));
-								})
-								.Font(CampusAngular::Numeric(28))
-								.ColorAndOpacity(FLinearColor::White)
+								SNew(SVerticalBox)
+								// PLAYERS 7 / 50, live off the replicated game state: it climbs as the
+								// session fills, which is the whole point of walking in before it is full.
+								+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+								[
+									SNew(STextBlock)
+									.Text_Lambda([this]()
+									{
+										return FText::Format(LOCTEXT("BrPlayers", "PLAYERS {0} / {1}"),
+											FText::AsNumber(View.Humans), FText::AsNumber(View.TotalSlots));
+									})
+									.Font(CampusAngular::Numeric(28))
+									.ColorAndOpacity(FLinearColor::White)
+								]
+								+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 4.f, 0.f, 0.f)
+								[
+									SNew(STextBlock)
+									.Text_Lambda([this]()
+									{
+										// Two states, one line: still filling, or sealed and dropping.
+										if (!View.bSealed)
+										{
+											return LOCTEXT("BrWaiting", "WAITING FOR PLAYERS");
+										}
+										return FText::Format(LOCTEXT("BrStarting", "MATCH STARTING {0}..."),
+											FText::AsNumber(FMath::Max(0, int32(View.Countdown + 0.5f))));
+									})
+									.Font(CampusAngular::Display(18))
+									.ColorAndOpacity(CampusAngular::Accent)
+								]
+								// THE SESSION ID: what a player reads out to a friend, or to us when they
+								// report a bug. Absent in editor play, where it simply does not draw.
+								+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 4.f, 0.f, 0.f)
+								[
+									SNew(STextBlock)
+									.Visibility_Lambda([this]()
+									{
+										return View.SessionId.IsEmpty()
+											? EVisibility::Collapsed : EVisibility::HitTestInvisible;
+									})
+									.Text_Lambda([this]() { return FText::FromString(View.SessionId); })
+									.Font(CampusAngular::Body(13))
+									.ColorAndOpacity(CampusAngular::TextMuted)
+								]
 							]
 						]
 					]
