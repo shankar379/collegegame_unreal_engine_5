@@ -1,4 +1,4 @@
-﻿// Lobby level UI (Slate, no widget assets). Flow like Free Fire / PUBG Mobile:
+// Lobby level UI (Slate, no widget assets). Flow like Free Fire / PUBG Mobile:
 //   Splash (loading + tips, TAP TO START) -> first launch: Agreement (terms + privacy) -> Login choice
 //   (PLAY AS GUEST / LOGIN / REGISTER) -> first launch: Nickname -> Lobby.
 // Everything account / money related goes through UCampusBackend (the API); nothing is decided on the phone.
@@ -1864,7 +1864,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStartButton()
 		// §5), so the plate says whose press it is. The member does nothing and is pulled in by
 		// `bs.placed` the moment the matchmaker places the squad.
 		const FString LeaderName = Live->GetServerParty().LeaderName().ToUpper();
-		const FText Waiting = IsBattleRoyaleSelected()
+		const FText Waiting = true
 			? LOCTEXT("LeaderStarts", "LEADER STARTS")
 			: FText::Format(LOCTEXT("WaitingForLeader", "WAITING FOR {0}"), FText::FromString(LeaderName));
 		return SNew(SBox).IsEnabled(false).MinDesiredWidth(300.f).MinDesiredHeight(96.f)
@@ -1892,12 +1892,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStartButton()
 	return CampusStyle::StartButton(LOCTEXT("Start", "START"),
 		FOnClicked::CreateLambda([this]()
 		{
-			if (IsBattleRoyaleSelected())
-			{
-				StartBattleRoyale();
-				return FReply::Handled();
-			}
-			Show(EScreen::Rooms);
+			// START IS ALWAYS THE 50-PLAYER BATTLE SESSION (solo / duo / squad). Red/blue Rooms are a
+			// Room Card thing and open only from their own ROOMS button, never from here.
+			StartBattleRoyale();
 			return FReply::Handled();
 		}), FVector2D(300.f, 96.f));
 }

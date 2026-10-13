@@ -215,7 +215,7 @@ void SCampusLobbyWidget::EnterBRMatch(const FCampusBRMatch& Match)
 TSharedRef<SWidget> SCampusLobbyWidget::BuildMatchmaking()
 {
 	UCampusBRQueue* Queue = BRQueue();
-	const int32 MapIndex = CampusCatalog::FindMap(FName(CampusCatalog::Mode(SelectedMode).MapId));
+	const int32 MapIndex = CampusCatalog::FindMap(FName(TEXT("RealMap")));
 	const FString MapName = MapIndex != INDEX_NONE
 		? FString(CampusCatalog::Map(MapIndex).Name).ToUpper() : FString(TEXT("BATTLE ROYALE"));
 	const UCampusSave* Save = Profile();
