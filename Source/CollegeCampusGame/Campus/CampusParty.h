@@ -130,13 +130,33 @@ public:
 	/** Drops everyone but the leader. */
 	void ClearGuests();
 
+	/** GOING SOLO: keeps MY plate and nothing else, with the crown back on it.
+	 *
+	 *  The local player is ALWAYS in the line-up, so the squad going away (I left, I was removed, the
+	 *  leader broke it up) must not empty the roster: an empty one blinks the podium to nobody until the
+	 *  lobby's next SyncParty() rebuilds my plate, and that can be a whole screen away. Keeps the plate
+	 *  the server last sent for me - the right one even when the squad I just left was somebody
+	 *  else's, where ClearGuests() would have left THEIR plate standing. */
+	void KeepOnlyLocalPlayer();
+
 	/** Replaces the whole roster from the API party feed (GET /v1/parties/me and every party.* event).
 	 *
 	 *  bAuthoritative = the list is the server's and already contains ME, with the server's own
 	 *  leader flag - so it replaces the roster wholesale. Without it the local leader entry is kept,
 	 *  which is what the pre-party AdoptSquad path still wants. Keeping the local entry while a server
-	 *  party exists would show the player twice and put the crown on the wrong plate. */
+	 *  party exists would show the player twice and put the crown on the wrong plate.
+	 *
+	 *  THE LOCAL PLAYER IS MOVED TO INDEX 0 (see SetLocalPlayerId): member 0 owns MainSlot, and the
+	 *  server's order is joined_at - so in somebody else's squad I arrive second or third. */
 	void ApplyRoster(const TArray<FCampusPartyMember>& InMembers, bool bAuthoritative = false);
+
+	/** My own server player id, from UCampusSocial. THE MainSlot INVARIANT depends on it: member 0 is
+	 *  the local player, their figure stands on MainSlot and their plate is anchored under it, so a
+	 *  roster that puts somebody else first would draw a teammate's name over the player's own
+	 *  character. Empty on the AdoptSquad / solo path, where member 0 is the local leader by
+	 *  construction. */
+	void SetLocalPlayerId(const FString& InPlayerId) { LocalPlayerId = InPlayerId; }
+	const FString& GetLocalPlayerId() const { return LocalPlayerId; }
 
 	/** Takes the squad from a finished match: everyone on the local player's team, in join order. */
 	void AdoptSquad(const AGameStateBase* State, const FString& MyName, uint8 MyTeam);
@@ -156,6 +176,11 @@ public:
 private:
 	void Changed();
 
+	/** Moves the local player to index 0, keeping everybody else's relative order. No-op when the id is
+	 *  unknown or already first. */
+	void HoistLocalPlayer(TArray<FCampusPartyMember>& List) const;
+
 	TArray<FCampusPartyMember> Members;
 	int32 Capacity = 4;
+	FString LocalPlayerId;
 };

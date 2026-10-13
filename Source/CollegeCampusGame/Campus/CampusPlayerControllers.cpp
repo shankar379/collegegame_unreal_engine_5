@@ -278,7 +278,32 @@ void ACampusLobbyPlayerController::RebuildSquad()
 		return;
 	}
 	const int32 Capacity = Party->GetCapacity();
-	const TArray<FCampusPartyMember>& Members = Party->GetMembers();
+
+	// MEMBER 0 IS ALWAYS THE LOCAL PLAYER, and every slot below is assigned by INDEX - so a roster that
+	// led with somebody else would stand a teammate on the player's own spot (MainSlot) and the lobby
+	// would anchor their plate under it. UCampusParty::ApplyRoster already hoists me to the front; this
+	// is the backstop for a roster that arrives any other way. A SERVER roster that does not contain me
+	// at all is not a line-up I am in: it is drawn as solo, never as somebody else's squad. (A local /
+	// AdoptSquad roster carries no player ids and is left exactly as it is.)
+	TArray<FCampusPartyMember> Members = Party->GetMembers();
+	const FString& Local = Party->GetLocalPlayerId();
+	if (!Local.IsEmpty() && Members.Num() > 0 && !Members[0].PlayerId.IsEmpty())
+	{
+		const int32 Mine = Members.IndexOfByPredicate([&Local](const FCampusPartyMember& Member)
+		{
+			return Member.PlayerId == Local;
+		});
+		if (Mine > 0)
+		{
+			FCampusPartyMember MyPlate = Members[Mine];
+			Members.RemoveAt(Mine, 1, EAllowShrinking::No);
+			Members.Insert(MoveTemp(MyPlate), 0);
+		}
+		else if (Mine == INDEX_NONE)
+		{
+			Members.SetNum(1);
+		}
+	}
 
 	USkeletalMesh* Mesh = LoadObject<USkeletalMesh>(nullptr, CampusLobbyScene::MeshPath);
 	FActorSpawnParameters Params;

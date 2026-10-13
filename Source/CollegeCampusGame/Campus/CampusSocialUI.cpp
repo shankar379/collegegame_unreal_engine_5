@@ -1377,10 +1377,69 @@ void SCampusLobbyWidget::OpenManageSquad()
 		return;
 	}
 	const FCampusServerParty& Squad = Live->GetServerParty();
+	const FString MyId = Live->Me();
 	TSharedRef<SVerticalBox> Rows = SNew(SVerticalBox);
+
+	// MY OWN PLATE OFFERS "LEAVE SQUAD", NEVER "REMOVE". A leader removing themselves is not a kick, it
+	// is a leave - and because the squad is theirs, it DISBANDS. Saying "REMOVE" on my own row would
+	// promise a squad that carries on without me, which is not what the server does and not what the
+	// owner wants. Keyed on MY ID and not on the crown: if a stale leader flag ever lands on the wrong
+	// plate, the one row that must never offer a kick is still mine.
 	for (const FCampusPartyMember& Member : Squad.Members)
 	{
-		if (Member.bLeader)
+		if (MyId.IsEmpty() ? !Member.bLeader : Member.PlayerId != MyId)
+		{
+			continue;
+		}
+		Rows->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 8.f)
+		[
+			SNew(SBox).HeightOverride(RowHeight)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						Label(FText::Format(LOCTEXT("ManageYou", "{0}  ·  YOU"), FText::FromString(Member.Name.ToUpper())), 22, CampusAngular::Accent)
+					]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						Label(LOCTEXT("ManageYouHint", "LEADER — LEAVING BREAKS UP THE SQUAD"), 13, CampusAngular::TextMuted)
+					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					Button(LOCTEXT("ManageLeave", "LEAVE SQUAD"), FOnClicked::CreateLambda([this]()
+					{
+						AskConfirm(LOCTEXT("DisbandTitle", "LEAVE AND BREAK UP THE SQUAD?"),
+							LOCTEXT("DisbandBody", "THE SQUAD IS YOURS, SO IT ENDS WHEN YOU GO. EVERYONE GOES BACK TO PLAYING ON THEIR OWN."),
+							LOCTEXT("DisbandYes", "LEAVE SQUAD"),
+							[this]()
+							{
+								if (UCampusSocial* Live2 = Social())
+								{
+									Live2->LeaveParty([this](bool bOk, const FString& Error)
+									{
+										if (!bOk)
+										{
+											Toast(Error);
+										}
+										Refresh();
+									});
+								}
+							});
+						return FReply::Handled();
+					}), EButton::Ghost, 16, FVector2D(190.f, 50.f))
+				]
+			]
+		];
+	}
+
+	for (const FCampusPartyMember& Member : Squad.Members)
+	{
+		// Everybody who is not me. The crown is not the test: see above.
+		if (MyId.IsEmpty() ? Member.bLeader : Member.PlayerId == MyId)
 		{
 			continue;
 		}

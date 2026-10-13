@@ -185,21 +185,78 @@ void UCampusParty::ClearGuests()
 	}
 }
 
+void UCampusParty::HoistLocalPlayer(TArray<FCampusPartyMember>& List) const
+{
+	if (LocalPlayerId.IsEmpty())
+	{
+		return;
+	}
+	const int32 Mine = List.IndexOfByPredicate([this](const FCampusPartyMember& Member)
+	{
+		return Member.PlayerId == LocalPlayerId;
+	});
+	if (Mine <= 0)
+	{
+		// Already first, or not in this roster at all. "Not in it" is not repaired here: UCampusSocial
+		// treats a party without me as no party at all, so it never reaches this function.
+		return;
+	}
+	FCampusPartyMember MyPlate = List[Mine];
+	List.RemoveAt(Mine, 1, EAllowShrinking::No);
+	List.Insert(MoveTemp(MyPlate), 0);
+}
+
+void UCampusParty::KeepOnlyLocalPlayer()
+{
+	int32 Keep = LocalPlayerId.IsEmpty() ? INDEX_NONE : Members.IndexOfByPredicate([this](const FCampusPartyMember& Member)
+	{
+		return Member.PlayerId == LocalPlayerId;
+	});
+	if (Keep == INDEX_NONE)
+	{
+		// No server id to match on (the local / AdoptSquad path): the leader entry IS the local player.
+		Keep = Members.IndexOfByPredicate([](const FCampusPartyMember& Member) { return Member.bLeader; });
+	}
+	if (Keep == INDEX_NONE)
+	{
+		// Nothing in here is identifiably me. The squad is still gone, so empty it and let the lobby's
+		// SyncParty() build my plate from the profile - which is where it comes from on a cold start too.
+		if (Members.Num() > 0)
+		{
+			Members.Reset();
+			Changed();
+		}
+		return;
+	}
+	// Already exactly "me, alone, leading": say nothing. Every broadcast repaints the lobby.
+	if (Members.Num() == 1 && Keep == 0 && Members[0].bLeader && Members[0].bAccepted)
+	{
+		return;
+	}
+	FCampusPartyMember Mine = Members[Keep];
+	Mine.bLeader = true;
+	Mine.bAccepted = true;
+	Mine.InviteId.Reset();
+	Members.Reset();
+	Members.Add(MoveTemp(Mine));
+	Changed();
+}
+
 void UCampusParty::ApplyRoster(const TArray<FCampusPartyMember>& InMembers, bool bAuthoritative)
 {
 	TArray<FCampusPartyMember> Next;
 	Next.Reserve(FMath::Max(Capacity, InMembers.Num()));
 	if (bAuthoritative)
 	{
-		// The server's roster, verbatim and in its own order (joined_at, leader first in practice).
-		// Nothing local is merged in: the party IS the server's answer, including who holds the crown.
-		for (const FCampusPartyMember& Member : InMembers)
+		// The server's roster, in the server's own order (joined_at) with one correction: ME FIRST.
+		// Nothing local is merged in - the party IS the server's answer, including who holds the crown -
+		// but member 0 owns MainSlot, and in somebody else's squad the server lists me second or third.
+		// Hoisting BEFORE the capacity clamp, so a narrow row can never be the thing that drops me.
+		Next = InMembers;
+		HoistLocalPlayer(Next);
+		if (Next.Num() > Capacity)
 		{
-			if (Next.Num() >= Capacity)
-			{
-				break;
-			}
-			Next.Add(Member);
+			Next.SetNum(Capacity);
 		}
 	}
 	else

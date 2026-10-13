@@ -364,6 +364,9 @@ public:
 	float SecondsUntilPrecise(const FDateTime& When) const;
 
 	// ---- party
+	/** My own server player id (UCampusBackend::PlayerId), empty when not signed in. Public because the
+	 *  squad UI has to tell MY plate from everybody else's: my plate never offers REMOVE. */
+	FString Me() const;
 	bool HasParty() const { return Party.bValid; }
 	const FCampusServerParty& GetServerParty() const { return Party; }
 	bool IsPartyLeader() const;
@@ -443,7 +446,6 @@ public:
 private:
 	UCampusBackend* Api() const;
 	UCampusSave* Save() const;
-	FString Me() const;
 
 	// ---- socket
 	void OpenSocket();

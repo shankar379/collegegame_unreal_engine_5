@@ -1137,20 +1137,28 @@ void UCampusSocial::ApplyEvent(int64 Seq, const FString& Id, const FString& Type
 	{
 		// ---- party roster: one shape, one call. The plate appears only on the server's word, never
 		// optimistically - an accept that races a disband would otherwise show a ghost member.
-		if (Type == TEXT("party.joined") || Type == TEXT("party.left") || Type == TEXT("party.leader_changed")
-			|| Type == TEXT("party.mode_changed"))
+		if (Type == TEXT("party.left") && !Me().IsEmpty() && Str(Payload, TEXT("player_id")) == Me())
 		{
-			ReadParty(Obj(Payload, TEXT("party")));
-			if (Type == TEXT("party.left") && Str(Payload, TEXT("reason")) == TEXT("kicked")
-				&& Str(Payload, TEXT("player_id")) == Me())
+			// I AM THE ONE WHO WENT - left, or was removed. The server sends my copy with party: null,
+			// but it does not matter what it carries: there is no reading of "I left" that leaves a
+			// squad on my screen. Straight to solo, and only then the caption.
+			ClearParty(FString());
+			if (Str(Payload, TEXT("reason")) == TEXT("kicked"))
 			{
 				OnNotice.Broadcast(TEXT("YOU WERE REMOVED FROM THE SQUAD."));
 			}
 		}
+		else if (Type == TEXT("party.joined") || Type == TEXT("party.left") || Type == TEXT("party.leader_changed")
+			|| Type == TEXT("party.mode_changed"))
+		{
+			ReadParty(Obj(Payload, TEXT("party")));
+		}
 		else if (Type == TEXT("party.disbanded"))
 		{
-			const FString Reason = Str(Payload, TEXT("reason"));
-			ClearParty(Reason);
+			// My own act ended it (I left, and the squad is mine, so it went with me): I know why, so the
+			// lobby simply collapses to solo without a toast explaining what I just tapped.
+			const bool bMyDoing = !Me().IsEmpty() && Str(Payload, TEXT("player_id")) == Me();
+			ClearParty(bMyDoing ? FString() : Str(Payload, TEXT("reason")));
 		}
 		else if (Type == TEXT("party.invited"))
 		{
@@ -1310,19 +1318,22 @@ void UCampusSocial::ReadParty(const TSharedPtr<FJsonObject>& Json)
 			Next.Pending.Add(ReadMember(Value->AsObject(), false, LeaderId));
 		}
 	}
-	// A party of one is not a party: the server disbands it, and this keeps the client honest if a
+	// A PARTY I AM NOT IN IS NOT MY PARTY. Every party.* event carries the view of the party the thing
+	// happened TO - including the squad I was just removed from, whose party.left names me and still
+	// describes the two players left standing in it. Reading that as "my squad" is what left one phone
+	// drawing a line-up with two members and no local player in it. There is exactly one honest reading
+	// of a roster without me: I am solo.
+	//
+	// A party of one is not a party either: the server disbands it, and this keeps the client honest if a
 	// stale view ever says otherwise.
-	if (Next.Members.Num() <= 1 && Next.Pending.Num() == 0)
+	const FString MyId = Me();
+	const bool bHasMe = MyId.IsEmpty() // not signed in yet: nothing to check against, so do not judge
+		|| Next.Members.ContainsByPredicate([&MyId](const FCampusPartyMember& Member) { return Member.PlayerId == MyId; });
+	if (!bHasMe || (Next.Members.Num() <= 1 && Next.Pending.Num() == 0))
 	{
-		const FString WasId = Party.Id;
-		Party = FCampusServerParty();
-		if (!WasId.IsEmpty())
-		{
-			MarkPendingInvites();
-			PushRosterToLobby();
-			OnPartyChanged.Broadcast();
-			OnRosterChanged.Broadcast();
-		}
+		// No reason: the player either knows why (they tapped LEAVE) or has already been told by the
+		// party.disbanded / party.left that brought this view with it.
+		ClearParty(FString());
 		return;
 	}
 	// Nothing new to say: a party.presence heartbeat, a re-read of /parties/me, or the leader's own
@@ -1369,12 +1380,16 @@ void UCampusSocial::PushRosterToLobby()
 	{
 		return;
 	}
+	// WHO "I" AM, so the line-up can keep the local player on MainSlot whatever order the server sends
+	// its roster in. The server orders by joined_at, so in somebody else's squad I am NOT first.
+	Squad->SetLocalPlayerId(Me());
 	if (!Party.bValid)
 	{
-		// No server party: empty the roster and hand the lobby back to its own local behaviour. The
-		// next SyncParty() re-adds the local player as leader - which is right even when the party we
-		// just left was somebody else's, where ClearGuests() would have left THEIR plate standing.
-		Squad->ApplyRoster(TArray<FCampusPartyMember>(), true);
+		// No server party: back to SOLO, which is the local player and nobody else. Not an EMPTY roster -
+		// the player is always in their own line-up, and the lobby's SyncParty() may be a screen away.
+		// Not ClearGuests() either: the squad we just left may have been somebody else's, and that would
+		// have left THEIR plate standing with the crown on it.
+		Squad->KeepOnlyLocalPlayer();
 		return;
 	}
 	// The server decides how wide the plate row is, and who holds the crown.
@@ -1563,7 +1578,17 @@ void UCampusSocial::KickMember(const FString& PlayerId, FDone Done)
 	{
 		if (UCampusSocial* Self = WeakThis.Get(); Self && bOk)
 		{
-			Self->ReadParty(Obj(Json, TEXT("party")));
+			// "party": null is the answer to removing MY OWN plate (the server reads that as a leave, and
+			// the leader's leave disbands the squad). ReadParty(null) would have kept the stale roster.
+			const TSharedPtr<FJsonObject> View = Obj(Json, TEXT("party"));
+			if (View.IsValid())
+			{
+				Self->ReadParty(View);
+			}
+			else
+			{
+				Self->ClearParty(FString());
+			}
 		}
 		if (Done)
 		{

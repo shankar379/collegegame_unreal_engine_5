@@ -161,6 +161,17 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 	{
 		SocialPartyHandle = Live->OnPartyChanged.AddLambda([this]()
 		{
+			// THE SQUAD IS GONE (I left, I was removed, or the leader broke it up), so the lobby goes
+			// back to the state it had before there was one: SOLO, one figure, my own plate. This
+			// delegate only fires on a REAL change, so "no party now" means there was one a moment ago -
+			// leaving the chips on SQUAD would show three "+ INVITE" plates nobody asked for.
+			const UCampusSocial* Live2 = Social();
+			if (Live2 && !Live2->HasParty() && SelectedTeamSize > 1)
+			{
+				SelectedTeamSize = 1;
+				SaveMatchChoice();
+				SyncParty();
+			}
 			if (Current == EScreen::Lobby || Current == EScreen::FriendPick || Current == EScreen::Friends)
 			{
 				Refresh();
