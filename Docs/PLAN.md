@@ -122,3 +122,29 @@ Next steps (in order, one Unreal job at a time, close other apps first — 8 GB 
 2. Run `Scripts/build_guns.py`, then `Scripts/build_varsity_valley.py` via UnrealEditor-Cmd pythonscript
 3. Merge `wip/battle-royale-night` into `main`, then `BuildAndroid.bat`, install
 4. Open questions: ranked vs fun-toggle rooms; flat stats in BR; gun price/power rebalance (AK47 2.7× starter DPS)
+
+---
+
+## 7. Status 2026-10-13 (afternoon)
+
+Done and on `main` (APK `AndroidBuild/CampusCombat-final-1400.apk`, installed on the test phone):
+- Touch fix in matches (BR HUD no longer blocks taps), lobby flicker fixes, scrollable ONLINE list
+- Lobby line-up: player centre-left and in front, teammates behind; feet on the floor; faces the camera (mesh offset -90 on the actor yaw)
+- Store no longer rebuilds every frame; drag turntable needs a real swipe
+- Squad: leader leaving disbands the squad; everyone returns to SOLO; LEAVE SQUAD on your own plate
+- Battle Session v1 (backend `bc26a5e`): Redis queue per mode x region, matchmaker worker, allocator seam (phone now, dedicated/AWS later)
+- Plane model, visible parachute, JUMP -> OPEN CHUTE, auto-open at 40 m, plane at 300 m, 17 drop fixes, decorative parachutists
+
+In progress — Battle Session v2 (PUBG/Free Fire model, `BATTLE_SESSION_DESIGN.md`):
+- START -> placed at once into an OPEN session (or a new one) -> waiting area immediately
+- Random spawn spots, live PLAYERS x / 50, session id on the HUD
+- Backend seals on full or the 25 s cap -> bots -> `bs.sealed` -> 10 s countdown -> plane
+- Empty session auto-deleted after 10 s; full session sends new START to the next session
+- Works with ONE real player (the owner is the only tester); demo party members who never connect become bots
+- Verification: `campuscombat-backend/api/scripts/e2e-battle-session.mjs` (run through ngrok)
+
+Open decisions:
+- Dedicated servers need an Unreal engine built from source (launcher engine cannot build Server targets) — needed before AWS
+- BR admission check (session ticket) before public release
+- Dedicated server needs a server credential for heartbeats/results
+- Earlier: ranked vs fun rooms, flat BR gun stats, AK47 balance, room card pricing
