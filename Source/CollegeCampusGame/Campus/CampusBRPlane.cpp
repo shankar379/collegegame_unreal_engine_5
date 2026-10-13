@@ -1,5 +1,6 @@
 #include "Campus/CampusBRPlane.h"
 
+#include "Campus/CampusBRDecorChutes.h"
 #include "Campus/CampusBRZone.h"
 #include "Campus/CampusCharacter.h"
 #include "CollisionQueryParams.h"
@@ -865,6 +866,7 @@ void ACampusBRPlane::Tick(float DeltaSeconds)
 	// sideways down the line. With a cube nobody could tell; with a plane everybody can.
 	SetActorLocationAndRotation(FlightLocation(), Heading());
 	SpinPropellers(DeltaSeconds);
+	CampusBRDecor::SpawnForFlight(GetWorld(), this, int32(LaunchTime * 100.f));
 
 	if (!HasAuthority())
 	{
