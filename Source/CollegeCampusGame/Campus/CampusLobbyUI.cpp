@@ -64,11 +64,6 @@ namespace
 		return FString::Printf(TEXT("₹%s"), *FString::SanitizeFloat(Inr, 0));
 	}
 
-	/** One slot in the lobby squad row, as a fraction of the viewport width either side of centre.
-	 *  ACampusLobbyPlayerController uses the same step to place the 3D characters, so a plate is
-	 *  always under its own character whatever the screen size. */
-	constexpr float SquadSlotFraction = 0.16f;
-
 	/** The left-hand menu. Every tab lands on a screen that exists. */
 	enum class ELobbyTab : uint8 { Store, Missions, Character, Vault, Weapons, Events };
 	struct FTabDef
@@ -1628,16 +1623,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSquadRow()
 		return SNullWidget::NullWidget;
 	}
 
-	TArray<int32> Order;
-	UCampusParty::BuildFillOrder(Capacity, Order);
-
-	// Anchor each plate at the same screen fraction the controller used for its character, so a
-	// plate sits under its own character at any resolution.
+	// Anchor each plate at the screen fraction of the SLOT its character stands in. Both sides read
+	// CampusLineUp::SlotScreenFraction, so a plate cannot drift off its figure - and because the
+	// player always holds MainSlot, their own plate does not move when the squad size changes.
 	TSharedRef<SConstraintCanvas> Canvas = SNew(SConstraintCanvas).Visibility(EVisibility::SelfHitTestInvisible);
 	for (int32 Index = 0; Index < Capacity; ++Index)
 	{
-		const int32 Slot = Order.IsValidIndex(Index) ? Order[Index] : Index;
-		const float Fraction = 0.5f + UCampusParty::SlotStep(Slot, Capacity) * SquadSlotFraction;
+		const float Fraction = CampusLineUp::SlotScreenFraction(CampusLineUp::SlotForMember(Index));
 		TSharedRef<SWidget> Plate = Members.IsValidIndex(Index) ? BuildNamePlate(Members[Index]) : BuildInvitePlate();
 		Canvas->AddSlot()
 			.Anchors(FAnchors(Fraction, 1.f))
@@ -1656,17 +1648,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
 	UCampusSocial* Live = Social();
 	const bool bInParty = Live && Live->HasParty();
 	const bool bLeads = !bInParty || Live->IsPartyLeader();
-	// With a server party the SIZE OF THE ROW IS THE SERVER'S: the chips show the party's mode, the
-	// leader's tap goes through PATCH /v1/parties/me, and SetCapacity only follows party.mode_changed.
-	const int32 Shown = bInParty ? Live->GetServerParty().Mode : SelectedTeamSize;
 
 	// A MEMBER GETS ONE READ-ONLY PLATE, NOT THREE DEAD PILLS. Three greyed-out chips are three tap
 	// targets that do nothing, and the caption explaining them has nowhere to go that does not land on
 	// the squad plates. One plate says the same thing in a third of the width.
 	if (bInParty && !bLeads)
 	{
-		return SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
-			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 8.f)
+		return SNew(SBox).HeightOverride(46.f).HAlign(HAlign_Right).Visibility(EVisibility::SelfHitTestInvisible)
 			[
 				SNew(SBox).HeightOverride(46.f)
 				[
@@ -1681,7 +1669,11 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
 						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 						[
 							SNew(STextBlock)
-							.Text(Shown == 2 ? LOCTEXT("ModeDuo", "DUO") : LOCTEXT("ModeSquad", "SQUAD"))
+							// A lambda, so party.mode_changed relabels the plate without rebuilding it.
+							.Text_Lambda([this]()
+							{
+								return ShownTeamSize() == 2 ? LOCTEXT("ModeDuo", "DUO") : LOCTEXT("ModeSquad", "SQUAD");
+							})
 							.Font(CampusAngular::Display(18)).ColorAndOpacity(Accent)
 						]
 						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(12.f, 2.f, 0.f, 0.f)
@@ -1691,8 +1683,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
 						]
 					]
 				]
-			]
-			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)[BuildModePlate()];
+			];
 	}
 
 	TSharedRef<SHorizontalBox> TeamRow = SNew(SHorizontalBox);
@@ -1703,7 +1694,11 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
 		[
 			SNew(SBox).IsEnabled(bLeads)
 			[
-				CampusStyle::Pill(FText::FromString(FString(Team.Name).ToUpper()), Shown == Size,
+				// THE LIT CHIP IS AN ATTRIBUTE, not a build-time colour. Tapping SOLO / DUO / SQUAD now
+				// restyles the three chips through these lambdas and rebuilds nothing at all - which is
+				// why START, the map plate and the ONLINE strip no longer flinch when the mode changes.
+				CampusStyle::SelectablePill(FText::FromString(FString(Team.Name).ToUpper()),
+					TAttribute<bool>::CreateLambda([this, Size]() { return ShownTeamSize() == Size; }),
 					FOnClicked::CreateLambda([this, Size]()
 					{
 						UCampusSocial* Live2 = Social();
@@ -1758,10 +1753,16 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeSelect()
 		];
 	}
 
-	TSharedRef<SVerticalBox> Column = SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible);
-	Column->AddSlot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 8.f)[TeamRow];
-	Column->AddSlot().AutoHeight().HAlign(HAlign_Right)[BuildModePlate()];
-	return Column;
+	// The map / mode plate ("MAPS") is its own region in BuildLobby now, so a mode tap cannot touch it.
+	return SNew(SBox).HAlign(HAlign_Right).Visibility(EVisibility::SelfHitTestInvisible)[TeamRow];
+}
+
+int32 SCampusLobbyWidget::ShownTeamSize() const
+{
+	// With a server party the SIZE OF THE ROW IS THE SERVER'S: the chips show the party's mode, the
+	// leader's tap goes through PATCH /v1/parties/me, and SetCapacity only follows party.mode_changed.
+	const UCampusSocial* Live = Social();
+	return Live && Live->HasParty() ? Live->GetServerParty().Mode : SelectedTeamSize;
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildStartButton()
@@ -1906,9 +1907,15 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 					+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom)
 					[
 						SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
-						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 12.f)
+						// The chips, the map plate and START are three separate regions on purpose: a
+						// mode tap only ever has business with the first of them.
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 8.f)
 						[
 							SAssignNew(ModeSelectBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+						]
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 12.f)
+						[
+							SAssignNew(ModePlateBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
 						]
 						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
 						[
@@ -1978,28 +1985,70 @@ void SCampusLobbyWidget::RepaintLobby()
 			Api ? *Api->Engagement.LastWeekend.Reward.Describe() : TEXT(""))),
 		[this]() { return BuildClaimBanner(); });
 
-	// The rest IS what an interaction changes, so it is always re-filled - but only these five
-	// regions, and only once per frame (see Refresh).
-	if (SquadRowBox.IsValid())
+	// ---- The regions a mode tap, the ONLINE strip or an invite can legitimately change. These were
+	// re-filled unconditionally, which is why START, the map plate and the friends list still flinched
+	// when a mode chip was tapped. Each one now carries its own fingerprint too.
+
+	const bool bInParty = Live && Live->HasParty();
+	const bool bLeads = !bInParty || Live->IsPartyLeader();
+	// A named empty, not a temporary bound to a reference: the fingerprints below only read it when
+	// bInParty says there is a party, but the reference has to be valid either way.
+	static const FCampusServerParty NoParty;
+	const FCampusServerParty& ServerSquad = Live ? Live->GetServerParty() : NoParty;
+
+	// THE CHIPS: only the leader / member layout is structural. WHICH chip is lit is an attribute
+	// (SelectablePill), so tapping SOLO / DUO / SQUAD rebuilds nothing here at all.
+	FillRegion(ModeSelectBox, ModeSelectStamp,
+		GetTypeHash(FString::Printf(TEXT("%d|%d"), bInParty ? 1 : 0, bLeads ? 1 : 0)),
+		[this]() { return BuildModeSelect(); });
+
+	// The map / mode plate reads the chosen mode and map, and nothing else.
+	FillRegion(ModePlateBox, ModePlateStamp,
+		GetTypeHash(FString::Printf(TEXT("%d|%d"), SelectedMode, SelectedMap)),
+		[this]() { return BuildModePlate(); });
+
+	FillRegion(StartBox, StartStamp,
+		GetTypeHash(FString::Printf(TEXT("%d|%d|%s|%d"), bInParty ? 1 : 0, bLeads ? 1 : 0,
+			bInParty ? *ServerSquad.LeaderName() : TEXT(""), IsBattleRoyaleSelected() ? 1 : 0)),
+		[this]() { return BuildStartButton(); });
+
+	// The plate row: the squad size, then every field a name plate or an INVITE plate can draw.
+	uint32 Row = 0;
+	if (const UCampusParty* Local = Party())
 	{
-		SquadRowBox->SetContent(BuildSquadRow());
+		Row = GetTypeHash(FString::Printf(TEXT("cap%d"), Local->GetCapacity()));
+		for (const FCampusPartyMember& Member : Local->GetMembers())
+		{
+			Row = HashCombine(Row, GetTypeHash(FString::Printf(TEXT("%s|%s|%d|%d|%d|%d|%s|%s"),
+				*Member.PlayerId, *Member.Name, Member.Level, Member.Rank, Member.bLeader ? 1 : 0,
+				Member.bAccepted ? 1 : 0, *Member.Presence, *Member.InviteId)));
+		}
 	}
-	if (PartyBarBox.IsValid())
+	FillRegion(SquadRowBox, SquadRowStamp, Row, [this]() { return BuildSquadRow(); });
+
+	FillRegion(PartyBarBox, PartyBarStamp,
+		GetTypeHash(FString::Printf(TEXT("%d|%d|%s|%s|%d|%d|%s"), bInParty ? 1 : 0, bLeads ? 1 : 0,
+			bInParty ? *ServerSquad.LeaderName() : TEXT(""), bInParty ? *ServerSquad.State : TEXT(""),
+			bInParty ? ServerSquad.Occupancy() : 0, bInParty ? ServerSquad.Mode : 0,
+			bInParty ? *ServerSquad.RoomCode : TEXT(""))),
+		[this]() { return BuildPartyBar(); });
+
+	// The ONLINE strip: whether it is there at all, whether it is open, and every field its rows draw.
+	// A DUO -> SQUAD tap touches none of these, so the list holds still.
+	uint32 Strip = GetTypeHash(FString::Printf(TEXT("%d|%d|%d|%d|%d"),
+		SelectedTeamSize <= 1 ? 1 : 0, bLobbyFriendsOpen ? 1 : 0,
+		bInParty ? 1 : 0, bLeads ? 1 : 0, bInParty && ServerSquad.HasRoom() ? 1 : 0));
+	if (Live && Live->GetRoster().bValid)
 	{
-		PartyBarBox->SetContent(BuildPartyBar());
+		Strip = HashCombine(Strip, 0x5EEDu);
+		for (const FCampusPlayerCard& Card : Live->GetRoster().Friends)
+		{
+			Strip = HashCombine(Strip, GetTypeHash(FString::Printf(TEXT("%s|%s|%s|%d|%s|%d"),
+				*Card.PlayerId, *Card.Name, *Card.Presence, Card.bInParty ? 1 : 0,
+				*Card.PendingInviteId, Card.Level)));
+		}
 	}
-	if (ModeSelectBox.IsValid())
-	{
-		ModeSelectBox->SetContent(BuildModeSelect());
-	}
-	if (StartBox.IsValid())
-	{
-		StartBox->SetContent(BuildStartButton());
-	}
-	if (FriendsStripBox.IsValid())
-	{
-		FriendsStripBox->SetContent(BuildLobbyFriends());
-	}
+	FillRegion(FriendsStripBox, FriendsStripStamp, Strip, [this]() { return BuildLobbyFriends(); });
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildSettings()

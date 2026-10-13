@@ -22,6 +22,53 @@
 
 class AGameStateBase;
 
+/**
+ * WHERE THE LOBBY LINE-UP STANDS. Deliberately outside UCampusParty: it is view geometry, not party
+ * state, and BOTH the 3D figures (ACampusLobbyPlayerController) and their name plates (the lobby UI)
+ * have to read the same numbers or a plate drifts off its character.
+ */
+namespace CampusLineUp
+{
+	/** ONE SPOT.
+	 *
+	 *  Lateral is cm to the player's RIGHT ON SCREEN (the lobby camera looks down -X, so its right is
+	 *  -Y). Depth is cm TOWARDS the camera. Yaw turns the figure, on top of the yaw the player has
+	 *  dragged the whole line-up to. */
+	struct FSlotPose
+	{
+		float LateralCm = 0.f;
+		float DepthCm = 0.f;
+		float YawDeg = 0.f;
+	};
+
+	/** FOUR FIXED SPOTS, LEFT TO RIGHT, THE SAME IN SOLO, DUO AND SQUAD:
+	 *
+	 *      0: teammate   1: THE PLAYER   2: teammate   3: teammate
+	 *
+	 *  The player never moves between modes - MainSlot is their spot whether they stand alone or in a
+	 *  full squad, so switching mode only shows or hides the other three. The player also stands a
+	 *  little FORWARD of the rest, and the other three sit at slightly different depths and yaws, so
+	 *  the group reads as a photo rather than as four figures on a rail.
+	 *
+	 *  The numbers: the lobby camera is 380 cm out at 70 degrees horizontal FOV, so the visible
+	 *  half-width at the line-up is 380 * tan(35) = 266 cm. 77 cm of lateral spacing puts the four
+	 *  spots between roughly 29 % and 70 % across the screen - clear of the menu column and the
+	 *  weekend board on the left, and of the ONLINE strip, the mode chips and START on the right. */
+	constexpr int32 NumSlots = 4;
+	constexpr int32 MainSlot = 1;
+	const FSlotPose& SlotPose(int32 SlotIndex);
+
+	/** WHICH SLOT EACH MEMBER TAKES: the player, then the near RIGHT, then the left, then the far
+	 *  right - { 1, 2, 0, 3 }. Right before left on purpose: the left of the screen is where the menu
+	 *  column lives, so a Duo pair reads better on the open side. */
+	int32 SlotForMember(int32 MemberIndex);
+
+	/** Where that slot's name plate belongs, as a fraction of the viewport width. Perspective
+	 *  corrected: a figure standing further back is further from the camera, so it sits closer to the
+	 *  middle of the screen than its lateral offset alone would suggest. */
+	float SlotScreenFraction(int32 SlotIndex);
+}
+
 /** One plate in the lobby squad row. */
 struct FCampusPartyMember
 {
@@ -59,16 +106,6 @@ class UCampusParty : public UGameInstanceSubsystem
 public:
 	/** One leader plus three accepted invites. */
 	static constexpr int32 MaxMembers = 4;
-
-	/** How far left (negative) or right (positive) of centre a slot sits, in slot widths. */
-	static float SlotStep(int32 SlotIndex, int32 Capacity)
-	{
-		return float(SlotIndex) - float(FMath::Max(Capacity, 1) - 1) * 0.5f;
-	}
-
-	/** Slot indices in fill order: closest to the centre first, then right, left, right. The
-	 *  leader therefore always stands in the middle, exactly like the Free Fire squad lobby. */
-	static void BuildFillOrder(int32 Capacity, TArray<int32>& OutOrder);
 
 	/** The local player. Replaces any existing leader entry. */
 	void SetLeader(const FString& Name, int32 Level, int32 Rank = 0);

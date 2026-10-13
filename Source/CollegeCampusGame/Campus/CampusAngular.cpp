@@ -1,4 +1,4 @@
-#include "Campus/CampusAngular.h"
+﻿#include "Campus/CampusAngular.h"
 
 #include <initializer_list>
 
@@ -589,7 +589,10 @@ int32 SCampusAngularButton::OnPaint(const FPaintArgs& Args, const FGeometry& All
 	const bool bPressed = Inner.IsValid() && Inner->IsPressed();
 	const bool bHovered = Inner.IsValid() && Inner->IsHovered();
 
-	FLinearColor Face = Fill;
+	// Resolved once per paint: the state maths below reads the base fill several times.
+	const FLinearColor BaseFill = Fill.Get(CampusAngular::Ink);
+	const FLinearColor BaseBorder = Border.Get(CampusAngular::Hairline);
+	FLinearColor Face = BaseFill;
 	if (!bEnabled)
 	{
 		// Desaturate rather than just fade, so a disabled accent plate never reads as "tappable".
@@ -603,12 +606,12 @@ int32 SCampusAngularButton::OnPaint(const FPaintArgs& Args, const FGeometry& All
 		// the fill additively as well, and nudges the alpha - that delta is visible on a 3 % row AND
 		// on a solid accent button, which is the whole point of having one primitive.
 		Face = Face * FLinearColor(0.80f, 0.80f, 0.80f, 1.f) - FLinearColor(0.02f, 0.02f, 0.02f, 0.f);
-		Face.A = FMath::Clamp(Fill.A + 0.10f, 0.f, 1.f);
+		Face.A = FMath::Clamp(BaseFill.A + 0.10f, 0.f, 1.f);
 	}
 	else if (bHovered)
 	{
 		Face = Face * FLinearColor(1.12f, 1.12f, 1.12f, 1.f) + FLinearColor(0.05f, 0.05f, 0.06f, 0.f);
-		Face.A = FMath::Clamp(Fill.A + 0.07f, 0.f, 1.f);
+		Face.A = FMath::Clamp(BaseFill.A + 0.07f, 0.f, 1.f);
 	}
 	Face.R = FMath::Max(Face.R, 0.f);
 	Face.G = FMath::Max(Face.G, 0.f);
@@ -616,11 +619,11 @@ int32 SCampusAngularButton::OnPaint(const FPaintArgs& Args, const FGeometry& All
 
 	const FVector2f Size = AllottedGeometry.GetLocalSize();
 	CampusAngular::DrawSlantedPanel(OutDrawElements, LayerId, AllottedGeometry, FVector2f::ZeroVector, Size, Shape,
-		Face, bEnabled ? Border : Border.CopyWithNewOpacity(Border.A * 0.4f), BorderWidth);
+		Face, bEnabled ? BaseBorder : BaseBorder.CopyWithNewOpacity(BaseBorder.A * 0.4f), BorderWidth);
 	if (AccentEdgeWidth > 0.f)
 	{
 		CampusAngular::DrawAccentEdge(OutDrawElements, LayerId + 2, AllottedGeometry, FVector2f::ZeroVector, Size, Shape,
-			AccentEdge, AccentEdgeWidth);
+			AccentEdge.Get(FLinearColor::Transparent), AccentEdgeWidth);
 	}
 	// Keyboard / gamepad focus must stay visible: a bright outline on the same shape.
 	if (bEnabled && Inner.IsValid() && Inner->HasKeyboardFocus())

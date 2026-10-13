@@ -207,10 +207,12 @@ public:
 		, _ContentPadding(FMargin(0.f))
 		{}
 		SLATE_ARGUMENT(FCampusShape, Shape)
-		SLATE_ARGUMENT(FLinearColor, Fill)
-		SLATE_ARGUMENT(FLinearColor, Border)
+		// ATTRIBUTES, not plain values: a selected / unselected plate - a mode chip, a tab - restyles
+		// itself from a lambda instead of being torn down and built again just to change colour.
+		SLATE_ATTRIBUTE(FLinearColor, Fill)
+		SLATE_ATTRIBUTE(FLinearColor, Border)
 		SLATE_ARGUMENT(float, BorderWidth)
-		SLATE_ARGUMENT(FLinearColor, AccentEdge)
+		SLATE_ATTRIBUTE(FLinearColor, AccentEdge)
 		SLATE_ARGUMENT(float, AccentEdgeWidth)
 		SLATE_ARGUMENT(FMargin, ContentPadding)
 		SLATE_EVENT(FOnClicked, OnClicked)
@@ -224,9 +226,9 @@ public:
 
 private:
 	FCampusShape Shape;
-	FLinearColor Fill = CampusAngular::Ink;
-	FLinearColor Border = CampusAngular::Hairline;
-	FLinearColor AccentEdge = FLinearColor::Transparent;
+	TAttribute<FLinearColor> Fill;
+	TAttribute<FLinearColor> Border;
+	TAttribute<FLinearColor> AccentEdge;
 	float BorderWidth = 1.f;
 	float AccentEdgeWidth = 0.f;
 	TSharedPtr<SButton> Inner;

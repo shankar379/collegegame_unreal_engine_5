@@ -147,14 +147,20 @@ namespace CampusStyle
 			];
 	}
 
-	TSharedRef<SWidget> Pill(const FText& Label, bool bSelected, FOnClicked OnClicked, FVector2D MinSize)
+	TSharedRef<SWidget> SelectablePill(const FText& Label, TAttribute<bool> Selected, FOnClicked OnClicked, FVector2D MinSize)
 	{
 		return SNew(SBox).MinDesiredWidth(MinSize.X).MinDesiredHeight(MinSize.Y)
 			[
 				SNew(SCampusAngularButton)
 				.Shape(FCampusShape::Slanted(MinSize.Y * 0.3f))
-				.Fill(bSelected ? CampusAngular::Accent : FLinearColor(0.04f, 0.05f, 0.07f, 0.85f))
-				.Border(bSelected ? FLinearColor::Transparent : CampusAngular::Hairline)
+				.Fill_Lambda([Selected]()
+				{
+					return Selected.Get(false) ? CampusAngular::Accent : FLinearColor(0.04f, 0.05f, 0.07f, 0.85f);
+				})
+				.Border_Lambda([Selected]()
+				{
+					return Selected.Get(false) ? FLinearColor::Transparent : CampusAngular::Hairline;
+				})
 				.BorderWidth(1.f)
 				.ContentPadding(FMargin(14.f, 4.f))
 				.OnClicked(OnClicked)
@@ -162,9 +168,17 @@ namespace CampusStyle
 					SNew(STextBlock)
 					.Text(Label)
 					.Font(CampusAngular::Display(FMath::Max(14, FMath::RoundToInt(MinSize.Y * 0.38f))))
-					.ColorAndOpacity(bSelected ? FLinearColor(0.06f, 0.05f, 0.02f, 1.f) : FLinearColor(1.f, 1.f, 1.f, 0.92f))
+					.ColorAndOpacity_Lambda([Selected]()
+					{
+						return FSlateColor(Selected.Get(false) ? FLinearColor(0.06f, 0.05f, 0.02f, 1.f) : FLinearColor(1.f, 1.f, 1.f, 0.92f));
+					})
 				]
 			];
+	}
+
+	TSharedRef<SWidget> Pill(const FText& Label, bool bSelected, FOnClicked OnClicked, FVector2D MinSize)
+	{
+		return SelectablePill(Label, bSelected, OnClicked, MinSize);
 	}
 
 	TSharedRef<SWidget> IconButton(CampusAngular::EGlyph Glyph, FOnClicked OnClicked, float Size, FLinearColor Tint, bool bAccentFill)

@@ -1,4 +1,4 @@
-#include "Campus/CampusPlayerControllers.h"
+﻿#include "Campus/CampusPlayerControllers.h"
 
 #include "Animation/SkeletalMeshActor.h"
 #include "Camera/CameraActor.h"
@@ -47,18 +47,21 @@ namespace
 
 namespace CampusLobbyScene
 {
-	/** Where the squad stands, in cm either side of the lobby centre, per slot step.
-	 *
-	 *  This has to agree with the lobby UI's SquadSlotFraction (0.16 of the viewport width) or a
-	 *  name plate would drift off its character. The camera sits 380 cm in front of the line-up at
-	 *  70 degrees horizontal FOV, so the visible half-width at that distance is
-	 *      380 * tan(35 deg) = 266 cm  ==  half the screen,
-	 *  and one slot step of 0.16 screen widths is 0.16 * 2 * 266 = 85 cm.
-	 *  The camera looks along -X, so its right vector is -Y: a slot to the player's right is -Y. */
-	constexpr float SlotSpacing = 85.f;
+	/** WHERE THE LINE-UP STANDS now lives in one place, CampusLineUp::SlotPose, because the 3D figures
+	 *  and their name plates both have to read it or a plate drifts off its character. The camera
+	 *  numbers below have to agree with that table (380 cm out, 70 degrees horizontal FOV). */
 
 	/** The character mesh; every squad member uses it until there is per-player character art. */
 	const TCHAR* MeshPath = TEXT("/Game/CampusCharacter/SKM_CampusMannequin.SKM_CampusMannequin");
+
+	/** How long after a rebuild the line-up keeps re-checking its own footing.
+	 *
+	 *  A figure placed on the frame it was spawned is measured in its REFERENCE pose - the only pose
+	 *  it has. A frame later the anim graph has evaluated A_Idle and the real pose may sit higher or
+	 *  lower, and nothing used to come back and correct it. Teammates got away with it because adding
+	 *  or dropping one fires another rebuild; the player standing ALONE in Solo never got a second
+	 *  rebuild, so the ref-pose answer was the one that stuck and only Solo floated. */
+	constexpr float RegroundWindow = 0.3f;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -67,6 +70,8 @@ namespace CampusLobbyScene
 ACampusLobbyPlayerController::ACampusLobbyPlayerController()
 {
 	bShowMouseCursor = true;
+	// The line-up re-checks its footing for a moment after every rebuild; see RegroundWindow.
+	PrimaryActorTick.bCanEverTick = true;
 }
 
 UCampusGameInstance* ACampusLobbyPlayerController::GetCampusInstance() const
@@ -181,21 +186,29 @@ float ACampusLobbyPlayerController::GroundAt(const FVector& Where) const
 			Params.AddIgnoredActor(Member);
 		}
 	}
-	if (World->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic, Params))
+	// BY OBJECT TYPE, not by channel. A channel trace returns anything that BLOCKS WorldStatic - a
+	// character capsule included, since the Pawn profile blocks it - so a figure standing at the spot
+	// being measured could be mistaken for the ground under it. Only world geometry is floor.
+	if (World->LineTraceSingleByObjectType(Hit, Start, End, FCollisionObjectQueryParams(ECC_WorldStatic), Params))
 	{
 		return Hit.ImpactPoint.Z;
 	}
 	return FloorPlaneZ;
 }
 
-void ACampusLobbyPlayerController::PlaceMember(ASkeletalMeshActor* Actor, float Y) const
+void ACampusLobbyPlayerController::PlaceMember(ASkeletalMeshActor* Actor, int32 SlotIndex) const
 {
 	if (!Actor)
 	{
 		return;
 	}
-	const float Ground = GroundAt(FVector(0.f, Y, 0.f));
-	Actor->SetActorLocation(FVector(0.f, Y, Ground), false, nullptr, ETeleportType::TeleportPhysics);
+	const CampusLineUp::FSlotPose& Pose = CampusLineUp::SlotPose(SlotIndex);
+	// The camera looks down -X, so ITS right is -Y: a figure to the player's right on screen is -Y.
+	// Depth is towards the camera, which is +X.
+	const float X = Pose.DepthCm;
+	const float Y = -Pose.LateralCm;
+	const float Ground = GroundAt(FVector(X, Y, 0.f));
+	Actor->SetActorLocation(FVector(X, Y, Ground), false, nullptr, ETeleportType::TeleportPhysics);
 
 	// THEN PLANT THE FEET. Putting the actor's origin on the floor only stands the figure up if the
 	// asset's origin is exactly at the soles - the gameplay character does not assume that either, it
@@ -208,14 +221,45 @@ void ACampusLobbyPlayerController::PlaceMember(ASkeletalMeshActor* Actor, float 
 		return;
 	}
 	// CalcBounds rather than the cached Bounds: it answers for the pose the component holds right now,
-	// including on the frame the actor was spawned, and it is the same call the renderer uses.
+	// and it is the same call the renderer uses. On the frame the actor is spawned that is only the
+	// REFERENCE pose - which is why RebuildSquad keeps re-grounding for a moment afterwards.
 	const FBoxSphereBounds Posed = Component->CalcBounds(Component->GetComponentTransform());
 	const float SoleZ = float(Posed.Origin.Z - Posed.BoxExtent.Z);
 	const float Lift = Ground - SoleZ;
 	// Half a centimetre of slop is below anything the lobby camera can show; only correct a real gap.
 	if (!FMath::IsNearlyZero(Lift, 0.5f))
 	{
-		Actor->SetActorLocation(FVector(0.f, Y, Ground + Lift), false, nullptr, ETeleportType::TeleportPhysics);
+		Actor->SetActorLocation(FVector(X, Y, Ground + Lift), false, nullptr, ETeleportType::TeleportPhysics);
+	}
+}
+
+void ACampusLobbyPlayerController::GroundLineUp() const
+{
+	// Every visible figure, re-measured where it stands. Cheap: at most four traces and four bounds.
+	for (int32 Index = 0; Index < Squad.Num(); ++Index)
+	{
+		ASkeletalMeshActor* Actor = Squad[Index];
+		if (Actor && !Actor->IsHidden())
+		{
+			PlaceMember(Actor, bProfileFocus ? CampusLineUp::MainSlot : CampusLineUp::SlotForMember(Index));
+		}
+	}
+}
+
+void ACampusLobbyPlayerController::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	if (RegroundTime < 0.f)
+	{
+		return;
+	}
+	// The window closes on its own; inside it the dead-band in PlaceMember means the figures only
+	// actually move on the frame the real pose first disagrees with the reference pose.
+	RegroundTime += DeltaSeconds;
+	GroundLineUp();
+	if (RegroundTime >= CampusLobbyScene::RegroundWindow)
+	{
+		RegroundTime = -1.f;
 	}
 }
 
@@ -235,9 +279,6 @@ void ACampusLobbyPlayerController::RebuildSquad()
 	}
 	const int32 Capacity = Party->GetCapacity();
 	const TArray<FCampusPartyMember>& Members = Party->GetMembers();
-
-	TArray<int32> Order;
-	UCampusParty::BuildFillOrder(Capacity, Order);
 
 	USkeletalMesh* Mesh = LoadObject<USkeletalMesh>(nullptr, CampusLobbyScene::MeshPath);
 	FActorSpawnParameters Params;
@@ -279,16 +320,21 @@ void ACampusLobbyPlayerController::RebuildSquad()
 			Component->SetAnimInstanceClass(UCampusAnimInstance::StaticClass());
 			Squad[Index] = Actor;
 		}
-		const int32 Slot = Order.IsValidIndex(Index) ? Order[Index] : Index;
-		const float Y = -UCampusParty::SlotStep(Slot, Capacity) * CampusLobbyScene::SlotSpacing;
+		// MEMBER 0 IS ALWAYS THE LOCAL PLAYER AND ALWAYS LANDS ON MainSlot, so changing the squad size
+		// only shows or hides the other three - it never shuffles the player sideways.
+		const int32 Slot = CampusLineUp::SlotForMember(Index);
 		Actor->SetActorHiddenInGame(false);
-		// Everyone keeps the yaw the player dragged to, so the line-up turns as one. Set BEFORE the
+		// Everyone keeps the yaw the player dragged to, plus their own slot's turn-in. Set BEFORE the
 		// placement, because the placement measures the figure where it is actually standing.
-		Actor->SetActorRotation(FRotator(0.f, DisplayYaw, 0.f));
+		Actor->SetActorRotation(FRotator(0.f, DisplayYaw + CampusLineUp::SlotPose(Slot).YawDeg, 0.f));
 		// One trace PER SLOT, every rebuild. A mode change moves every figure, so every figure is
 		// re-grounded; nothing is carried over from a height measured somewhere else, earlier.
-		PlaceMember(Actor, Y);
+		PlaceMember(Actor, Slot);
 	}
+
+	// Open the re-grounding window: the figures just spawned or just moved are measured in whatever
+	// pose they hold on THIS frame, which for a newly spawned one is only the reference pose.
+	RegroundTime = 0.f;
 }
 
 void ACampusLobbyPlayerController::BeginPlay()
@@ -376,11 +422,14 @@ void ACampusLobbyPlayerController::EndPlay(const EEndPlayReason::Type EndPlayRea
 void ACampusLobbyPlayerController::RotateDisplay(float DeltaYaw)
 {
 	DisplayYaw = FRotator::NormalizeAxis(DisplayYaw + DeltaYaw);
-	for (ASkeletalMeshActor* Member : Squad)
+	for (int32 Index = 0; Index < Squad.Num(); ++Index)
 	{
-		if (Member)
+		if (ASkeletalMeshActor* Member = Squad[Index])
 		{
-			Member->SetActorRotation(FRotator(0.f, DisplayYaw, 0.f));
+			// The whole line-up turns as one, but each figure keeps its own turn-in, or dragging would
+			// flatten the group back into a rigid row.
+			const int32 Slot = bProfileFocus ? CampusLineUp::MainSlot : CampusLineUp::SlotForMember(Index);
+			Member->SetActorRotation(FRotator(0.f, DisplayYaw + CampusLineUp::SlotPose(Slot).YawDeg, 0.f));
 		}
 	}
 }
@@ -410,19 +459,25 @@ void ACampusLobbyPlayerController::FocusProfile(bool bOn)
 		}
 		if (Squad.IsValidIndex(0) && Squad[0])
 		{
-			// One figure, standing at the lobby centre whatever squad slot it was in - and grounded by
-			// the same path the line-up uses, so the profile page cannot float on its own.
-			PlaceMember(Squad[0], 0.f);
+			// The player does not move for their own profile page either: they stay on MainSlot and the
+			// camera comes to them. Grounded by the same path the line-up uses.
+			PlaceMember(Squad[0], CampusLineUp::MainSlot);
+			RegroundTime = 0.f;
 		}
 		if (!ProfileCamera)
 		{
-			// Derived from the numbers already in BeginPlay: the camera is 380 cm out at 70 degrees
-			// horizontal FOV, so the visible half-width there is 380 * tan(35) = 266 cm. Moving the
-			// camera half a half-width along its right vector (which is -Y, since it looks down -X)
-			// puts the figure at about 25 % across the screen and leaves the right half for the panel.
+			// The player stays on MainSlot, so this camera has to come to THEM - it can no longer
+			// assume the figure is standing at the lobby centre. Measured at the figure's own depth:
+			// the visible half-width at distance d is d * tan(35), and sliding the camera a quarter of
+			// a screen width along its right vector (which is -Y, since it looks down -X) puts the
+			// figure about 25 % across and leaves the right half of the screen for the panel.
+			const CampusLineUp::FSlotPose& Main = CampusLineUp::SlotPose(CampusLineUp::MainSlot);
+			const float Distance = 380.f - Main.DepthCm;
+			const float Shift = 0.25f * 2.f * Distance * 0.70021f;
 			FActorSpawnParameters Params;
 			Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-			ProfileCamera = World->SpawnActor<ACameraActor>(FVector(380.f, -133.f, 135.f), FRotator(-6.f, 180.f, 0.f), Params);
+			ProfileCamera = World->SpawnActor<ACameraActor>(FVector(380.f, -Main.LateralCm - Shift, 135.f),
+				FRotator(-6.f, 180.f, 0.f), Params);
 			if (ProfileCamera)
 			{
 				ProfileCamera->GetCameraComponent()->SetConstraintAspectRatio(false);

@@ -4,23 +4,48 @@
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/PlayerState.h"
 
-void UCampusParty::BuildFillOrder(int32 Capacity, TArray<int32>& OutOrder)
+namespace CampusLineUp
 {
-	const int32 Count = FMath::Clamp(Capacity, 1, MaxMembers);
-	OutOrder.Reset(Count);
-	// Walk outwards from the middle, right side first: 4 slots -> 1, 2, 0, 3.
-	const int32 Middle = (Count - 1) / 2;
-	OutOrder.Add(Middle);
-	for (int32 Step = 1; OutOrder.Num() < Count; ++Step)
+	/** The lobby camera: 380 cm out, 70 degrees horizontal FOV. Shared with the lobby controller, which
+	 *  spawns that camera, and with the plate row, which has to land under the right figure. */
+	constexpr float CameraDistanceCm = 380.f;
+	/** tan(35 deg): half the horizontal FOV. Visible half-width at distance d is d * this. */
+	constexpr float HalfFovTan = 0.70021f;
+	/** 77 cm apart. Wide enough that nobody overlaps, tight enough that four fit between the menu
+	 *  column and the START button. */
+	constexpr float SpacingCm = 77.f;
+
+	const FSlotPose& SlotPose(int32 SlotIndex)
 	{
-		if (Middle + Step < Count)
-		{
-			OutOrder.Add(Middle + Step);
-		}
-		if (OutOrder.Num() < Count && Middle - Step >= 0)
-		{
-			OutOrder.Add(Middle - Step);
-		}
+		// Laterals are centred on the GROUP, which leaves the player half a step left of the screen
+		// centre - exactly the "centre or slightly left of centre" the line-up is drawn around.
+		static const FSlotPose Poses[NumSlots] = {
+			// 0: the one teammate on the player's left, well back, turned in towards the group.
+			{ -1.5f * SpacingCm, -18.f,  6.f },
+			// 1: THE PLAYER. Forward of everyone and square to the camera. Never moves.
+			{ -0.5f * SpacingCm,  22.f,  0.f },
+			// 2: first teammate to the player's right.
+			{  0.5f * SpacingCm, -14.f, -5.f },
+			// 3: second teammate to the player's right, the furthest back of the four.
+			{  1.5f * SpacingCm, -26.f, -9.f },
+		};
+		return Poses[FMath::Clamp(SlotIndex, 0, NumSlots - 1)];
+	}
+
+	int32 SlotForMember(int32 MemberIndex)
+	{
+		// Member 0 is always the local player, so it always lands on MainSlot.
+		static const int32 Order[NumSlots] = { MainSlot, 2, 0, 3 };
+		return Order[FMath::Clamp(MemberIndex, 0, NumSlots - 1)];
+	}
+
+	float SlotScreenFraction(int32 SlotIndex)
+	{
+		const FSlotPose& Pose = SlotPose(SlotIndex);
+		// How far the camera is from THIS figure, not from the centre of the row: a figure standing
+		// further back is further away, so the same lateral offset covers fewer pixels.
+		const float Distance = FMath::Max(50.f, CameraDistanceCm - Pose.DepthCm);
+		return 0.5f + Pose.LateralCm / (2.f * Distance * HalfFovTan);
 	}
 }
 

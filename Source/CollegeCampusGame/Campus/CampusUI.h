@@ -59,6 +59,12 @@ namespace CampusStyle
 	/** Small slanted selector pill (team size, map, rounds, store tabs). */
 	TSharedRef<SWidget> Pill(const FText& Label, bool bSelected, FOnClicked OnClicked, FVector2D MinSize = FVector2D(140.f, 48.f));
 
+	/** The same pill, but its SELECTED look is an attribute. Tapping one chip in a row restyles every
+	 *  chip in that row through its own lambda - no widget is torn down, so a row of mode chips can
+	 *  change which one is lit without the lobby rebuilding anything around it. */
+	TSharedRef<SWidget> SelectablePill(const FText& Label, TAttribute<bool> Selected, FOnClicked OnClicked,
+		FVector2D MinSize = FVector2D(140.f, 48.f));
+
 	/** Square clipped-corner icon button: friends, mail, settings gear, close. */
 	TSharedRef<SWidget> IconButton(CampusAngular::EGlyph Glyph, FOnClicked OnClicked, float Size = 60.f,
 		FLinearColor Tint = FLinearColor::White, bool bAccentFill = false);
@@ -306,7 +312,11 @@ private:
 	TSharedRef<SWidget> BuildSquadRow();
 	TSharedRef<SWidget> BuildNamePlate(const FCampusPartyMember& Member);
 	TSharedRef<SWidget> BuildInvitePlate();
+	/** The SOLO / DUO / SQUAD chips alone. The map plate below them is its own region. */
 	TSharedRef<SWidget> BuildModeSelect();
+	/** The squad size the chips should show: the server party's when there is one, else the local
+	 *  choice. Read through a lambda by the chips, so changing it restyles rather than rebuilds. */
+	int32 ShownTeamSize() const;
 	/** START, or "WAITING FOR ARJUN" when somebody else leads: a member cannot start their own room
 	 *  out from under the squad. */
 	TSharedRef<SWidget> BuildStartButton();
@@ -464,12 +474,21 @@ private:
 	TSharedPtr<SBox> SquadRowBox;
 	TSharedPtr<SBox> PartyBarBox;
 	TSharedPtr<SBox> ModeSelectBox;
+	TSharedPtr<SBox> ModePlateBox;
 	TSharedPtr<SBox> StartBox;
-	/** Fingerprints of the data behind the regions that an interaction must NEVER disturb. */
+	/** EVERY region is fingerprinted. A repaint re-fills only the regions whose own data moved, so a
+	 *  SOLO / DUO / SQUAD tap leaves the menu column, the map plate, START and the ONLINE strip alone -
+	 *  and the chips themselves restyle from a lambda, so even they are not rebuilt. */
 	uint32 TopBarStamp = 0;
 	uint32 MenuColumnStamp = 0;
 	uint32 WeekendStamp = 0;
 	uint32 ClaimBannerStamp = 0;
+	uint32 FriendsStripStamp = 0;
+	uint32 SquadRowStamp = 0;
+	uint32 PartyBarStamp = 0;
+	uint32 ModeSelectStamp = 0;
+	uint32 ModePlateStamp = 0;
+	uint32 StartStamp = 0;
 
 	EScreen Current = EScreen::Splash;
 	EStoreTab StoreTab = EStoreTab::Guns;

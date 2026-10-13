@@ -34,6 +34,10 @@ namespace
 {
 	/** Every roster row is this tall, which is also the tap target. */
 	constexpr float RowHeight = 64.f;
+	/** The lobby's ONLINE strip scrolls past this height instead of growing. Five rows of 52 plus
+	 *  their 4 of spacing: tall enough to be a list, short enough that a full roster can never reach
+	 *  up into the notice stack that owns the top-right corner. */
+	constexpr float StripScrollHeight = 280.f;
 	/** The post-match screen holds this long before CONTINUE is tappable, and auto-continues later. */
 	constexpr float SummaryArmAt = 1.5f;
 	constexpr float SummaryAutoAt = 12.f;
@@ -1131,20 +1135,17 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobbyFriends()
 		return SNew(SBox).WidthOverride(236.f)[Header];
 	}
 
-	TSharedRef<SVerticalBox> Strip = SNew(SVerticalBox)
-		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)[Header];
+	// EVERY friend, not the first six: the old cap simply hid people on a full roster, with nothing on
+	// screen to say so. The rows go in a scroll box below, capped in height.
+	TSharedRef<SVerticalBox> Rows = SNew(SVerticalBox);
 	int32 Shown = 0;
 	for (const FCampusPlayerCard& Card : Friends)
 	{
-		if (Shown >= 6)
-		{
-			break;
-		}
 		++Shown;
 		const FString Who = Card.PlayerId;
 		const bool bInvitable = !Card.IsInMatch() && !Card.bInParty && Card.PendingInviteId.IsEmpty()
 			&& (!Live->HasParty() || (Live->IsPartyLeader() && Live->GetServerParty().HasRoom()));
-		Strip->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 4.f)
+		Rows->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 4.f)
 		[
 			SNew(SBox).HeightOverride(52.f)
 			[
@@ -1215,11 +1216,37 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobbyFriends()
 			]
 		];
 	}
+	TSharedRef<SVerticalBox> Strip = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)[Header];
 	if (Shown == 0)
 	{
 		Strip->AddSlot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
 		[
 			Label(LOCTEXT("StripEmpty", "NO FRIENDS YET"), 13, CampusAngular::TextMuted)
+		];
+	}
+	else
+	{
+		Strip->AddSlot().AutoHeight()
+		[
+			// CAPPED, not fixed: three friends take three rows of space, thirty take the cap and
+			// scroll. MaxDesiredHeight rather than HeightOverride, so a short list leaves no hole.
+			SNew(SBox).MaxDesiredHeight(StripScrollHeight)
+			[
+				// The same bare SScrollBox the friends screen and the invite picker already use, which
+				// is the form that is proven to drag on the phone. No visible bar: there is no room
+				// for one at 236 wide, and on a phone the drag IS the affordance.
+				//
+				// The TAPS still get through. SScrollBox claims a touch in OnPreviewMouseButtonDown
+				// but only keeps it once the finger has travelled past the drag threshold, so a clean
+				// tap reaches the row's own button and the "+" invite beside it exactly as before.
+				SNew(SScrollBox)
+				.ScrollBarVisibility(EVisibility::Collapsed)
+				+ SScrollBox::Slot()
+				[
+					Rows
+				]
+			]
 		];
 	}
 	Strip->AddSlot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)

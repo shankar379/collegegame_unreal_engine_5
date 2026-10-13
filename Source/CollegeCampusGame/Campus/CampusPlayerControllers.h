@@ -68,6 +68,7 @@ public:
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void Tick(float DeltaSeconds) override;
 
 private:
 	/** Drops the podium cylinder that ships in L_Lobby so the squad stands on the floor. */
@@ -86,9 +87,12 @@ private:
 	 *  nothing to hit and needs an honest answer to fall back on rather than a bare zero. */
 	float ReadFloorHeight() const;
 
-	/** Stands one line-up figure on the floor at Y, with its FEET on the floor - measured from the
-	 *  mesh's own bounds, not from an assumption about where the asset's origin sits. */
-	void PlaceMember(ASkeletalMeshActor* Actor, float Y) const;
+	/** Stands one figure on its slot (UCampusParty::SlotPose) with its FEET on the floor - measured
+	 *  from the mesh's own bounds, not from an assumption about where the asset's origin sits. */
+	void PlaceMember(ASkeletalMeshActor* Actor, int32 SlotIndex) const;
+
+	/** Re-measures every visible figure where it stands. */
+	void GroundLineUp() const;
 
 	/** Keeps the yaw the player dragged to when the line-up is rebuilt. */
 	float DisplayYaw = 0.f;
@@ -98,6 +102,10 @@ private:
 	TArray<TObjectPtr<ASkeletalMeshActor>> Squad;
 	/** The level's floor height; GroundAt's fallback. Read after the podium is gone. */
 	float FloorPlaneZ = 0.f;
+	/** Seconds since the last rebuild while the line-up keeps re-checking its footing, or -1 when the
+	 *  window is shut. A figure placed on its spawn frame only has its reference pose to be measured
+	 *  in; this is what comes back once the real pose exists. */
+	float RegroundTime = -1.f;
 
 	UPROPERTY(Transient)
 	TObjectPtr<ACameraActor> PodiumCamera;
