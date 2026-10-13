@@ -1199,8 +1199,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildAvatarPresetTile(int32 Index)
 		return SNullWidget::NullWidget;
 	}
 	const CampusAvatar::FPreset& Preset = All[Index];
-	const FString Current = OptimisticPresetId.IsEmpty() ? CampusAvatar::PresetIdOf(MyAvatarUrl()) : OptimisticPresetId;
-	const bool bSelected = !Current.IsEmpty() && Current == Preset.Id;
+	const FString Worn = OptimisticPresetId.IsEmpty() ? CampusAvatar::PresetIdOf(MyAvatarUrl()) : OptimisticPresetId;
+	const bool bSelected = !Worn.IsEmpty() && Worn == Preset.Id;
 	const FString Id = Preset.Id;
 
 	return SNew(SBox).WidthOverride(78.f).HeightOverride(78.f)
