@@ -21,6 +21,8 @@ public:
 
 	/** Lobby map, used for "back to lobby" and as the fallback after a failed join. */
 	static const TCHAR* LobbyMap;
+	/** The DEFAULT match level (the college room). Which level a room actually opens is the chosen
+	 *  map's (CampusCatalog::FMapEntry::Level); this is where that falls back to. */
 	static const TCHAR* MatchMap;
 
 	bool bSignedIn = false;

@@ -94,12 +94,15 @@ void SCampusTouchControls::LoadIcons()
 			IconBrushes.Add(FName(Name), Brush);
 		}
 	}
-	// THE VALLEY MAP PICTURE, warmed here with the icons rather than on the first paint of the minimap.
+	// THE RUNTIME MAP PICTURES, warmed here with the icons rather than on the first paint of the minimap.
 	// It is not a cooked texture: it is a 1024 px PNG under Content/CampusUI/MapArt that CampusMapArt
 	// decodes at runtime (MapPicture explains why), and decoding it costs a frame. Doing that here means
 	// the cost lands while the HUD is being built, not on the frame a player first glances at the map
 	// mid-fight. The call is also the cache fill: MapPicture only ever reads it back.
+	// Both of them, and not just the one this level needs: the widget is built before the level's own
+	// square has been asked for, and a missing PNG costs a cache miss and nothing else.
 	CampusMapArt::Get(TEXT("minimap_valley"));
+	CampusMapArt::Get(TEXT("minimap_campusmap"));
 }
 
 const FSlateBrush* SCampusTouchControls::Icon(FName Name) const
@@ -1622,7 +1625,8 @@ namespace CampusMapArea
 	/** HOW MUCH OF THE MAP THE MINIMAP SHOWS, in metres across. Big enough to plan a rotation with,
 	 *  small enough that walking reads as movement: at 800 m across a ~330 px minimap a sprint moves the
 	 *  player's dot under two pixels a second, which is why it looked frozen. The full-screen map still
-	 *  shows the whole square, and so does any map smaller than this (the 227 m college room). */
+	 *  shows the whole square, and so does any map smaller than this (the 227 m college room and the
+	 *  167 m Campus Grounds). */
 	constexpr double MinimapMetres = 260.0;
 
 	/** Liang-Barsky against the unit square, in the DRAWN map's own 0..1 (FMapView::Of) - the whole play
@@ -1685,11 +1689,36 @@ namespace CampusMapArea
 		{ TEXT("Water Tower"), 4600.f, -4600.f },
 	};
 
+	/** L_CampusMap (Campus Grounds): the labels and cm positions of campusmap_facts.md §2, which are
+	 *  the web map's own (src/world/campusmap/layout.js PLACES) through the transform
+	 *  CampusBRMap::CampusGrounds spells out. Left in the form the picture can be checked against -
+	 *  (image pixel - CENTER) * PX * 100, with CENTER = [700, 560] and PX = 0.15 m. */
+	const FPlace CampusGroundsPlaces[] = {
+		{ TEXT("Science Block"), (345.f - 700.f) * 15.f, (218.f - 560.f) * 15.f },
+		{ TEXT("Library"), (657.f - 700.f) * 15.f, (198.f - 560.f) * 15.f },
+		{ TEXT("Admin Block"), (965.f - 700.f) * 15.f, (198.f - 560.f) * 15.f },
+		{ TEXT("Classroom Block"), (296.f - 700.f) * 15.f, (487.f - 560.f) * 15.f },
+		{ TEXT("Courtyard"), (658.f - 700.f) * 15.f, (510.f - 560.f) * 15.f },
+		{ TEXT("Canteen"), (1012.f - 700.f) * 15.f, (487.f - 560.f) * 15.f },
+		{ TEXT("Parking"), (153.f - 700.f) * 15.f, (755.f - 560.f) * 15.f },
+		{ TEXT("Hostel A"), (386.f - 700.f) * 15.f, (765.f - 560.f) * 15.f },
+		{ TEXT("Hostel B"), (914.f - 700.f) * 15.f, (765.f - 560.f) * 15.f },
+		{ TEXT("Sports Ground"), (1270.f - 700.f) * 15.f, (700.f - 560.f) * 15.f },
+		{ TEXT("Main Gate"), (665.f - 700.f) * 15.f, (935.f - 560.f) * 15.f },
+	};
+
 	TArrayView<const FPlace> PlacesFor(const UWorld* World)
 	{
-		return World && CampusBRMap::For(World).bValley
-			? MakeArrayView(ValleyPlaces, int32(UE_ARRAY_COUNT(ValleyPlaces)))
-			: MakeArrayView(CollegePlaces, int32(UE_ARRAY_COUNT(CollegePlaces)));
+		switch (World ? CampusBRMap::For(World).Level : CampusBRMap::ELevel::College)
+		{
+		case CampusBRMap::ELevel::Valley:
+			return MakeArrayView(ValleyPlaces, int32(UE_ARRAY_COUNT(ValleyPlaces)));
+		case CampusBRMap::ELevel::CampusGrounds:
+			return MakeArrayView(CampusGroundsPlaces, int32(UE_ARRAY_COUNT(CampusGroundsPlaces)));
+		case CampusBRMap::ELevel::College:
+			break;
+		}
+		return MakeArrayView(CollegePlaces, int32(UE_ARRAY_COUNT(CollegePlaces)));
 	}
 }
 
@@ -1728,9 +1757,16 @@ const FSlateBrush* SCampusTouchControls::MapPicture(const UWorld* World) const
 	// map-select banners (Content/CampusUI/MapArt, staged UFS by DefaultGame.ini) and is decoded at
 	// runtime by CampusMapArt - no .uasset, so no editor and no cook stands between the script and an
 	// Android Shipping build, which is the whole reason it is not a texture asset.
-	if (World && CampusBRMap::For(World).bValley)
+	switch (World ? CampusBRMap::For(World).Level : CampusBRMap::ELevel::College)
 	{
+	case CampusBRMap::ELevel::Valley:
 		return CampusMapArt::Brush(TEXT("minimap_valley"));
+	case CampusBRMap::ELevel::CampusGrounds:
+		// CAMPUS GROUNDS: the same deal as the valley - a 1024 px loose PNG rendered onto exactly the
+		// CampusBRMap::CampusGrounds square. Missing simply paints the flat plate below.
+		return CampusMapArt::Brush(TEXT("minimap_campusmap"));
+	case CampusBRMap::ELevel::College:
+		break;
 	}
 	// The college room (L_Match): T_Icon_campusmap, the cooked UI texture that covers that square.
 	// No world (the controller went away between a tap and this paint) keeps the old behaviour.

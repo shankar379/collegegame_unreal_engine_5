@@ -4,6 +4,7 @@
 #include "Campus/CampusBot.h"
 #include "Campus/CampusCharacter.h"
 #include "Campus/CampusDoor.h"
+#include "Campus/CampusMapArt.h"
 #include "Campus/CampusVehicle.h"
 #include "EngineUtils.h"
 #include "Campus/CampusMatchState.h"
@@ -11,8 +12,98 @@
 #include "Engine/World.h"
 #include "GameFramework/GameSession.h"
 #include "Kismet/GameplayStatics.h"
+#include "GameFramework/PlayerStart.h"
 #include "GameFramework/PlayerState.h"
 #include "TimerManager.h"
+
+/** TEAM CLASH BASE PADS, PER LEVEL. A named namespace and not an anonymous one: unity builds put
+ *  several of these files in one translation unit (see the note in CampusBR.cpp). */
+namespace CampusClashSpawn
+{
+	/** One team's base pad: the middle of it in world cm and the yaw the squad faces. */
+	struct FTeamPad
+	{
+		FVector2D Middle;
+		float Yaw;
+	};
+
+	/** The two pads of ONE LEVEL, resolved from the level's name exactly the way CampusBRMap::For
+	 *  resolves its play square - the host and the clients only ever read the host's answer, but the
+	 *  level is still the one thing that cannot disagree with itself. */
+	struct FLevelPads
+	{
+		const TCHAR* Level;
+		FTeamPad Red;
+		FTeamPad Blue;
+	};
+
+	// L_Match: the team base pads of the three.js game (src/game/game.js TEAM_BASES / BASE_SLOTS),
+	// where the campus sits at origin (15710, 8222.6) and Unreal = (x, z, y) * 100 + that origin -
+	// BLUE on the road outside the main gate (z -143), RED at the open end behind the courtyard (z -15).
+	//
+	// L_CampusMap: the pads of src/world/campusmap/layout.js LOBBIES, through the transform
+	// CampusBRMap::CampusGrounds spells out ((image pixel - CENTER) * PX * 100, CENTER = [700, 560],
+	// PX = 0.15 m) - and with the SAME SIDES the level's own tagged starts use (campusmap_facts.md
+	// §3): RED is TEAM B's pad in the north-east corner looking south, BLUE is TEAM A's pad in the
+	// south lot looking north up the main road. Both `face` points in that file are straight up or
+	// down the map, which is where these two yaws come from, and the pads are 21 m and 27 m across so
+	// a line of four 3 m apart fits inside either one. This table is only the fallback: the level's
+	// starts are preferred (ReadStarts), so the two can never disagree in a shipped build.
+	const FLevelPads LevelPads[] = {
+		{ TEXT("L_Match"),
+			{ FVector2D(15710.f, 8222.6f + -15.f * 100.f), -90.f },
+			{ FVector2D(15710.f, 8222.6f + -143.f * 100.f), 90.f } },
+		{ TEXT("L_CampusMap"),
+			{ FVector2D((975.f - 700.f) * 15.f, (75.f - 560.f) * 15.f), 90.f },
+			{ FVector2D((195.f - 700.f) * 15.f, (975.f - 560.f) * 15.f), -90.f } },
+	};
+
+	/** Four spots 3 m apart across a pad; the fifth player on a team starts a row 2 m further back. */
+	constexpr int32 SlotsPerRow = 4;
+	constexpr float SlotSpacing = 300.f;
+	constexpr float RowDepth = 200.f;
+	/** Standing height for a tabled pad: the lift the college pads have always used (their ground is
+	 *  at Z = 7 cm, and the capsule is dropped onto it). A level with its own starts carries its own Z. */
+	constexpr float PadZ = 110.f;
+
+	const FLevelPads& For(const UWorld* World)
+	{
+		const FString Level = World ? World->GetMapName() : FString();
+		for (const FLevelPads& Each : LevelPads)
+		{
+			if (Level.Contains(Each.Level))
+			{
+				return Each;
+			}
+		}
+		return LevelPads[0]; // the college room: the level this mode has always opened
+	}
+
+	/** THE LEVEL'S OWN PADS, when it has any: the APlayerStart actors it carries tagged Red / Blue.
+	 *  L_CampusMap ships four of each on the two team pads of the web map (campusmap_facts.md §3) and
+	 *  Scripts/varsity_layout.py has always written eight of each into the valley - until now nothing
+	 *  in C++ read either, because this mode's pads were one hardcoded college table.
+	 *
+	 *  Sorted by name, so CM_Start_Red_01 is always slot 0: the line-up must not reshuffle between
+	 *  rounds, and TActorIterator makes no promise about order. Server-side only, like every caller. */
+	void ReadStarts(const UWorld* World, ECampusTeam Team, TArray<const APlayerStart*>& Out)
+	{
+		if (!World)
+		{
+			return;
+		}
+		const FName Tag = Team == ECampusTeam::Red ? FName(TEXT("Red")) : FName(TEXT("Blue"));
+		for (TActorIterator<APlayerStart> It(World); It; ++It)
+		{
+			if (It->PlayerStartTag == Tag)
+			{
+				Out.Add(*It);
+			}
+		}
+		// TArray::Sort dereferences pointer elements for the predicate.
+		Out.Sort([](const APlayerStart& A, const APlayerStart& B) { return A.GetName() < B.GetName(); });
+	}
+}
 
 ACampusLobbyGameMode::ACampusLobbyGameMode()
 {
@@ -59,7 +150,12 @@ void ACampusMatchGameMode::InitGameState()
 		State->RoundMinutes = FMath::Clamp(UGameplayStatics::GetIntOption(OptionsString, TEXT("Minutes"), 5), 3, 10);
 		const FString MapOption = UGameplayStatics::ParseOption(OptionsString, TEXT("Map"));
 		const int32 TeamOption = UGameplayStatics::GetIntOption(OptionsString, TEXT("Team"), 4);
-		State->MatchMap = MapOption == TEXT("RealMap") ? FName(TEXT("RealMap")) : FName(TEXT("Classic"));
+		// "?Map=" carries a CATALOGUE id (CampusCatalog::Maps - "Classic", "CampusMap"), plus the legacy
+		// "RealMap" the API and the battle mode still speak. An id nobody recognises is the college room,
+		// which is the level this mode opens by default.
+		const int32 MapIndex = CampusCatalog::FindMap(FName(MapOption));
+		State->MatchMap = MapOption == TEXT("RealMap") ? FName(TEXT("RealMap"))
+			: (MapIndex != INDEX_NONE ? FName(CampusCatalog::Map(MapIndex).Id) : FName(TEXT("Classic")));
 		State->TeamSize = TeamOption == 1 || TeamOption == 2 ? TeamOption : 4;
 		const bool bRealMap = State->MatchMap == TEXT("RealMap");
 		// 50 does not split into squads of 4: 12 squads = 48.
@@ -231,17 +327,37 @@ FTransform ACampusMatchGameMode::SpawnTransformFor(const ACampusPlayerState* Pla
 			}
 		}
 	}
-	// The team base pads of the three.js game (src/game/game.js TEAM_BASES / BASE_SLOTS), where the campus sits
-	// in L_Match (Unreal = (x, z, y) * 100 + campus origin): BLUE on the road outside the main gate (z -143),
-	// RED at the open end behind the courtyard (z -15), 4 spots 3 m apart across each pad, facing each other.
-	static const FVector CampusOrigin(15710.f, 8222.6f, 0.f);
-	static const float BaseSlots[] = { -450.f, -150.f, 150.f, 450.f };
-	const bool bRed = Team == ECampusTeam::Red;
-	const float BaseY = (bRed ? -15.f : -143.f) * 100.f;
-	// more than 4 on a team: a second row 2 m further from the enemy
-	const float Row = (Slot / 4) * 200.f * (bRed ? 1.f : -1.f);
-	const FVector Location(CampusOrigin.X + BaseSlots[Slot % 4], CampusOrigin.Y + BaseY + Row, 110.f);
-	const FRotator Facing(0.f, bRed ? -90.f : 90.f, 0.f);
+	// THE LEVEL'S OWN STARTS WIN. A generated level ships an APlayerStart per spot, tagged with the
+	// team (L_CampusMap: four Red and four Blue), so the pads can be moved in the level without a line
+	// of C++ changing - and nothing has to agree with a table about an origin. More players on a team
+	// than there are starts wraps round and steps one row back from that start's own facing.
+	TArray<const APlayerStart*> Starts;
+	CampusClashSpawn::ReadStarts(GetWorld(), Team, Starts);
+	if (Starts.Num() > 0)
+	{
+		const APlayerStart* Start = Starts[Slot % Starts.Num()];
+		const FQuat Look = Start->GetActorQuat();
+		const float Back = float(Slot / Starts.Num()) * CampusClashSpawn::RowDepth;
+		return FTransform(Look, Start->GetActorLocation() - Look.GetForwardVector() * Back);
+	}
+
+	// NO TAGGED STARTS (the college room, L_Match): the pad comes from the table instead. The two
+	// campuses do not share an origin and their bases are nothing like each other
+	// (CampusClashSpawn::LevelPads states both). The slot layout is the three.js game's for either of
+	// them - 4 spots 3 m apart across the pad, the two teams facing each other - and it is built off
+	// the pad's own facing, so it needs no per-level axes.
+	const CampusClashSpawn::FLevelPads& Pads = CampusClashSpawn::For(GetWorld());
+	const CampusClashSpawn::FTeamPad& Pad = Team == ECampusTeam::Red ? Pads.Red : Pads.Blue;
+	const FRotator Facing(0.f, Pad.Yaw, 0.f);
+	const FVector Forward = Facing.Vector();
+	// Across the pad is the facing turned a quarter, so slot 0 is always the left-hand end of that
+	// team's own line whichever way the pad points.
+	const FVector Side(-Forward.Y, Forward.X, 0.f);
+	const float Across = (float(Slot % CampusClashSpawn::SlotsPerRow) - (CampusClashSpawn::SlotsPerRow - 1) * 0.5f)
+		* CampusClashSpawn::SlotSpacing;
+	// more than 4 on a team: another row 2 m further from the enemy
+	const float Back = float(Slot / CampusClashSpawn::SlotsPerRow) * CampusClashSpawn::RowDepth;
+	const FVector Location = FVector(Pad.Middle.X, Pad.Middle.Y, CampusClashSpawn::PadZ) + Side * Across - Forward * Back;
 	return FTransform(Facing, Location);
 }
 

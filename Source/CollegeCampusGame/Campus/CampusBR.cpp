@@ -2,6 +2,7 @@
 
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusEOS.h"
+#include "Campus/CampusMapArt.h"
 #include "Campus/CampusNetSettings.h"
 #include "Campus/CampusSocial.h"
 #include "Dom/JsonObject.h"
@@ -89,22 +90,77 @@ namespace
 	}
 }
 
+namespace
+{
+	/** THE API'S OWN NAMES FOR THE MAPS, against the client catalogue's ids. The valley is "real" to the
+	 *  backend and always has been (routes/rooms.js MAPS.real, migration 015's br_matches.map) while the
+	 *  catalogue here calls it "VarsityValley", so one of the two has to translate and this is the file
+	 *  that talks to the API. The backend's list is api/src/lib/battlesession/maps.js - the two are one
+	 *  list in two languages and have to be changed together. */
+	struct FBrMapName
+	{
+		const TCHAR* Api;
+		const TCHAR* Catalog;
+	};
+	const FBrMapName BrMapNames[] = {
+		{ TEXT("real"), TEXT("VarsityValley") },
+		{ TEXT("campus"), TEXT("CampusMap") },
+		{ TEXT("classic"), TEXT("Classic") },
+	};
+}
+
 namespace CampusBR
 {
+	const TCHAR* ApiMapFor(FName CatalogId)
+	{
+		for (const FBrMapName& Each : BrMapNames)
+		{
+			if (CatalogId == FName(Each.Catalog))
+			{
+				return Each.Api;
+			}
+		}
+		// A map the API has no name for (a "coming soon" plate). NOT a default: what to do about it is
+		// the caller's to decide - a battle session falls back to the valley, a 4v4 room to the college.
+		return nullptr;
+	}
+
+	FName CatalogMapFor(const FString& MapId)
+	{
+		// Already a catalogue id (the game state's own field, or a server that speaks our language).
+		if (CampusCatalog::FindMap(FName(MapId)) != INDEX_NONE)
+		{
+			return FName(MapId);
+		}
+		for (const FBrMapName& Each : BrMapNames)
+		{
+			if (MapId.Equals(Each.Api, ESearchCase::IgnoreCase))
+			{
+				return FName(Each.Catalog);
+			}
+		}
+		return NAME_None;
+	}
+
 	const TCHAR* LevelForMap(const FString& MapId)
 	{
-		// The API calls the BR map "real" (its own catalogue name), the client's catalogue id is
-		// "VarsityValley" and the game state replicates it as "RealMap". They all mean the same level,
-		// and so does an empty id - A BATTLE SESSION CAN ONLY BE ON THE BR MAP.
+		// WHAT THE SERVER SENDS IS AN API NAME ("real", "campus"), and the game state replicates the
+		// valley's as "RealMap"; the catalogue here calls the same levels "VarsityValley" and
+		// "CampusMap". An empty id means the valley too - it is where a battle session runs unless the
+		// server names another battle-royale map.
 		//
-		// So the BR map is the DEFAULT and only the room's own map id is spelled out: an id nobody here
-		// recognised used to fall through to L_Match, which opened a fifty-player battle session on the
-		// 4v4 room map.
-		if (MapId.Equals(TEXT("classic"), ESearchCase::IgnoreCase))
-		{
-			return TEXT("/Game/Maps/L_Match");
-		}
-		return TEXT("/Game/Maps/L_VarsityValley");
+		// So the valley is the DEFAULT and only a map that resolves to a catalogue row is spelled out: an
+		// id nobody here recognised used to fall through to L_Match, which opened a fifty-player battle
+		// session on the 4v4 room map. The level itself is CampusCatalog's to state (FMapEntry::Level) -
+		// this function is only the BR default on top of it.
+		const int32 Mode = CampusCatalog::FindMode(FName(TEXT("BattleRoyale")));
+		const FName Catalogued = CatalogMapFor(MapId);
+		// Only a map BATTLE ROYALE actually offers may be opened by this path; "Classic" stays allowed
+		// because a room handle can still name it and the 4v4 level is a real level.
+		const bool bAllowed = !Catalogued.IsNone()
+			&& (Catalogued == FName(TEXT("Classic")) || (Mode != INDEX_NONE && CampusCatalog::ModeHasMap(Mode, Catalogued)));
+		const TCHAR* Level = bAllowed ? CampusCatalog::LevelFor(Catalogued) : nullptr;
+		return Level ? Level : TEXT("/Game/Maps/L_VarsityValley");
 	}
 
 	const TCHAR* ModeForTeamSize(int32 TeamSize)
@@ -237,7 +293,7 @@ int32 UCampusBRQueue::GetCountdown() const
 	return FMath::Max(0, Match.CountdownSeconds - int32(Since));
 }
 
-void UCampusBRQueue::Join(int32 InTeamSize, bool bNightWanted, FDone Done)
+void UCampusBRQueue::Join(int32 InTeamSize, bool bNightWanted, FName MapId, FDone Done)
 {
 	UCampusBackend* Backend = Api();
 	if (!Backend || !Backend->IsSignedIn())
@@ -263,6 +319,10 @@ void UCampusBRQueue::Join(int32 InTeamSize, bool bNightWanted, FDone Done)
 	}
 	TeamSize = FMath::Clamp(InTeamSize, 1, 4);
 	bNight = bNightWanted;
+	// Resolved HERE and not at the request, so a retry and the overlay both read the one answer. A map
+	// the API has no name for queues for the valley - a battle session is always somewhere.
+	const TCHAR* ApiMap = CampusBR::ApiMapFor(MapId);
+	WantedMap = ApiMap ? ApiMap : TEXT("real");
 	Match = FCampusBRMatch();
 	LastError.Reset();
 	EtaSeconds = 0;
@@ -284,9 +344,11 @@ void UCampusBRQueue::Join(int32 InTeamSize, bool bNightWanted, FDone Done)
 		}
 		TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
 		Body->SetStringField(TEXT("mode"), CampusBR::ModeForTeamSize(Self->TeamSize));
-		// One queue per mode x REGION. Sent explicitly rather than left to BS_DEFAULT_REGION, so the
-		// phone and the matchmaker cannot disagree about which queue this team is standing in.
+		// One queue per mode x REGION x MAP. Both sent explicitly rather than left to the server's
+		// defaults, so the phone and the matchmaker cannot disagree about which queue this team is
+		// standing in - and two players who picked different maps are never put in one session.
 		Body->SetStringField(TEXT("region"), BrRegion());
+		Body->SetStringField(TEXT("map"), Self->WantedMap);
 		// The matchmaker needs the puid UP FRONT: if it picks this phone as the host, the session object
 		// it hands every other player has to carry the identity they will dial. Empty = this phone can
 		// play but can never host (the phone allocator needs one reachable listen server).

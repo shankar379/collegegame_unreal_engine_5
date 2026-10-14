@@ -136,9 +136,21 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FCampusBRScored, const FCampusBRResult&);
 
 namespace CampusBR
 {
-	/** Catalog map id -> level to open. Unknown ids fall back to the campus, so a server that names a
-	 *  map this build does not have still starts a match instead of a black screen. */
+	/** Map id -> level to open, taking EITHER language: a catalogue id ("CampusMap") or the API's own
+	 *  name for the same level ("campus"). Anything a battle session cannot be played on falls back to
+	 *  the valley, so a server that names a map this build does not have still starts a match instead of
+	 *  a black screen. */
 	const TCHAR* LevelForMap(const FString& MapId);
+
+	/** The API's name for a catalogue map id ("CampusMap" -> "campus"), for the queue request and for
+	 *  POST /v1/rooms. NULL for a map the API has no name for, which the caller answers for itself: a
+	 *  battle session falls back to the valley and a 4v4 room to the college, and neither may send a
+	 *  name the route would refuse. */
+	const TCHAR* ApiMapFor(FName CatalogId);
+
+	/** The other way: a catalogue id for whatever the server sent ("campus" -> "CampusMap"), or
+	 *  NAME_None for a map this build does not have. A catalogue id passes straight through. */
+	FName CatalogMapFor(const FString& MapId);
 
 	/** 1 -> "solo", 2 -> "duo", anything else -> "squad". The API's three queue names. */
 	const TCHAR* ModeForTeamSize(int32 TeamSize);
@@ -161,9 +173,14 @@ public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
-	/** POST /v1/br/queue. TeamSize is the lobby's 1 / 2 / 4. LEADER ONLY: a member is refused here as
-	 *  well as in the UI, because one ticket is one team and a second ticket would split the squad. */
-	void Join(int32 TeamSize, bool bNightWanted, FDone Done);
+	/** POST /v1/br/queue. TeamSize is the lobby's 1 / 2 / 4, MapId the catalogue map picked on the
+	 *  map-select screen (NAME_None = the valley). LEADER ONLY: a member is refused here as well as in
+	 *  the UI, because one ticket is one team and a second ticket would split the squad.
+	 *
+	 *  THE MAP IS PART OF THE QUEUE, not a preference: the server runs one queue per mode x region x map
+	 *  (api/src/lib/battlesession/maps.js), because a session's host has already opened its level by the
+	 *  time anybody else is placed into it. */
+	void Join(int32 TeamSize, bool bNightWanted, FName MapId, FDone Done);
 	/** DELETE /v1/br/queue. Leaves for the WHOLE TEAM (the ticket is the party). Safe to call when not
 	 *  queued; it just resets. A member only resets locally - the server refuses them by design. */
 	void Leave(FDone Done = nullptr);
@@ -208,6 +225,9 @@ public:
 	/** The queue the player joined, for the overlay's subtitle. */
 	int32 GetTeamSize() const { return TeamSize; }
 	bool WantsNight() const { return bNight; }
+	/** The API map name this ticket is queued on. The overlay prints the SESSION's map once there is
+	 *  one; this is what was asked for while there is not. */
+	const FString& WantedMapId() const { return WantedMap; }
 	/** True when THIS phone runs the listen server for the session we were handed. A dedicated session
 	 *  still names a player as host (the result route authorises on it), so the connect type decides:
 	 *  on AWS nobody opens a listen server and everybody travels to the address. */
@@ -259,6 +279,9 @@ private:
 	FCampusBRMatch Match;
 	int32 TeamSize = 1;
 	bool bNight = false;
+	/** The API's name for the map this ticket is queued on ("real" / "campus"), resolved once in Join
+	 *  from the catalogue id the lobby picked. The valley until a map is asked for. */
+	FString WantedMap = TEXT("real");
 	int32 EtaSeconds = 0;
 	int32 Found = 0;
 	int32 TotalSlots = 50;

@@ -32,6 +32,11 @@ namespace CampusBRZoneTuning
 
 	/** The first circle: the whole map square, less a margin so the edge is reachable on every side. */
 	constexpr float FirstRadiusShare = 0.95f;
+	/** THE SMALLEST A CIRCLE MAY GET, on any map. The table above is shares of the FIRST circle, so the
+	 *  final one is ~10 m of radius on the 800 m valley but would be 2.2 m on the 167 m Campus Grounds -
+	 *  narrower than the clock tower it closes on, which is a coin toss and not a fight. The valley
+	 *  never reaches this floor; the two campus squares stop here. */
+	constexpr float MinRadius = 600.f;
 	/** Damage ticks once a second, like every battle royale: a readable bite, not a trickle. */
 	constexpr float BurnInterval = 1.f;
 
@@ -69,10 +74,21 @@ namespace CampusBRMap
 		/** L_VarsityValley, Scripts/varsity_layout.py: HALF = 40000, the whole 800 m square centred on
 		 *  the world origin. The ONE source of truth is that script; this is its mirror in C++ and the
 		 *  two have to be changed together. */
-		const FSquare Valley = { FVector2D(0.f, 0.f), 80000.f, true };
+		const FSquare Valley = { FVector2D(0.f, 0.f), 80000.f, ELevel::Valley };
 		/** L_Match, the 4v4 college room: the college bounds + 15 m, campus origin (15710, 8222.6).
 		 *  Also the square the T_Icon_campusmap picture covers. */
-		const FSquare College = { FVector2D(-12210.f + 15710.f + 11355.f, -19549.45f + 8222.6f + 11355.f), 22710.f, false };
+		const FSquare College = { FVector2D(-12210.f + 15710.f + 11355.f, -19549.45f + 8222.6f + 11355.f), 22710.f, ELevel::College };
+		/** L_CampusMap (Campus Grounds), from campusmap_facts.md §2 - the level is built ON THE WORLD
+		 *  ORIGIN (no campus shift, unlike L_Match) with the usual rule Unreal = (x, z, y) * 100 off
+		 *  src/world/campusmap/layout.js, where PX = 0.15 m and the image pixel CENTER = [700, 560]
+		 *  IS the origin.
+		 *
+		 *  166.65 m and NOT the 207.75 m of everything built: this is the biggest square that fits the
+		 *  ground slab, so every metre of the play area is standable and the minimap PNG covers exactly
+		 *  it (ToUV is 1:1 with the picture). The slab itself runs x -102.75 .. 105.00 m and
+		 *  y -82.50 .. 84.15 m - a circle sized off that would close over ground the player cannot
+		 *  reach on two sides. */
+		const FSquare CampusGrounds = { FVector2D(112.5f, 82.5f), 16665.f, ELevel::CampusGrounds };
 
 		/** Resolving costs a level-name string compare, and the HUD asks per circle per frame, so the
 		 *  answer is remembered for as long as the level lasts. */
@@ -84,17 +100,30 @@ namespace CampusBRMap
 	{
 		if (!World)
 		{
-			return Valley; // a battle session can only be on the BR map (CampusBR::LevelForMap)
+			return Valley; // the default battle-royale level (CampusBR::LevelForMap)
 		}
 		if (Cached && CachedWorld.Get() == World)
 		{
 			return *Cached;
 		}
 		// The LEVEL, not the game state's MatchMap: the same level name is what the host and every
-		// client have in hand before any replication arrives, so both resolve the same square.
+		// client have in hand before any replication arrives, so both resolve the same square. Named
+		// levels first and the valley as the fallback, so an unknown level still opens a circle over
+		// the map it was built on rather than over nothing.
 		const FString Level = World->GetMapName();
 		CachedWorld = const_cast<UWorld*>(World);
-		Cached = Level.Contains(TEXT("L_Match")) ? &College : &Valley;
+		if (Level.Contains(TEXT("L_Match")))
+		{
+			Cached = &College;
+		}
+		else if (Level.Contains(TEXT("L_CampusMap")))
+		{
+			Cached = &CampusGrounds;
+		}
+		else
+		{
+			Cached = &Valley;
+		}
 		return *Cached;
 	}
 }
@@ -318,16 +347,19 @@ void ACampusBRZone::OpenPhase(int32 Index)
 
 void ACampusBRZone::PickNextCircle(float NewRadius)
 {
+	// Never below the floor, and never wider than the circle we are standing in: a map small enough to
+	// hit MinRadius early simply holds its last circle instead of shrinking past it.
+	const float Wanted = FMath::Min(FMath::Max(NewRadius, CampusBRZoneTuning::MinRadius), RadiusFrom);
 	// The next circle must sit wholly inside this one, else players inside the safe area would be
 	// dropped outside by a shrink they could not have run from.
-	const float Slack = FMath::Max(RadiusFrom - NewRadius, 0.f);
+	const float Slack = FMath::Max(RadiusFrom - Wanted, 0.f);
 	const float Angle = FMath::FRandRange(0.f, 2.f * PI);
 	const float Distance = Slack * FMath::Sqrt(FMath::FRand()); // uniform over the disc, not bunched in the middle
 	CenterTo = FVector_NetQuantize(
 		CenterFrom.X + FMath::Cos(Angle) * Distance,
 		CenterFrom.Y + FMath::Sin(Angle) * Distance,
 		0.f);
-	RadiusTo = NewRadius;
+	RadiusTo = Wanted;
 }
 
 FVector2D ACampusBRZone::GetCenter() const

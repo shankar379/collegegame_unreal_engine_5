@@ -71,8 +71,10 @@ public:
 	UPROPERTY()
 	FString LastDailyClaim;
 
-	/** Map chosen on the map-select screen; the id from CampusCatalog::Maps. "Classic" is the
-	 *  college campus (L_Match) and the only one built, so an older "RealMap" save falls back to it. */
+	/** Map chosen on the map-select screen; the id from CampusCatalog::Maps. "Classic" is the college
+	 *  room (L_Match), the default. A saved id this version does not have - or one the saved MODE does
+	 *  not run on, like an old "RealMap" - is corrected by CampusCatalog::MapForMode when it is read,
+	 *  so nothing here can open the wrong level. */
 	UPROPERTY()
 	FName MatchMap = TEXT("Classic");
 
@@ -80,7 +82,8 @@ public:
 	UPROPERTY()
 	FName MatchMode = TEXT("TeamClash");
 
-	/** "Random map" ticked on the map-select screen. Parked until there is more than one map. */
+	/** "Random map" ticked on the map-select screen. Parked: a mode offers several maps now, but
+	 *  nothing rolls one yet (CampusMapSelect's RandomToggle says why). */
 	UPROPERTY()
 	bool bRandomMap = false;
 

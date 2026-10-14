@@ -15,8 +15,8 @@ class UMaterialInstanceDynamic;
 /** The square the BR play area covers, in Unreal world cm - PER LEVEL.
  *
  *  THIS USED TO BE ONE HARDCODED SQUARE, and it was the L_Match college square: 227 m centred on
- *  (14855, 28). Battle royale does not play there. CampusBR::LevelForMap sends every battle session
- *  to /Game/Maps/L_VarsityValley, which Scripts/varsity_layout.py builds as 800 m x 800 m CENTRED ON
+ *  (14855, 28). Battle royale does not play there. CampusBR::LevelForMap sends a battle session to
+ *  /Game/Maps/L_VarsityValley, which Scripts/varsity_layout.py builds as 800 m x 800 m CENTRED ON
  *  THE WORLD ORIGIN (HALF = 40000). The consequence on a phone was the whole bug report: the first
  *  circle opened 107 m wide over one corner of an 800 m map, so a player standing anywhere else was
  *  genuinely outside it and genuinely burning - while the minimap, which drew that same circle onto
@@ -27,14 +27,17 @@ class UMaterialInstanceDynamic;
  *  maps all read it through here. One square per level, stated once. */
 namespace CampusBRMap
 {
+	/** Which built level a square belongs to. The map picture and the place labels are keyed on this,
+	 *  and nothing else may be: a bool was enough while there were two levels and is a lie now. */
+	enum class ELevel : uint8 { College, CampusGrounds, Valley };
+
 	struct FSquare
 	{
 		/** Middle of the play square in world cm. */
 		FVector2D Middle = FVector2D::ZeroVector;
 		/** Width of the square in cm; the first circle is half of this, less a margin. */
 		float Span = 0.f;
-		/** True on L_VarsityValley (the BR map). False on the college room map. */
-		bool bValley = false;
+		ELevel Level = ELevel::Valley;
 	};
 
 	/** The square of this level. Cheap: resolved once per world and cached. */

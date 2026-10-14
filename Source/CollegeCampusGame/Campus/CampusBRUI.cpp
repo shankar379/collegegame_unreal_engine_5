@@ -116,6 +116,12 @@ void SCampusLobbyWidget::StartBattleRoyale()
 	const int32 Team = bPartyLeader ? Live->GetServerParty().Mode : SelectedTeamSize;
 	const UCampusSave* Save = Profile();
 	const bool bNight = Save && Save->bBrNight;
+	// THE MAP PICKED ON THE MAP-SELECT SCREEN, resolved against this mode so a selection battle royale
+	// does not offer can never cut a ticket for it. It is a queue dimension on the server, not a
+	// preference: two players who chose different maps are never placed in the same session.
+	const int32 MapIndex = CampusCatalog::MapForMode(FName(CampusCatalog::Mode(SelectedMode).Id),
+		FName(CampusCatalog::Map(SelectedMap).Id));
+	const FName MapId(CampusCatalog::Map(MapIndex).Id);
 
 	// A fresh search owes nothing to the last one's travel.
 	BRTravelKey.Reset();
@@ -126,7 +132,7 @@ void SCampusLobbyWidget::StartBattleRoyale()
 	// looks dead for a second is a START the player taps twice. The reply often CARRIES the session, in
 	// which case the queue places us and EnterBRMatch travels before this screen is seen at all.
 	Show(EScreen::Matchmaking);
-	Queue->Join(Team, bNight, [this](bool bOk, const FString& Error)
+	Queue->Join(Team, bNight, MapId, [this](bool bOk, const FString& Error)
 	{
 		if (!bOk)
 		{
@@ -215,7 +221,13 @@ void SCampusLobbyWidget::EnterBRMatch(const FCampusBRMatch& Match)
 TSharedRef<SWidget> SCampusLobbyWidget::BuildMatchmaking()
 {
 	UCampusBRQueue* Queue = BRQueue();
-	const int32 MapIndex = CampusCatalog::FindMap(FName(TEXT("RealMap")));
+	// THE MAP, in the API's language either way: the session's once the server has placed us, and the
+	// one this ticket is queued on until then. Both are names like "real" / "campus", which
+	// CampusBR::LevelForMap turns into a level and the catalogue turns into words (a battle session can
+	// run on more than one level now). "RealMap" used to be looked up here and is not a catalogue id at
+	// all, so this line always fell through to the generic words.
+	const FString Wanted = Queue ? (Queue->GetMatch().Map.IsEmpty() ? Queue->WantedMapId() : Queue->GetMatch().Map) : FString();
+	const int32 MapIndex = CampusCatalog::FindMap(CampusBR::CatalogMapFor(Wanted));
 	const FString MapName = MapIndex != INDEX_NONE
 		? FString(CampusCatalog::Map(MapIndex).Name).ToUpper() : FString(TEXT("BATTLE ROYALE"));
 	const UCampusSave* Save = Profile();

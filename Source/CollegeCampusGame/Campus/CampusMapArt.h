@@ -8,8 +8,10 @@
 //                     file is not an error: SCampusArtPlate paints its gradient stand-in instead.
 //   * SCampusArtPlate - an angular, tappable card whose fill is that picture, cropped "cover".
 //
-// Only the campus (L_Match) exists, so it is the only playable map; the rest are honest
-// "coming soon" plates that cannot be selected.
+// Three levels are built - the college room (L_Match), Campus Grounds (L_CampusMap) and the open
+// battle-royale valley (L_VarsityValley); the rest are honest "coming soon" plates that cannot be
+// selected. A MODE OFFERS A LIST OF MAPS (FModeEntry::MapIds), not one map: Team Clash and Quick
+// Match run on either campus, and battle royale on the valley or on Campus Grounds.
 
 #pragma once
 
@@ -24,15 +26,22 @@ class SButton;
 
 namespace CampusCatalog
 {
+	/** How many maps one mode may offer. Two today; bump it when a mode needs a third. */
+	constexpr int32 MaxModeMaps = 2;
+
 	/** One row of the map list. Id is what the save file and the room API carry. */
 	struct FMapEntry
 	{
-		/** Persisted in UCampusSave::MatchMap and sent to POST /v1/rooms (the API folds it to "classic"). */
+		/** Persisted in UCampusSave::MatchMap, replicated as ACampusGameState::MatchMap, and translated
+		 *  to the API's own name for the same map by CampusBR::ApiMapFor before it is sent anywhere. */
 		const TCHAR* Id;
 		const TCHAR* Name;
 		const TCHAR* Tagline;
 		/** Base name under Content/CampusUI/MapArt, without the extension. */
 		const TCHAR* Art;
+		/** THE LEVEL THIS MAP OPENS, and the only place that is written down: CampusBR::LevelForMap, the
+		 *  room host and the end screen all come through here. Null on a "coming soon" plate. */
+		const TCHAR* Level;
 		bool bPlayable;
 	};
 
@@ -41,8 +50,9 @@ namespace CampusCatalog
 	{
 		const TCHAR* Id;
 		const TCHAR* Name;
-		/** The map this mode runs on; shown in grey under the mode name. */
-		const TCHAR* MapId;
+		/** The maps this mode runs on, best first; unused slots are null. The first PLAYABLE one is
+		 *  where a mode lands when the saved choice is not on this list. */
+		const TCHAR* MapIds[MaxModeMaps];
 		const TCHAR* Art;
 		/** What the green "?" badge explains. */
 		const TCHAR* Rules;
@@ -68,6 +78,21 @@ namespace CampusCatalog
 
 	const FMapEntry& Map(int32 Index);
 	const FModeEntry& Mode(int32 Index);
+
+	/** True when this mode runs on this map. */
+	bool ModeHasMap(int32 ModeIndex, FName MapId);
+	/** The map index this mode falls back to: the first playable row on its own list. */
+	int32 ModeDefaultMap(int32 ModeIndex);
+	/** THE MAP A MODE WILL ACTUALLY PLAY: MapId when the mode offers it and it is built, else the
+	 *  mode's own first map. The one place a stale saved choice is corrected before a level is opened. */
+	int32 MapForMode(FName ModeId, FName MapId);
+
+	/** The level this map opens, or null when it is a plate with nothing behind it. */
+	const TCHAR* LevelFor(FName MapId);
+	/** The map id of the level this name belongs to (UWorld::GetMapName, which carries a PIE prefix),
+	 *  or NAME_None for a level that is not in the list. The level is what the host and every client
+	 *  already hold, so it is the one answer both sides can agree on without replication. */
+	FName MapIdForLevel(const FString& LevelName);
 }
 
 namespace CampusMapArt

@@ -230,12 +230,18 @@ ACampusLootSpawner::ACampusLootSpawner()
 	bReplicates = false; // the spawner is host-side furniture; only what it spawns replicates
 }
 
-void ACampusLootSpawner::BeginPlay()
+void ACampusLootSpawner::FillAll(UWorld* World)
 {
-	Super::BeginPlay();
-	if (HasAuthority())
+	if (!World)
 	{
-		SpawnWave();
+		return;
+	}
+	for (TActorIterator<ACampusLootSpawner> It(World); It; ++It)
+	{
+		if (It->HasAuthority())
+		{
+			It->SpawnWave();
+		}
 	}
 }
 

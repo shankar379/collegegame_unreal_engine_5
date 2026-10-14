@@ -324,6 +324,8 @@ public:
 
 	// ---- rooms
 	/** Spends 1 Room Card; this phone becomes the host (listen server) of the returned room.
+	 *  Map is THE API'S name for it ("classic" / "campus" / "real" - routes/rooms.js MAPS), which the
+	 *  caller resolves from its catalogue id with CampusBR::ApiMapFor; anything else is a 400.
 	 *  EosPuid is this phone's EOS ProductUserId when it can host over EOS P2P (internet play), so
 	 *  the API can hand it to joiners; pass it empty to be listed as a LAN room (ip:port). */
 	void CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds, int32 Minutes, const FString& EosPuid, FRoomDone Done);

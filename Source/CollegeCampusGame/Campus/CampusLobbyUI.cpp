@@ -137,9 +137,11 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 	if (const UCampusSave* Save = Profile())
 	{
 		// A save written before this screen existed can name a map or mode that was never built;
-		// PlayableMap / PlayableMode drop those back to the campus and Team Clash.
-		SelectedMap = CampusCatalog::PlayableMap(Save->MatchMap);
+		// PlayableMode drops that back to Team Clash. The PAIR then has to make sense as well as each
+		// half of it: a map the saved mode does not run on - a battle-royale map under Team Clash, or
+		// a map this version dropped - lands on that mode's own first map (MapForMode).
 		SelectedMode = CampusCatalog::PlayableMode(Save->MatchMode);
+		SelectedMap = CampusCatalog::MapForMode(FName(CampusCatalog::Mode(SelectedMode).Id), Save->MatchMap);
 		SelectedTeamSize = Save->TeamSize;
 	}
 	CampusOptions::ApplyGraphics(Profile());

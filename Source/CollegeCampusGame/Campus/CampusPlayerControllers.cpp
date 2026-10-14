@@ -11,6 +11,7 @@
 #include "Campus/CampusEOS.h"
 #include "Campus/CampusGameInstance.h"
 #include "Campus/CampusGameMode.h"
+#include "Campus/CampusMapArt.h"
 #include "Campus/CampusMatchState.h"
 #include "Campus/CampusNetSettings.h"
 #include "Campus/CampusParty.h"
@@ -543,7 +544,21 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 		OnFailed(TEXT("Not ready yet."));
 		return;
 	}
-	const FString Map = Profile->MatchMap.ToString();
+	// THE MAP AND THE LEVEL ARE DECIDED HERE, ONCE. A custom room is always TEAM CLASH (Quick Match
+	// joins one and battle royale has its own queue), so the saved choice is resolved against that
+	// mode: a map Team Clash does not offer - a battle-royale map, or a plate that is not built in
+	// this version - lands on Team Clash's own first map instead of opening the wrong level, and the
+	// id that travels with the room is then the id of the level that is actually being opened.
+	const int32 MapIndex = CampusCatalog::MapForMode(FName(TEXT("TeamClash")), Profile->MatchMap);
+	const FString Map = CampusCatalog::Map(MapIndex).Id;
+	const FString Level = CampusCatalog::Map(MapIndex).Level
+		? CampusCatalog::Map(MapIndex).Level : UCampusGameInstance::MatchMap;
+	// TWO NAMES FOR ONE MAP, and they go to different places: the CATALOGUE id travels in the match URL
+	// (ACampusMatchGameMode::InitGameState reads "?Map=") and the API's own name goes in the room body,
+	// where the enum is routes/rooms.js MAPS. A map the API has no name for is recorded as the college
+	// room - the room still plays on the level opened below, and the field is only ever a label.
+	const TCHAR* ApiMapName = CampusBR::ApiMapFor(FName(Map));
+	const FString ApiMap = ApiMapName ? ApiMapName : TEXT("classic");
 	// With a server party the ROOM MUST MATCH THE SQUAD: the API refuses the hand-off with
 	// 409 MODE_MISMATCH if team_size and the party mode disagree, and it is far better to create the
 	// right room than to create the wrong one and discover it after the Room Card is spent.
@@ -556,7 +571,7 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 
 	// EosPuid empty = host on the LAN exactly as before. Non-empty = this phone is EOS-logged-in, the
 	// API lists the room as an EOS room, and the match listens on the EOS net driver instead.
-	auto Create = [WeakThis, Map, Team, Rounds, Minutes, OnFailed](const FString& EosPuid)
+	auto Create = [WeakThis, Map, ApiMap, Level, Team, Rounds, Minutes, OnFailed](const FString& EosPuid)
 	{
 		ACampusLobbyPlayerController* Self = WeakThis.Get();
 		if (!Self)
@@ -570,7 +585,7 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 			return;
 		}
 		// the API issues the code (and takes the Room Card) first; then this phone opens the match and hosts it
-		Api->CreateRoom(Map, Team, Rounds, Minutes, EosPuid, [WeakThis, Map, Team, Rounds, Minutes, EosPuid, OnFailed](bool bOk, const FString& Error, const FCampusRoom& Room)
+		Api->CreateRoom(ApiMap, Team, Rounds, Minutes, EosPuid, [WeakThis, Map, Level, Team, Rounds, Minutes, EosPuid, OnFailed](bool bOk, const FString& Error, const FCampusRoom& Room)
 		{
 			ACampusLobbyPlayerController* Me = WeakThis.Get();
 			if (!Me)
@@ -596,7 +611,7 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 			UCampusSocial* Squad = Me->GetSocial();
 			if (Squad && Squad->HasParty() && Squad->IsPartyLeader())
 			{
-				Squad->HandOffRoom(Room.Code, [WeakThis, Options](bool bOk, const FString& Error)
+				Squad->HandOffRoom(Room.Code, [WeakThis, Level, Options](bool bOk, const FString& Error)
 				{
 					ACampusLobbyPlayerController* Host = WeakThis.Get();
 					if (!Host)
@@ -607,11 +622,11 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 					{
 						UE_LOG(LogTemp, Warning, TEXT("[CampusSocial] party hand-off failed: %s"), *Error);
 					}
-					UGameplayStatics::OpenLevel(Host, FName(UCampusGameInstance::MatchMap), true, Options);
+					UGameplayStatics::OpenLevel(Host, FName(*Level), true, Options);
 				});
 				return;
 			}
-			UGameplayStatics::OpenLevel(Me, FName(UCampusGameInstance::MatchMap), true, Options);
+			UGameplayStatics::OpenLevel(Me, FName(*Level), true, Options);
 		});
 	};
 

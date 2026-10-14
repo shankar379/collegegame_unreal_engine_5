@@ -6,6 +6,8 @@
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusCharacter.h"
 #include "Campus/CampusDayNight.h"
+#include "Campus/CampusLoot.h"
+#include "Campus/CampusMapArt.h"
 #include "Campus/CampusNetSettings.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "AIController.h"
@@ -120,7 +122,11 @@ void ACampusBRGameMode::InitGameState()
 		}
 	}
 	State->RoomCode = Code;
-	State->MatchMap = FName(TEXT("RealMap"));
+	// THE LEVEL SAYS WHICH MAP THIS IS, because the level is what the allocator's map id already chose
+	// (CampusBR::LevelForMap) and it cannot be wrong about itself. "RealMap" stays the answer for a
+	// level the catalogue does not know, which is the legacy id every reader already handles.
+	const FName MapId = CampusCatalog::MapIdForLevel(GetWorld()->GetMapName());
+	State->MatchMap = MapId.IsNone() ? FName(TEXT("RealMap")) : MapId;
 	// BS-SQUAD-IN-000731, carried in by the host's travel URL. The HUD prints it; nothing keys off it.
 	State->SessionId = UGameplayStatics::ParseOption(OptionsString, TEXT("Session"));
 
@@ -728,6 +734,10 @@ void ACampusBRGameMode::StartFlight()
 		WaitingArea->Destroy();
 		WaitingArea = nullptr;
 	}
+	// GROUND LOOT, laid out as the plane takes off and not before: it is a battle-royale thing (so the
+	// level's spawners stay dormant in a Team Clash room on the same map) and nothing can be reached
+	// from the waiting slab, while every box bobs and replicates for as long as it exists.
+	ACampusLootSpawner::FillAll(GetWorld());
 	Plane = GetWorld()->SpawnActor<ACampusBRPlane>(ACampusBRPlane::StaticClass(), FTransform::Identity);
 	if (!Plane)
 	{

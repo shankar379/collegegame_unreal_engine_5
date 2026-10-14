@@ -190,12 +190,12 @@ private:
 		FVector2D Of(const UWorld* World, const FVector& Where) const;
 	};
 
-	/** The window a map widget should draw: all of the square for the full map (and for the small
-	 *  college room map), a square that follows Eye for the minimap on the big BR map. */
+	/** The window a map widget should draw: all of the square for the full map (and for the two small
+	 *  campus maps), a square that follows Eye for the minimap on the big BR map. */
 	FMapView MapWindow(const UWorld* World, const FVector& Eye, bool bBig) const;
-	/** The picture of THIS level, or null where there is none - the valley's top-down plan (a loose PNG
-	 *  under Content/CampusUI/MapArt) or the college room's cooked T_Icon_campusmap. Never one level's
-	 *  picture under another level's coordinates. */
+	/** The picture of THIS level, or null where there is none - the valley's and Campus Grounds' own
+	 *  top-down plans (loose PNGs under Content/CampusUI/MapArt) or the college room's cooked
+	 *  T_Icon_campusmap. Never one level's picture under another level's coordinates. */
 	const FSlateBrush* MapPicture(const UWorld* World) const;
 	/** WHERE THE LOCAL PLAYER IS AND WHICH WAY THEY ARE LOOKING, this frame, for the map marker: the
 	 *  pawn when there is one (on foot, driving, in the plane, under the chute - all of those keep the

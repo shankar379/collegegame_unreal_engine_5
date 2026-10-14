@@ -1398,7 +1398,12 @@ void UCampusBackend::CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds
 	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
 	Body->SetNumberField(TEXT("rounds"), Rounds);
 	Body->SetNumberField(TEXT("round_minutes"), Minutes);
-	Body->SetStringField(TEXT("map"), Map == TEXT("RealMap") ? TEXT("real") : TEXT("classic"));
+	// THE API'S OWN NAME FOR THE MAP, which the caller has already resolved (CampusBR::ApiMapFor, and
+	// routes/rooms.js MAPS is the enum): "classic", "campus" or "real". It used to be folded here, from
+	// the catalogue id, into one of two values - which recorded a Campus Grounds room as the college.
+	// Nothing keys off the field: a joiner travels to the host's address and loads whatever level the
+	// host opened, so it is a label, but a label may as well be true.
+	Body->SetStringField(TEXT("map"), Map);
 	Body->SetNumberField(TEXT("team_size"), TeamSize == 1 || TeamSize == 2 ? TeamSize : 4);
 	// Sent only when this phone really is EOS-logged-in: the API hands it to joiners as
 	// connect:{type:"eos",puid}. Leaving it out keeps the room on the LAN form.

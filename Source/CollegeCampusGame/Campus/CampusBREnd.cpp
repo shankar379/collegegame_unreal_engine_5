@@ -3,6 +3,7 @@
 
 #include "Campus/CampusBREnd.h"
 
+#include "Campus/CampusBR.h"
 #include "Campus/CampusBRGameMode.h"
 #include "Campus/CampusMapArt.h"
 #include "Campus/CampusMatchState.h"
@@ -223,15 +224,20 @@ void FCampusBREndView::Read(const APlayerController* InController)
 	TotalSquads = FMath::Max(1, State->TotalSquads);
 	MatchSeconds = FMath::Max(0, State->MatchSeconds);
 
-	// THE BATTLE ROYALE MAP HAS THREE NAMES (CampusBR::LevelForMap spells this out): the API calls it
-	// "real", the client catalogue calls it "VarsityValley", and the game state replicates "RealMap".
-	// Only "Classic" is the other level, so anything the catalogue does not recognise is the BR map -
-	// which is also the only thing a battle session can be running on.
-	FName MapId = State->MatchMap;
-	if (CampusCatalog::FindMap(MapId) == INDEX_NONE)
+	// THE LEVEL THIS SCREEN IS STANDING IN is the map, and it needs no replication to be sure of it.
+	// The replicated id is only a label and it has three spellings for the valley alone
+	// (CampusBR::LevelForMap spells this out): the API calls it "real", the client catalogue
+	// "VarsityValley", and the game state "RealMap". That folding is the fallback now, for a level the
+	// catalogue does not know, and anything it still cannot place is the valley - which is where a
+	// battle session runs unless the server named another map.
+	FName MapId = CampusCatalog::MapIdForLevel(World->GetMapName());
+	if (MapId.IsNone())
 	{
-		MapId = MapId.ToString().Equals(TEXT("classic"), ESearchCase::IgnoreCase)
-			? FName(TEXT("Classic")) : FName(TEXT("VarsityValley"));
+		MapId = CampusBR::CatalogMapFor(State->MatchMap.ToString());
+	}
+	if (MapId.IsNone())
+	{
+		MapId = FName(TEXT("VarsityValley"));
 	}
 	const int32 MapIndex = CampusCatalog::FindMap(MapId);
 	MapName = MapIndex == INDEX_NONE ? MapId.ToString() : FString(CampusCatalog::Map(MapIndex).Name);

@@ -5,8 +5,11 @@
 // PICK UP button) or simply walks over an ammo box, and the server calls ServerTake. The actor is destroyed on
 // the host and the destruction replicates - no client ever removes loot on its own.
 //
-// ACampusLootSpawner fills an area once per round: either at actors tagged "LootSpot" inside its bounds, or at
-// random points in the bounds traced down onto the ground. Tiers decide how good the guns are (CampusWeapons).
+// ACampusLootSpawner fills an area when THE BATTLE ROYALE MODE ASKS IT TO (FillAll, as the plane takes off) and
+// never on its own: either at actors tagged "LootSpot" inside its bounds, or at random points in the bounds
+// traced down onto the ground. Tiers decide how good the guns are (CampusWeapons). Being asked rather than
+// filling itself is what lets a level keep its spawners in the level (L_CampusMap does, over 92 tagged spots)
+// and still be played as a 4v4 Team Clash room with a bare floor.
 //
 // No new art: guns reuse SM_Rifle at the gun's own scale and tint; the rest are engine primitives, tinted.
 
@@ -134,13 +137,17 @@ public:
 	UPROPERTY(EditAnywhere, Category="Loot")
 	float Tier3Chance = 0.12f;
 
-	/** Server only: clears what is left and lays out a fresh set. Called by BeginPlay and by the round reset. */
+	/** Server only: clears what is left and lays out a fresh set. */
 	void SpawnWave();
-	/** Round start: identical to SpawnWave, named for the caller that resets doors and cars the same way. */
-	void ResetForRound() { SpawnWave(); }
 
-protected:
-	virtual void BeginPlay() override;
+	/** Server: fill every spawner in this world. THE BATTLE ROYALE MODE IS THE ONLY CALLER, as the
+	 *  plane takes off (ACampusBRGameMode::StartFlight) - which is what keeps a 4v4 Team Clash room on
+	 *  a level that carries spawners (L_CampusMap does, over 92 tagged spots) free of battle-royale
+	 *  loot, and keeps 92 replicated bobbing boxes out of the world for the whole of the waiting
+	 *  phase, when nobody can reach the ground anyway.
+	 *
+	 *  This used to be the spawner's own BeginPlay, which fired in every mode on every level. */
+	static void FillAll(UWorld* World);
 
 private:
 	/** Ground point under a candidate location, or false when nothing solid is below it. */

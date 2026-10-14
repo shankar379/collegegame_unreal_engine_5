@@ -19,36 +19,43 @@
 
 namespace CampusCatalog
 {
-	// Two real levels: L_Match (the college campus) and L_VarsityValley (the open BATTLE ROYALE map,
-	// /Game/Maps/L_VarsityValley - see CampusBR::LevelForMap). The rest are deliberately empty
-	// plates, not faked screenshots - see Scripts/render_map_art.py.
+	// Three real levels: L_Match (the college room), L_CampusMap (Campus Grounds, the walled campus
+	// ported from the web game's CAMPUS map) and L_VarsityValley (the open 800 m battle-royale map).
+	// The rest are deliberately empty plates, not faked screenshots - see Scripts/render_map_art.py.
 	const FMapEntry Maps[] = {
-		{ TEXT("Classic"), TEXT("Campus"),      TEXT("The college  ·  quad, corridors and rooftops"), TEXT("map_campus"), true },
-		{ TEXT("VarsityValley"), TEXT("Varsity Valley"), TEXT("Open valley  ·  50 players, one circle"), TEXT("map_valley"), true },
-		{ TEXT("Hostel"),  TEXT("Hostel Block"), TEXT("Coming soon"),                                  TEXT("map_hostel"), false },
-		{ TEXT("Arena"),   TEXT("Sports Arena"), TEXT("Coming soon"),                                  TEXT("map_arena"),  false },
+		{ TEXT("Classic"), TEXT("Campus"),      TEXT("The college  ·  quad, corridors and rooftops"), TEXT("map_campus"),
+			TEXT("/Game/Maps/L_Match"), true },
+		{ TEXT("CampusMap"), TEXT("Campus Grounds"), TEXT("Clock tower  ·  seven blocks, one courtyard"), TEXT("map_campusmap"),
+			TEXT("/Game/Maps/L_CampusMap"), true },
+		{ TEXT("VarsityValley"), TEXT("Varsity Valley"), TEXT("Open valley  ·  50 players, one circle"), TEXT("map_valley"),
+			TEXT("/Game/Maps/L_VarsityValley"), true },
+		{ TEXT("Hostel"),  TEXT("Hostel Block"), TEXT("Coming soon"),                                  TEXT("map_hostel"),
+			nullptr, false },
+		{ TEXT("Arena"),   TEXT("Sports Arena"), TEXT("Coming soon"),                                  TEXT("map_arena"),
+			nullptr, false },
 	};
 	const int32 NumMaps = UE_ARRAY_COUNT(Maps);
 
 	const FModeEntry Modes[] = {
-		{ TEXT("TeamClash"), TEXT("Team Clash"), TEXT("Classic"), TEXT("mode_clash"),
-			TEXT("Two squads, one campus. You pick how many rounds (4-7) and how long each one runs; every round is "
-			     "played and the squad that wins the most takes the match. Everyone respawns between rounds. "
+		{ TEXT("TeamClash"), TEXT("Team Clash"), { TEXT("Classic"), TEXT("CampusMap") }, TEXT("mode_clash"),
+			TEXT("Two squads, one campus. You pick the map, how many rounds (4-7) and how long each one runs; every "
+			     "round is played and the squad that wins the most takes the match. Everyone respawns between rounds. "
 			     "Hosting costs one Room Card and gives you a 6-letter code to share."),
 			nullptr, true },
-		{ TEXT("QuickMatch"), TEXT("Quick Match"), TEXT("Classic"), TEXT("mode_quick"),
+		{ TEXT("QuickMatch"), TEXT("Quick Match"), { TEXT("Classic"), TEXT("CampusMap") }, TEXT("mode_quick"),
 			TEXT("One tap into the room already open on your network. Free, no Room Card, no code to type - "
-			     "the match starts on the host's settings."),
+			     "the match starts on the host's settings, including the host's map."),
 			nullptr, true },
 		// Placeholder schedule: the window text below is UI only until a real rotation exists.
-		{ TEXT("NightRaid"), TEXT("Night Raid"), TEXT("Classic"), TEXT("mode_locked"),
+		{ TEXT("NightRaid"), TEXT("Night Raid"), { TEXT("Classic"), nullptr }, TEXT("mode_locked"),
 			TEXT("Not live yet. Team Clash after dark, on a shorter clock. The daily window below is a placeholder "
 			     "until the rotation is switched on."),
 			TEXT("Opens daily 18:00 - 22:00"), false },
-		{ TEXT("BattleRoyale"), TEXT("Battle Royale"), TEXT("VarsityValley"), TEXT("mode_br"),
-			TEXT("Fifty players drop into Varsity Valley and the circle closes until one squad is left. No Room Card: "
-			     "tap START and the server puts you in the next match, solo / duo / squad as you picked. The DAY / "
-			     "NIGHT chip is your preference - the match you are given says which it is."),
+		{ TEXT("BattleRoyale"), TEXT("Battle Royale"), { TEXT("VarsityValley"), TEXT("CampusMap") }, TEXT("mode_br"),
+			TEXT("Fifty players drop into Varsity Valley - or onto the tighter Campus Grounds - and the circle closes "
+			     "until one squad is left. No Room Card: tap START and the server puts you in the next match, solo / "
+			     "duo / squad as you picked. The DAY / NIGHT chip is your preference - the match you are given says "
+			     "which it is."),
 			nullptr, true },
 	};
 	const int32 NumModes = UE_ARRAY_COUNT(Modes);
@@ -122,6 +129,66 @@ namespace CampusCatalog
 	const FModeEntry& Mode(int32 Index)
 	{
 		return Modes[FMath::Clamp(Index, 0, NumModes - 1)];
+	}
+
+	bool ModeHasMap(int32 ModeIndex, FName MapId)
+	{
+		const FModeEntry& Entry = Mode(ModeIndex);
+		for (const TCHAR* Each : Entry.MapIds)
+		{
+			if (Each && MapId == FName(Each))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	int32 ModeDefaultMap(int32 ModeIndex)
+	{
+		const FModeEntry& Entry = Mode(ModeIndex);
+		for (const TCHAR* Each : Entry.MapIds)
+		{
+			const int32 Index = Each ? FindMap(FName(Each)) : INDEX_NONE;
+			if (Index != INDEX_NONE && Maps[Index].bPlayable)
+			{
+				return Index;
+			}
+		}
+		// A mode whose whole list is unbuilt still has to answer with something playable.
+		return DefaultMap();
+	}
+
+	int32 MapForMode(FName ModeId, FName MapId)
+	{
+		const int32 ModeIndex = FindMode(ModeId);
+		if (ModeIndex == INDEX_NONE)
+		{
+			return PlayableMap(MapId);
+		}
+		const int32 MapIndex = FindMap(MapId);
+		const bool bKeep = MapIndex != INDEX_NONE && Maps[MapIndex].bPlayable && ModeHasMap(ModeIndex, MapId);
+		return bKeep ? MapIndex : ModeDefaultMap(ModeIndex);
+	}
+
+	const TCHAR* LevelFor(FName MapId)
+	{
+		const int32 Index = FindMap(MapId);
+		return Index == INDEX_NONE ? nullptr : Maps[Index].Level;
+	}
+
+	FName MapIdForLevel(const FString& LevelName)
+	{
+		for (int32 Index = 0; Index < NumMaps; ++Index)
+		{
+			// Contains, not a compare: GetMapName hands back "UEDPIE_0_L_Match" in the editor and the
+			// level path carries its folders. No two level names here are substrings of each other.
+			if (Maps[Index].Level && LevelName.Contains(FPaths::GetBaseFilename(Maps[Index].Level)))
+			{
+				return FName(Maps[Index].Id);
+			}
+		}
+		return NAME_None;
 	}
 }
 

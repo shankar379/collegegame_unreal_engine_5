@@ -216,17 +216,16 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapBanner(int32 Index)
 			// A locked banner still answers the tap - a card that does nothing feels broken.
 			if (bLocked)
 			{
-				Toast(FString::Printf(TEXT("%s is not built yet. Campus is the only map right now."), *Name));
+				Toast(FString::Printf(TEXT("%s is not built yet. Pick one of the maps above it."), *Name));
 				return FReply::Handled();
 			}
 			PendingMap = Index;
 			// Keep the mode honest: if it does not run on this map, move to one that does.
-			if (FName(CampusCatalog::Mode(PendingMode).MapId) != FName(CampusCatalog::Map(Index).Id))
+			if (!CampusCatalog::ModeHasMap(PendingMode, FName(CampusCatalog::Map(Index).Id)))
 			{
 				for (int32 Scan = 0; Scan < CampusCatalog::NumModes; ++Scan)
 				{
-					const CampusCatalog::FModeEntry& Mode = CampusCatalog::Mode(Scan);
-					if (Mode.bPlayable && FName(Mode.MapId) == FName(CampusCatalog::Map(Index).Id))
+					if (CampusCatalog::Mode(Scan).bPlayable && CampusCatalog::ModeHasMap(Scan, FName(CampusCatalog::Map(Index).Id)))
 					{
 						PendingMode = Scan;
 						break;
@@ -249,8 +248,12 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeCard(int32 Index)
 	const CampusCatalog::FModeEntry& Entry = CampusCatalog::Mode(Index);
 	const bool bLocked = !Entry.bPlayable;
 	const bool bSelected = !bLocked && PendingMode == Index;
-	const int32 MapIndex = CampusCatalog::FindMap(FName(Entry.MapId));
-	const FString MapName = MapIndex != INDEX_NONE ? FString(CampusCatalog::Map(MapIndex).Name) : FString(Entry.MapId);
+	// The map under the mode name is the one THIS CARD would play: the pending pick when the mode
+	// offers it, else the mode's own first map. A card that named a map the mode cannot run on was
+	// the whole reason this is a list and not one id.
+	const int32 MapIndex = CampusCatalog::ModeHasMap(Index, FName(CampusCatalog::Map(PendingMap).Id))
+		? PendingMap : CampusCatalog::ModeDefaultMap(Index);
+	const FString MapName(CampusCatalog::Map(MapIndex).Name);
 	const FString Name(Entry.Name);
 
 	TSharedRef<SVerticalBox> Text = SNew(SVerticalBox)
@@ -377,10 +380,11 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeCard(int32 Index)
 					return FReply::Handled();
 				}
 				PendingMode = Index;
-				const int32 Target = CampusCatalog::FindMap(FName(CampusCatalog::Mode(Index).MapId));
-				if (Target != INDEX_NONE && CampusCatalog::Map(Target).bPlayable)
+				// The map only moves when this mode cannot run on the one already picked: choosing
+				// BATTLE ROYALE must not throw away a Campus Grounds pick that it honours.
+				if (!CampusCatalog::ModeHasMap(Index, FName(CampusCatalog::Map(PendingMap).Id)))
 				{
-					PendingMap = Target;
+					PendingMap = CampusCatalog::ModeDefaultMap(Index);
 				}
 				Refresh();
 				return FReply::Handled();
@@ -427,13 +431,16 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeCard(int32 Index)
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 {
-	// Banners: fixed share of the height each, so swapping the selection never reflows the column.
-	TSharedRef<SVerticalBox> Banners = SNew(SVerticalBox);
+	// Banners: a FIXED height each and the column scrolls, which it did not have to do while there
+	// were four of them sharing the height. A fifth map took each banner under 120 px on a phone and
+	// the 50 pt map name no longer fitted in its own card - so the list scrolls like the mode column
+	// beside it, and swapping the selection still never reflows anything.
+	TSharedRef<SScrollBox> Banners = SNew(SScrollBox).ScrollBarVisibility(EVisibility::Collapsed);
 	for (int32 Index = 0; Index < CampusCatalog::NumMaps; ++Index)
 	{
-		Banners->AddSlot().FillHeight(1.f).Padding(0.f, Index == 0 ? 0.f : 8.f, 0.f, 0.f)
+		Banners->AddSlot().Padding(0.f, Index == 0 ? 0.f : 8.f, 0.f, 0.f)
 		[
-			BuildMapBanner(Index)
+			SNew(SBox).HeightOverride(170.f)[BuildMapBanner(Index)]
 		];
 	}
 
@@ -448,9 +455,10 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 		];
 	}
 
-	// There are two built maps now, but each MODE still runs on exactly one of them (FModeEntry::MapId),
-	// so a random pick has nothing to choose between for whatever mode is selected. Shown, disabled,
-	// and it says why - that is honest, and the plumbing (UCampusSave::bRandomMap) is already here.
+	// A mode can offer more than one map now (FModeEntry::MapIds), so a random pick finally HAS
+	// something to choose between - but nothing rolls it yet: the lobby plate and the room dialog both
+	// name the map before it is played, and a roll behind them would make them lie. Shown, disabled,
+	// and it says so; the plumbing (UCampusSave::bRandomMap) is already here for whoever wires it.
 	const bool bRandomPossible = false;
 	const bool bRandomOn = bRandomPossible && bPendingRandomMap;
 
@@ -505,7 +513,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 			bRandomPossible
 				? SNullWidget::NullWidget
 				: StaticCastSharedRef<SWidget>(SNew(STextBlock)
-					.Text(LOCTEXT("RandomSoon", "each mode has its own map"))
+					.Text(LOCTEXT("RandomSoon", "not live yet - pick a map on the left"))
 					.Font(CampusAngular::Body(14))
 					.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.38f)))
 		];
