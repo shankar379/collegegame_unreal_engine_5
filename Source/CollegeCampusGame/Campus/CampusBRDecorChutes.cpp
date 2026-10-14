@@ -180,8 +180,20 @@ ACampusBRDecorChute::ACampusBRDecorChute()
 		FVector(0.f, 0.f, CampusBRDecorArt::BodyHeight + CampusBRDecorArt::HeadSize * 0.5f),
 		FRotator::ZeroRotator, FVector(CampusBRDecorArt::HeadSize * 0.01f));
 
-	// The canopy, exactly as ACampusBRChute builds it: a sphere squashed on Z - 7 m across, 1.2 m deep -
-	// which is a dome from underneath and the lens every parachute silhouette already is from the side.
+	// The parachute: the SAME imported model and the same hang the real divers get (CampusChuteModel,
+	// declared in CampusBRPlane.h), only measured from this figure's feet instead of a capsule centre.
+	// A decorative jumper under a different parachute from a real one would be read as information.
+	CanopyModel = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("CanopyModel"));
+	CanopyModel->SetupAttachment(Harness);
+	UStaticMesh* const Model = CampusChuteModel::Mesh();
+	bUsesModel = Model != nullptr;
+	const FTransform Hang = CampusChuteModel::OverShoulders(CampusBRDecorArt::ShoulderHeight);
+	CampusBRDecorArt::Dress(CanopyModel, Model, CampusChuteModel::Cloth(),
+		Hang.GetLocation(), Hang.Rotator(), Hang.GetScale3D());
+
+	// The fallback canopy, drawn only when that asset never loaded - exactly as ACampusBRChute builds
+	// it: a sphere squashed on Z - 7 m across, 1.2 m deep - which is a dome from underneath and the
+	// lens every parachute silhouette already is from the side.
 	Canopy = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Canopy"));
 	Canopy->SetupAttachment(Harness);
 	CampusBRDecorArt::Dress(Canopy, CampusBRDecorArt::Sphere(), CampusBRDecorArt::Cloth(),
@@ -218,12 +230,18 @@ ACampusBRDecorChute::ACampusBRDecorChute()
 
 void ACampusBRDecorChute::ShowCanopy(bool bShown)
 {
+	// One of the two is always off: the model when it is in the cook, the five primitives when it is
+	// not. bUsesModel is answered once, in the constructor.
+	if (CanopyModel)
+	{
+		CanopyModel->SetVisibility(bShown && bUsesModel);
+	}
 	UStaticMeshComponent* const Parts[5] = { Canopy, LineFrontLeft, LineBackLeft, LineBackRight, LineFrontRight };
 	for (UStaticMeshComponent* Part : Parts)
 	{
 		if (Part)
 		{
-			Part->SetVisibility(bShown);
+			Part->SetVisibility(bShown && !bUsesModel);
 		}
 	}
 }

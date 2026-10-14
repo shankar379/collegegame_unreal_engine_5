@@ -16,9 +16,10 @@
 // the scoreboard, the kill feed and the zone all at once. The descent is scripted from a single ground
 // trace taken at release; it never asks physics for anything.
 //
-// The look is deliberately ACampusBRChute's (flattened sphere dome, four cylinder rigging lines) and
-// its materials are the ones the plane's class default object already references, so there is no new
-// asset to cook - see CampusBRPlane.cpp's note on ConstructorHelpers in constructors.
+// The look is deliberately ACampusBRChute's - the same imported parachute (CampusChuteModel, declared
+// in CampusBRPlane.h) over a cylinder body, and the same flattened-dome fallback behind it - and the
+// figure's own materials are the ones the plane's class default object already references, so this
+// file adds no asset to the cook; see CampusBRPlane.cpp's note on ConstructorHelpers in constructors.
 
 #pragma once
 
@@ -63,7 +64,8 @@ enum class ECampusBRDecorPhase : uint8
 
 /**
  * One cosmetic jumper: a cylinder body and a sphere head under ACampusBRChute's canopy. It moves itself
- * and nothing else - seven flat unlit primitives, no collision, no shadows, no physics.
+ * and nothing else - three flat unlit primitives and the parachute, no collision, no shadows, no
+ * physics (the five fallback primitives behind the parachute are never drawn unless its asset is gone).
  */
 UCLASS()
 class ACampusBRDecorChute : public AActor
@@ -103,6 +105,9 @@ private:
 	float AirTime = 0.f;
 	/** World time of touchdown, or negative while still in the air. */
 	float LandTime = -1.f;
+	/** Did the imported canopy load? Answered once, in the constructor: it decides which of the two
+	 *  parachutes below ShowCanopy is allowed to turn on. */
+	bool bUsesModel = false;
 
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<USceneComponent> Harness;
@@ -113,6 +118,11 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> Head;
 
+	/** The imported parachute (CampusChuteModel), the same one the real divers hang under. */
+	UPROPERTY(VisibleAnywhere, Category = "Components")
+	TObjectPtr<UStaticMeshComponent> CanopyModel;
+
+	/** Fallback canopy, drawn only when that asset is missing. */
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> Canopy;
 

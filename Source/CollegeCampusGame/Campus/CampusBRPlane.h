@@ -24,8 +24,35 @@
 #include "CampusBRPlane.generated.h"
 
 class ACampusCharacter;
+class UMaterialInterface;
+class UStaticMesh;
 class UStaticMeshComponent;
 class USceneComponent;
+
+/**
+ * The imported canopy: /Game/CampusVehicles/Parachute/SM_Parachute, built by Scripts/import_parachute.py
+ * out of the downloaded "Parachute Simple" model (CC-BY-4.0 by sxnneh - see CREDITS.md, and keep that
+ * entry as long as this asset ships).
+ *
+ * Shared with the five decorative jumpers in CampusBRDecorChutes.cpp, so the sky never holds two
+ * different parachutes. Null when the asset is missing from the cook: both the diver's canopy and the
+ * decorative ones then fall back to the dome-and-cone primitives they were built out of, which is why
+ * those components are still here.
+ */
+namespace CampusChuteModel
+{
+	/** The mesh, or null when it did not load. FROM A CONSTRUCTOR ONLY (it is a ConstructorHelpers
+	 *  find, which is also what puts the asset on the class default object for the cooker). */
+	UStaticMesh* Mesh();
+
+	/** Its unlit, two-sided material instance, or null. Constructor only, same reason. */
+	UMaterialInterface* Cloth();
+
+	/** Where to hang the model on a wearer: the file's origin is the harness hook under the risers, so
+	 *  this drops the hook at the shoulders (ShoulderRise above the component's own parent), centres
+	 *  the canopy over the head, and scales the 7.1 m model down to a 5 m span. */
+	FTransform OverShoulders(float ShoulderRise);
+}
 
 UENUM()
 enum class ECampusBRDive : uint8
@@ -38,8 +65,10 @@ enum class ECampusBRDive : uint8
 };
 
 /**
- * The open canopy over one diver: an arched canopy (a flattened dome with a cone ridge over it) and
- * four rigging lines down to the shoulders. No gameplay - the dive state stays in ACampusBRDrop, which
+ * The open canopy over one diver: the imported parachute model (CampusChuteModel) hung off the
+ * shoulders, or - when that asset is missing - the primitives it replaced, an arched canopy (a
+ * flattened dome with a cone ridge over it) and four rigging lines down to the shoulders.
+ * No gameplay - the dive state stays in ACampusBRDrop, which
  * owns this actor's whole life. It exists only because the drop itself is owner-relevant and a
  * parachute is not: this is what the other forty-nine players see coming down.
  *
@@ -83,6 +112,12 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<USceneComponent> Harness;
 
+	/** The imported parachute: one mesh, one material, one draw call, and the only thing drawn when the
+	 *  asset is in the cook. The six components below are then hidden for good. */
+	UPROPERTY(VisibleAnywhere, Category = "Components")
+	TObjectPtr<UStaticMeshComponent> CanopyModel;
+
+	/** Fallback canopy, drawn only when CampusChuteModel::Mesh() is null. */
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> Canopy;
 

@@ -800,7 +800,11 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 						.ShadowColorAndOpacity(BrShadow)
 					]
 				]
-				// ---- the plane: one 200 x 200 JUMP, bottom centre, clear of both thumbs' controls.
+				// ---- THE PLANE, AND ONLY THE PLANE: one 200 x 200 JUMP, bottom centre, clear of both
+				// thumbs' controls. The moment the diver is out of the door this column collapses and
+				// the sky HUD takes over - the altitude plate and the right-thumb OPEN PARACHUTE plate,
+				// both in SCampusTouchControls, where every other in-world control already lives. Two
+				// buttons for one press, on opposite halves of the screen, is how a diver taps neither.
 				+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 24.f)
 				[
 					SNew(SVerticalBox)
@@ -809,7 +813,9 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 						SNew(STextBlock)
 						.Visibility_Lambda([this]()
 						{
-							return (View.bInPlane || View.bFreefall || View.bParachuting) && !View.bEnded
+							// In the air the advice comes from the sky HUD's own readout, beside the
+							// altitude it depends on.
+							return View.bInPlane && !View.bFreefall && !View.bParachuting && !View.bEnded
 								? EVisibility::HitTestInvisible : EVisibility::Collapsed;
 						})
 						.Text_Lambda([this]()
@@ -817,14 +823,6 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 							if (bJumpUnavailable)
 							{
 								return LOCTEXT("BrJumpSoon", "THE DROP IS NOT WIRED UP IN THIS BUILD YET");
-							}
-							if (View.bParachuting)
-							{
-								return LOCTEXT("BrChute", "HOLD FORWARD TO GLIDE FURTHER  ·  STEER TO YOUR LANDING");
-							}
-							if (View.bFreefall)
-							{
-								return LOCTEXT("BrFreefall", "OPEN IT YOURSELF  ·  OR IT OPENS AT 40 m");
 							}
 							return LOCTEXT("BrJumpHint", "TAP JUMP WHEN THE VALLEY IS UNDER YOU");
 						})
@@ -836,15 +834,13 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 					]
 					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 					[
-						// ONE button, two jobs - which is exactly what the drop does: the first press
-						// leaves the plane, the second pulls the canopy. It must therefore survive into
-						// freefall, where it used to collapse and leave the manual chute unreachable on
-						// a phone. It goes away once the canopy is out, because there is nothing left
-						// to press.
+						// ONE job: leave the plane. The second press - pulling the canopy - is the touch
+						// HUD's OPEN PARACHUTE plate under the right thumb, reachable at 40 m/s without
+						// a hand crossing the screen, and it is deliberately NOT duplicated here.
 						SNew(SBox).WidthOverride(200.f).HeightOverride(200.f)
 						.Visibility_Lambda([this]()
 						{
-							return (View.bInPlane || View.bFreefall) && !View.bParachuting && !View.bEnded
+							return View.bInPlane && !View.bFreefall && !View.bParachuting && !View.bEnded
 								? EVisibility::Visible : EVisibility::Collapsed;
 						})
 						[
@@ -859,17 +855,8 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 								SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
 								[
 									SNew(STextBlock)
-									.Text_Lambda([this]()
-									{
-										return View.bFreefall ? LOCTEXT("BrOpenChute", "OPEN\nCHUTE")
-											: LOCTEXT("BrJump", "JUMP");
-									})
-									.Font_Lambda([this]()
-									{
-										// "OPEN CHUTE" over two lines needs a smaller face to stay inside
-										// the same 200 x 200 touch target.
-										return CampusAngular::Display(View.bFreefall ? 30 : 46);
-									})
+									.Text(LOCTEXT("BrJump", "JUMP"))
+									.Font(CampusAngular::Display(46))
 									.Justification(ETextJustify::Center)
 									.ColorAndOpacity(FLinearColor::Black)
 								]

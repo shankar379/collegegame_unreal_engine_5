@@ -49,7 +49,9 @@ private:
 		/** The second weapon plate: tap to hold that gun (Weapon is the first plate). */
 		Weapon2,
 		/** PICK UP: appears when a ground-loot box is in reach (battle royale). */
-		Pickup };
+		Pickup,
+		/** OPEN PARACHUTE: right thumb, freefall only (battle royale drop). */
+		Chute };
 	enum class ERole : uint8 { Look, Joystick, FireDrag, Button, FreeLook };
 
 	struct FFinger
@@ -71,6 +73,8 @@ private:
 		FVector2D Fire, FireLeft, Scope, Zoom, Reload, Jump, Crouch, Prone, Sprint, Eye, Mic, Speaker;
 		FVector2D Vehicle, SeatSwitch, Pickup;
 		float PickupR = 0.f;
+		/** OPEN PARACHUTE: a plate, not a disc (icon over a label), so it carries its own size. */
+		FVector2D Chute, ChuteSize;
 		float VoiceR = 0.f;
 		float FireR = 0.f, FireLeftR = 0.f, ScopeR = 0.f, ReloadR = 0.f, JumpR = 0.f, CrouchR = 0.f, ProneR = 0.f, SprintR = 0.f, EyeR = 0.f;
 		float VehicleR = 0.f, SeatSwitchR = 0.f;
@@ -104,6 +108,25 @@ private:
 	void DrawText(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FString& Text, const FVector2D& Anchor, int32 Size, const FLinearColor& Color, float AlignX = 0.5f, float AlignY = 0.5f, bool bTabular = false) const;
 	void DrawPolyline(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const TArray<FVector2f>& Points, const FLinearColor& Color, float Thickness) const;
 	void DrawIcon(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, EControl Control, const FVector2D& C, float R, const FLinearColor& Color, float Spin) const;
+	// ---- THE DROP (battle royale). Airborne from the plane the player has no gun, no bag and no
+	// crouch, so the combat half of the HUD is not drawn and - just as important - not hit-testable.
+	// The phase is read ONCE A FRAME in Tick (AirPhase): finding the drop walks a registry and the
+	// altitude is a downward trace, and neither belongs in a paint Slate may run twice for one frame.
+	static constexpr uint8 AirNone = 0;
+	static constexpr uint8 AirPlane = 1;
+	static constexpr uint8 AirFreefall = 2;
+	static constexpr uint8 AirChute = 3;
+	/** Falling or under the canopy: the sky HUD. Aboard the plane is NOT this - the ride keeps its own
+	 *  bottom-centre JUMP (SCampusBRHud) and nothing else to press. */
+	bool IsAirborne() const { return AirPhase == AirFreefall || AirPhase == AirChute; }
+	/** The one window in which OPEN does anything: falling with the canopy still packed. */
+	bool CanOpenChute() const { return AirPhase == AirFreefall; }
+	/** Altitude, descent rate and the one line of advice. Drawn on desktop too, where there is no
+	 *  button to go with it - the keyboard's Jump pulls the canopy there. */
+	void DrawDiveReadout(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
+	/** OPEN PARACHUTE, right thumb: translucent plate, canopy glyph, press feedback. Freefall only. */
+	void DrawChuteButton(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
+
 	void DrawHud(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
 	/** While seated: car HP under the player's bar, 4 wheel pips, the seat chip, and the BAIL OUT warning. */
 	void DrawVehicleHud(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
@@ -132,6 +155,17 @@ private:
 	float SpinAngle = 0.f;
 	/** Car HP trail bar, the same easing as LagHealth. */
 	float LagCarHealth = -1.f;
+
+	/** Which phase of the drop the local player is in (AirNone..AirChute), refreshed in Tick. */
+	uint8 AirPhase = AirNone;
+	/** 0 ground HUD, 1 sky HUD; crosses over in 150 ms so no control blinks out from under a thumb. */
+	float AirBlend = 0.f;
+	/** How long the feet have been down. The watchdog: the sky HUD cannot survive a third of a second
+	 *  of standing on something, whatever the drop actor or the network still believe. */
+	float GroundedTime = 0.f;
+	/** Metres above whatever is below, and the descent rate, both eased for a readable number. */
+	float DiveAltitude = 0.f;
+	float DiveFallSpeed = 0.f;
 
 	// Settings cached in Tick: reading the save game in OnPaint / per look event would hit the
 	// game instance thousands of times a second for values that change on a menu tap.

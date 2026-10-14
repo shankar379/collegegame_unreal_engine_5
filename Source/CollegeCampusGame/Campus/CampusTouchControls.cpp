@@ -14,6 +14,7 @@
 #include "Camera/PlayerCameraManager.h"
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "Layout/Clipping.h"
@@ -280,6 +281,12 @@ SCampusTouchControls::FLayout SCampusTouchControls::MakeLayout(const FVector2D& 
 	// PICK UP sits above ENTER, in the same column: both are "act on the thing next to you" buttons.
 	L.PickupR = 3.4f * U;
 	L.Pickup = L.Vehicle - FVector2D(0.f, L.VehicleR + L.PickupR + 1.6f * U);
+
+	// OPEN PARACHUTE: the right thumb's own slot, just above where the trigger sits - the thumb is
+	// already resting there, and in the sky that trigger is not drawn, so the two can never be
+	// mis-tapped for one another. Floors of 128 x 84 px keep it past a 64 dp target on a small phone.
+	L.ChuteSize = FVector2D(FMath::Max(12.f * U, 128.f), FMath::Max(8.f * U, 84.f));
+	L.Chute = FVector2D(L.Fire.X, L.Fire.Y - L.ChuteSize.Y * 0.55f);
 	return L;
 }
 
@@ -296,6 +303,22 @@ SCampusTouchControls::EControl SCampusTouchControls::HitTest(const FLayout& L, c
 	const float Pad = 1.15f;
 	// The gear is checked first: it must stay reachable even if a control creeps near the corner.
 	if (In(L.Gear, L.GearR * 1.25f)) return EControl::Settings;
+	// THE SKY HUD owns the screen while the player is coming down. A button that is not drawn must not
+	// be hit either - the right thumb landing where the trigger used to be would otherwise fire a gun
+	// the diver is not holding. Only OPEN and the voice toggles survive; every other touch falls
+	// through to the stick on the left and the look drag on the right, which is the whole point.
+	if (IsAirborne())
+	{
+		if (CanOpenChute() && FMath::Abs(P.X - L.Chute.X) <= L.ChuteSize.X * 0.5f * Pad
+			&& FMath::Abs(P.Y - L.Chute.Y) <= L.ChuteSize.Y * 0.5f * Pad)
+		{
+			return EControl::Chute;
+		}
+		// Talking about where to land is the one thing a diver still needs a button for.
+		if (In(L.Mic, L.VoiceR * 1.4f)) return EControl::Mic;
+		if (In(L.Speaker, L.VoiceR * 1.4f)) return EControl::Speaker;
+		return EControl::None;
+	}
 	// Only hit-testable when drawn: ENTER near a car, EXIT / SWITCH SEAT while seated.
 	if ((bCarNear || bSeated) && In(L.Vehicle, L.VehicleR * Pad)) return EControl::Vehicle;
 	if (bSeated && In(L.SeatSwitch, L.SeatSwitchR * Pad)) return EControl::SeatSwitch;
@@ -375,6 +398,10 @@ void SCampusTouchControls::PressControl(EControl Control)
 		Character->Reload();
 		break;
 	case EControl::Jump:
+	case EControl::Chute:
+		// One hook for both: ACampusBRPlane::HandleJumpPressed runs first inside JumpPressed, and in
+		// freefall it means exactly one thing - pull the canopy. OPEN is that press with a thumb-sized
+		// plate of its own, so the diver never has to find the small Jump disc at 40 m/s.
 		Character->JumpPressed();
 		break;
 	case EControl::Crouch:
@@ -683,6 +710,79 @@ void SCampusTouchControls::Tick(const FGeometry& AllottedGeometry, const double 
 	}
 
 	ACampusCharacter* Character = GetCharacter();
+
+	// ---- THE DROP. One read a frame, and it runs BEFORE the pawnless early-out below: death,
+	// respawn and spectating all have to collapse the sky HUD, and all three arrive as "no pawn".
+	{
+		const UCharacterMovementComponent* Movement = Character ? Character->GetCharacterMovement() : nullptr;
+		// FEET DOWN ENDS THE DIVE, whatever anything else says. The movement mode is the one witness
+		// that covers every way a drop can finish - terrain, a rooftop, a slope, water, a canopy cut
+		// early, the 40 m auto-open - and it is local, so it never waits a round trip for the server's
+		// ECampusBRDive::Done to arrive. Swimming counts: a diver who splashed down has landed.
+		const bool bGrounded = Movement
+			&& (Movement->IsMovingOnGround() || Movement->MovementMode == MOVE_Swimming);
+		GroundedTime = bGrounded ? GroundedTime + InDeltaTime : 0.f;
+		// The drop actor is the owning phone's own copy (altitude, CanDropNow); the pawn's replicated
+		// DivePose is the backstop for the frame before it arrives. Either one is enough to be in the
+		// air; NEITHER plus feet down is the ground, and that is the only state that restores the HUD.
+		const ACampusBRDrop* Drop = ACampusBRPlane::FindDrop(Character);
+		uint8 Phase = AirNone;
+		if (!bGrounded && Drop && Drop->IsDeploying())
+		{
+			switch (Drop->GetState())
+			{
+			case ECampusBRDive::InPlane: Phase = AirPlane; break;
+			case ECampusBRDive::Freefall: Phase = AirFreefall; break;
+			case ECampusBRDive::Parachute: Phase = AirChute; break;
+			default: break;
+			}
+		}
+		else if (!bGrounded && Character && Character->IsDiving())
+		{
+			Phase = Character->IsUnderChute() ? AirChute : AirFreefall;
+		}
+		const bool bWasAirborne = IsAirborne();
+		AirPhase = Phase;
+		if (GroundedTime > 0.3f)
+		{
+			// The watchdog. A third of a second standing on something and the sky HUD is gone without
+			// waiting for the fade: no replication hiccup, no cleared drop and no odd landing surface
+			// can strand a player in the air with no trigger, no bag and no crouch.
+			AirBlend = 0.f;
+		}
+		else
+		{
+			AirBlend = FMath::FInterpConstantTo(AirBlend, IsAirborne() ? 1.f : 0.f, InDeltaTime, 1.f / 0.15f);
+		}
+		if (Character && IsAirborne())
+		{
+			// Negative means UNKNOWN - the pawn says it is diving but its drop actor has not reached
+			// this phone yet. The readout prints dashes for that frame rather than a confident 0 m.
+			DiveAltitude = Drop ? Drop->HeightAboveGround() * 0.01f : -1.f;
+			// Eased, or the readout flickers through three numbers a frame at 40 m/s.
+			DiveFallSpeed = FMath::FInterpTo(DiveFallSpeed, FMath::Max(0.f, -Character->GetVelocity().Z * 0.01f),
+				InDeltaTime, 6.f);
+			// A dive is not a sprint: the RUN LOCK can never arm in the air, or the diver would land
+			// already running.
+			bAutoRun = false;
+			bAtRunRim = false;
+			RunRimTime = 0.f;
+			if (!bWasAirborne)
+			{
+				// Leaving the plane cancels whatever the thumbs were doing on the ground, so a held
+				// trigger or a free-look drag cannot survive into the sky HUD that has no button for it.
+				Character->SetFireHeld(false);
+				Character->SetBrakeHeld(false);
+				Character->SetFreeLookHeld(false);
+				Character->SetSprintHeld(false);
+			}
+		}
+		else
+		{
+			DiveFallSpeed = 0.f;
+		}
+	}
+
 	if (!Character)
 	{
 		LastHealth = LagHealth = 100.f;
@@ -915,6 +1015,28 @@ void SCampusTouchControls::DrawIcon(FSlateWindowElementList& Out, int32 Layer, c
 		DrawCircle(Out, Layer, G, FVector2D(C.X + S * 0.5f, C.Y + S * 0.5f), S * 0.22f, Color);
 		break;
 	}
+	case EControl::Chute:
+	{
+		// A canopy: three scalloped lobes over four rigging lines and the diver hanging under them.
+		const float S = R * 0.62f;
+		TArray<FVector2f> Dome;
+		for (int32 I = 0; I <= 24; ++I)
+		{
+			const float A = UE_PI + UE_PI * I / 24.f; // left rim, over the top, right rim
+			// The scallop: three shallow lobes along the arc, the shape that reads as fabric.
+			const float Lobe = 1.f - 0.12f * FMath::Abs(FMath::Sin(3.f * (A - UE_PI)));
+			Dome.Add(P(FMath::Cos(A) * S * Lobe, FMath::Sin(A) * S * Lobe * 0.82f - S * 0.12f));
+		}
+		DrawPolyline(Out, Layer, G, Dome, Color, T);
+		const FVector2f Hang = P(0.f, S * 0.92f);
+		for (int32 I = 0; I < 4; ++I)
+		{
+			const float X = FMath::Lerp(-S * 0.92f, S * 0.92f, I / 3.f);
+			DrawPolyline(Out, Layer, G, { P(X, -S * 0.12f), Hang }, Color, T * 0.6f);
+		}
+		DrawCircle(Out, Layer, G, FVector2D(Hang.X, Hang.Y), S * 0.17f, Color);
+		break;
+	}
 	case EControl::SeatSwitch:
 	{
 		// Two arrows trading places.
@@ -937,6 +1059,14 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	const bool bScoped = bAiming && Character->GetZoom() >= 2.f && Character->GetAimBlend() > 0.5f;
 	// Driver layout swap: Fire / FireLeft / Scope / Zoom / Reload go away, the Fire slot becomes BRAKE.
 	const bool bDriving = Character && Character->IsDriving();
+	// THE SKY HUD CROSS-FADE. AirBlend runs 0 -> 1 over 150 ms the moment the diver leaves the plane
+	// and back again the instant the feet are down, so the combat controls dissolve instead of
+	// blinking out from under a thumb. Everything useless at 40 m/s multiplies its alpha by this and
+	// stops being hit-testable (HitTest); the stick, the look drag, the voice toggles, the minimap and
+	// the gear are untouched, because those are the four things a diver actually uses.
+	const float GroundFade = 1.f - AirBlend;
+	const bool bGroundControls = GroundFade > 0.01f;
+	auto Fade = [GroundFade](const FLinearColor& Color) { return Color.CopyWithNewOpacity(Color.A * GroundFade); };
 	auto IsHeld = [this](EControl Control)
 	{
 		for (const TPair<int32, FFinger>& Pair : Fingers)
@@ -1009,7 +1139,7 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 
 	// Fire: grey disc, white inner disc that follows the aiming finger. While driving the same slot is
 	// the brake, so the thumb never has to move and the trigger simply does not exist.
-	const float FireAlpha = bScoped ? 0.7f : 1.f;
+	const float FireAlpha = (bScoped ? 0.7f : 1.f) * GroundFade;
 	const bool bFireHeld = IsHeld(EControl::Fire);
 	FLinearColor FireColor = bFireHeld ? TouchStyle::FirePressed : TouchStyle::FireBase;
 	FireColor.A *= FireAlpha;
@@ -1020,7 +1150,7 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 			Back, bFireHeld ? FLinearColor::White : TouchStyle::Hairline, bFireHeld ? 2.f : 1.f);
 		DrawText(Out, Layer + 2, G, TEXT("BRAKE"), L.Fire, FMath::RoundToInt(L.U * 1.9f), FLinearColor::White);
 	}
-	else
+	else if (bGroundControls)
 	{
 	FVector2D Inner = L.Fire;
 	for (const TPair<int32, FFinger>& Pair : Fingers)
@@ -1044,12 +1174,12 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	else
 	{
 		DrawCircle(Out, Layer + 1, G, Inner, InnerR, TouchStyle::FireDisc.CopyWithNewOpacity(FireAlpha));
-		DrawIcon(Out, Layer + 2, G, EControl::Fire, Inner, InnerR, TouchStyle::FireIcon, 0.f);
+		DrawIcon(Out, Layer + 2, G, EControl::Fire, Inner, InnerR, Fade(TouchStyle::FireIcon), 0.f);
 	}
 	}
 
 	// Small left fire button: the same artwork. Switchable in the settings gear.
-	if (bLeftFireButton && !bDriving)
+	if (bLeftFireButton && !bDriving && bGroundControls)
 	{
 		if (const FSlateBrush* FireIcon = Icon(TEXT("fire")))
 		{
@@ -1058,23 +1188,23 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		else
 		{
 			DrawCircle(Out, Layer, G, L.FireLeft, L.FireLeftR, FireColor);
-			DrawIcon(Out, Layer + 1, G, EControl::FireLeft, L.FireLeft, L.FireLeftR * 1.6f, FLinearColor::White, 0.f);
+			DrawIcon(Out, Layer + 1, G, EControl::FireLeft, L.FireLeft, L.FireLeftR * 1.6f, Fade(FLinearColor::White), 0.f);
 		}
 	}
 
 	// Reload: white disc, spinning icon and a filling ring while reloading.
 	const bool bReloading = Character && Character->IsReloading();
-	if (!bDriving)
+	if (!bDriving && bGroundControls)
 	{
-	DrawCircle(Out, Layer, G, L.Reload, L.ReloadR, TouchStyle::ReloadDisc);
+	DrawCircle(Out, Layer, G, L.Reload, L.ReloadR, Fade(TouchStyle::ReloadDisc));
 	const float ReloadScale = IsHeld(EControl::Reload) ? 0.92f : 1.f;
 	if (const FSlateBrush* ReloadIcon = Icon(TEXT("reload")))
 	{
-		DrawImage(Out, Layer + 1, G, ReloadIcon, L.Reload, FVector2D(L.ReloadR * 1.25f * ReloadScale), FLinearColor(FColor(0x33, 0x33, 0x33)), bReloading ? SpinAngle : 0.f);
+		DrawImage(Out, Layer + 1, G, ReloadIcon, L.Reload, FVector2D(L.ReloadR * 1.25f * ReloadScale), Fade(FLinearColor(FColor(0x33, 0x33, 0x33))), bReloading ? SpinAngle : 0.f);
 	}
 	else
 	{
-		DrawIcon(Out, Layer + 1, G, EControl::Reload, L.Reload, L.ReloadR * ReloadScale, FLinearColor(FColor(0x33, 0x33, 0x33)), bReloading ? SpinAngle : 0.f);
+		DrawIcon(Out, Layer + 1, G, EControl::Reload, L.Reload, L.ReloadR * ReloadScale, Fade(FLinearColor(FColor(0x33, 0x33, 0x33))), bReloading ? SpinAngle : 0.f);
 	}
 	if (bReloading)
 	{
@@ -1106,7 +1236,9 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		}
 		if (const FSlateBrush* Art = Icon(IconName))
 		{
-			if (bActiveNow)
+			// The glow has no tint of its own, so it goes out as soon as the button is more than half
+			// faded - a bright halo around a vanishing icon reads as a bug.
+			if (bActiveNow && Opacity > 0.5f)
 			{
 				DrawGlow(Out, Layer, G, C, Radius);
 			}
@@ -1118,48 +1250,55 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		const FLinearColor Ic = bActiveNow ? TouchStyle::IconOn : TouchStyle::Icon;
 		DrawIcon(Out, Layer + 1, G, Control, C, Radius, Ic.CopyWithNewOpacity(Ic.A * Opacity), 0.f);
 	};
-	if (Character && Character->IsArmed() && !bDriving)
+	// AIM, JUMP, CROUCH, PRONE and RUN all mean nothing at 40 m/s, so the whole row fades out with
+	// everything else: in the sky the only two things that move the player are the left stick and,
+	// once, the OPEN plate.
+	if (bGroundControls)
 	{
-		Plain(EControl::Scope, L.Scope, L.ScopeR, bAiming, bScoped ? 0.7f : 1.f);
-	}
-	Plain(EControl::Jump, L.Jump, L.JumpR, false, 1.f);
-	Plain(EControl::Crouch, L.Crouch, L.CrouchR, Character && Character->bIsCrouched && !Character->IsProne(), 1.f);
-	Plain(EControl::Prone, L.Prone, L.ProneR, Character && Character->IsProne(), 1.f);
-	Plain(EControl::Sprint, L.Sprint, L.SprintR, bAutoRun || (Character && Character->IsSprinting()), 1.f);
-	if (bDriving)
-	{
-		// Same button, different job: Sprint is the handbrake at the wheel.
-		DrawText(Out, Layer + 2, G, TEXT("HAND"), L.Sprint + FVector2D(0.f, L.SprintR + 1.f * L.U),
-			FMath::RoundToInt(L.U * 1.05f), FLinearColor::White);
+		if (Character && Character->IsArmed() && !bDriving)
+		{
+			Plain(EControl::Scope, L.Scope, L.ScopeR, bAiming, (bScoped ? 0.7f : 1.f) * GroundFade);
+		}
+		Plain(EControl::Jump, L.Jump, L.JumpR, false, GroundFade);
+		Plain(EControl::Crouch, L.Crouch, L.CrouchR, Character && Character->bIsCrouched && !Character->IsProne(), GroundFade);
+		Plain(EControl::Prone, L.Prone, L.ProneR, Character && Character->IsProne(), GroundFade);
+		Plain(EControl::Sprint, L.Sprint, L.SprintR, bAutoRun || (Character && Character->IsSprinting()), GroundFade);
+		if (bDriving)
+		{
+			// Same button, different job: Sprint is the handbrake at the wheel.
+			DrawText(Out, Layer + 2, G, TEXT("HAND"), L.Sprint + FVector2D(0.f, L.SprintR + 1.f * L.U),
+				FMath::RoundToInt(L.U * 1.05f), Fade(FLinearColor::White));
+		}
 	}
 
 	// Cars: ENTER appears when one is in reach, EXIT and SWITCH SEAT once you are in it.
+	if (bGroundControls)
 	{
 		ECampusSeat NearSeat = ECampusSeat::None;
 		const bool bSeated = Character && Character->IsSeated();
 		const bool bCarNear = Character && Character->FindNearbyVehicle(NearSeat) != nullptr;
 		if (bSeated || bCarNear)
 		{
-			Plain(EControl::Vehicle, L.Vehicle, L.VehicleR, bSeated, 1.f);
+			Plain(EControl::Vehicle, L.Vehicle, L.VehicleR, bSeated, GroundFade);
 			DrawText(Out, Layer + 2, G, bSeated ? TEXT("EXIT") : TEXT("ENTER"),
 				L.Vehicle + FVector2D(0.f, L.VehicleR + 1.1f * L.U), FMath::RoundToInt(L.U * 1.15f),
-				bSeated ? TouchStyle::IconOn : FLinearColor::White);
+				Fade(bSeated ? TouchStyle::IconOn : FLinearColor::White));
 		}
 		if (bSeated)
 		{
-			Plain(EControl::SeatSwitch, L.SeatSwitch, L.SeatSwitchR, false, 1.f);
+			Plain(EControl::SeatSwitch, L.SeatSwitch, L.SeatSwitchR, false, GroundFade);
 			DrawText(Out, Layer + 2, G, TEXT("SEAT"), L.SeatSwitch + FVector2D(0.f, L.SeatSwitchR + 1.1f * L.U),
-				FMath::RoundToInt(L.U * 1.05f), FLinearColor::White);
+				FMath::RoundToInt(L.U * 1.05f), Fade(FLinearColor::White));
 		}
 		// Ground loot: PICK UP with the box's own name on it, so you know what you are taking.
 		const ACampusPickup* Near = (Character && !bSeated) ? Character->FindNearbyPickup() : nullptr;
 		if (Near)
 		{
-			DrawCircle(Out, Layer, G, L.Pickup, L.PickupR, TouchStyle::ButtonBack);
-			DrawRing(Out, Layer + 1, G, L.Pickup, L.PickupR, TouchStyle::Accent);
-			DrawText(Out, Layer + 2, G, TEXT("PICK UP"), L.Pickup, FMath::RoundToInt(L.U * 1.05f), FLinearColor::White);
+			DrawCircle(Out, Layer, G, L.Pickup, L.PickupR, Fade(TouchStyle::ButtonBack));
+			DrawRing(Out, Layer + 1, G, L.Pickup, L.PickupR, Fade(TouchStyle::Accent));
+			DrawText(Out, Layer + 2, G, TEXT("PICK UP"), L.Pickup, FMath::RoundToInt(L.U * 1.05f), Fade(FLinearColor::White));
 			DrawText(Out, Layer + 2, G, Near->Label().ToUpper(), L.Pickup + FVector2D(0.f, L.PickupR + 1.1f * L.U),
-				FMath::RoundToInt(L.U * 1.15f), TouchStyle::IconOn);
+				FMath::RoundToInt(L.U * 1.15f), Fade(TouchStyle::IconOn));
 		}
 	}
 
@@ -1184,10 +1323,13 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 		Toggle(L.Speaker, TEXT("SPK"), Voice->IsSpeakerOn());
 	}
 
+	// FREE LOOK. Gone in the sky: the camera there is the whole right side of the screen, and a second
+	// orbit ring over it only invites a diver to decouple their view from the glide they are steering.
+	if (bGroundControls)
 	{
 		const bool bEyeHeld = IsHeld(EControl::Eye);
-		DrawCircle(Out, Layer, G, L.Eye, L.EyeR, TouchStyle::EyeBack);
-		DrawRing(Out, Layer + 1, G, L.Eye, L.EyeR, TouchStyle::EyeRing);
+		DrawCircle(Out, Layer, G, L.Eye, L.EyeR, Fade(TouchStyle::EyeBack));
+		DrawRing(Out, Layer + 1, G, L.Eye, L.EyeR, Fade(TouchStyle::EyeRing));
 		FVector2D EyeKnob = L.Eye;
 		for (const TPair<int32, FFinger>& Pair : Fingers)
 		{
@@ -1202,7 +1344,7 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 				EyeKnob = L.Eye + Offset;
 			}
 		}
-		const FLinearColor EyeTint = bEyeHeld ? TouchStyle::IconOn : FLinearColor::White;
+		const FLinearColor EyeTint = Fade(bEyeHeld ? TouchStyle::IconOn : FLinearColor::White);
 		if (const FSlateBrush* EyeIcon = Icon(TEXT("eye")))
 		{
 			DrawImage(Out, Layer + 2, G, EyeIcon, EyeKnob, FVector2D(L.EyeR * 1.25f), EyeTint);
@@ -1219,7 +1361,7 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 			Upper.Add(FVector2f(EyeKnob.X + T * EyeSize, EyeKnob.Y - Y));
 			Lower.Add(FVector2f(EyeKnob.X + T * EyeSize, EyeKnob.Y + Y));
 		}
-		const FLinearColor EyeColor = bEyeHeld ? TouchStyle::IconOn : FLinearColor::White;
+		const FLinearColor EyeColor = EyeTint;
 		DrawPolyline(Out, Layer + 2, G, Upper, EyeColor, 2.f);
 		DrawPolyline(Out, Layer + 2, G, Lower, EyeColor, 2.f);
 		DrawCircle(Out, Layer + 2, G, EyeKnob, EyeSize * 0.32f, EyeColor);
@@ -1227,11 +1369,97 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	}
 
 	// Zoom pill, only while aiming.
-	if (bAiming && Character && !bDriving)
+	if (bAiming && Character && !bDriving && bGroundControls)
 	{
-		DrawSlantedPanel(Out, Layer, G, L.Zoom - L.ZoomSize * 0.5f, L.ZoomSize, L.ZoomSize.Y * 0.32f, TouchStyle::Chip, TouchStyle::Hairline, 1.f);
-		DrawText(Out, Layer + 1, G, FString::Printf(TEXT("%dx"), FMath::RoundToInt(Character->GetZoom())), L.Zoom, FMath::RoundToInt(L.U * 1.4f), FLinearColor::White);
+		DrawSlantedPanel(Out, Layer, G, L.Zoom - L.ZoomSize * 0.5f, L.ZoomSize, L.ZoomSize.Y * 0.32f, Fade(TouchStyle::Chip), Fade(TouchStyle::Hairline), 1.f);
+		DrawText(Out, Layer + 1, G, FString::Printf(TEXT("%dx"), FMath::RoundToInt(Character->GetZoom())), L.Zoom, FMath::RoundToInt(L.U * 1.4f), Fade(FLinearColor::White));
 	}
+
+	// THE DROP'S ONE BUTTON, drawn last so it sits over anything still fading out beneath it.
+	DrawChuteButton(Out, Layer + 8, G, L);
+}
+
+void SCampusTouchControls::DrawChuteButton(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
+{
+	// FREEFALL ONLY. Aboard the plane the press is the bottom-centre JUMP (SCampusBRHud) and under the
+	// canopy there is nothing left to open, so this slot is empty in both - a button that cannot do
+	// anything is worse than no button, because the thumb still goes looking for it.
+	if (!CanOpenChute() || AirBlend <= 0.01f)
+	{
+		return;
+	}
+	const float U = L.U;
+	bool bHeld = false;
+	for (const TPair<int32, FFinger>& Pair : Fingers)
+	{
+		bHeld |= Pair.Value.Control == EControl::Chute;
+	}
+	// Entrance: alpha and a 12 px settle over the same 150 ms the two HUD sets cross-fade in, so the
+	// plate arrives under the thumb instead of appearing there.
+	const FVector2D Size = L.ChuteSize * (bHeld ? 0.96f : 1.f);
+	const FVector2D Center = L.Chute + FVector2D(0.f, (1.f - AirBlend) * 12.f);
+	const FVector2D Min = Center - Size * 0.5f;
+	// Dark glass and a hairline - the newer HUD's own plate, not the old grey trigger disc. 42% fill
+	// keeps the ground under it readable, which is the whole reason a diver is looking down there.
+	const FLinearColor Fill = bHeld ? FLinearColor(0.09f, 0.07f, 0.01f, 0.62f * AirBlend)
+		: FLinearColor(0.015f, 0.025f, 0.04f, 0.42f * AirBlend);
+	// The last 80 m: the canopy is about to pull itself at 40, so the border breathes to say NOW.
+	// Fmod first - FPlatformTime::Seconds() is machine uptime and a float that big has no resolution
+	// left for a 5 rad/s pulse (the same trap as the zone's edge tint).
+	const float Pulse = DiveAltitude > 0.f && DiveAltitude < 80.f
+		? 0.55f + 0.45f * FMath::Sin(float(FMath::Fmod(FPlatformTime::Seconds(), 1000.0)) * 5.f)
+		: 1.f;
+	const FLinearColor Border = bHeld ? TouchStyle::Accent.CopyWithNewOpacity(AirBlend)
+		: FLinearColor(1.f, 1.f, 1.f, (0.28f + 0.32f * Pulse) * AirBlend);
+	DrawNotchedBox(Out, Layer, G, Min, Size, Size.Y * 0.26f, Fill, Border, bHeld ? 2.f : 1.5f);
+	// Glyph over label: the canopy reads before the word does, and the word says which press this is.
+	// Colour is never the only signal - pressed changes the border AND brightens the glyph.
+	DrawIcon(Out, Layer + 2, G, EControl::Chute, FVector2D(Center.X, Min.Y + Size.Y * 0.38f), Size.Y * 0.32f,
+		(bHeld ? TouchStyle::Accent : FLinearColor::White).CopyWithNewOpacity(AirBlend), 0.f);
+	DrawText(Out, Layer + 2, G, TEXT("OPEN"), FVector2D(Center.X, Min.Y + Size.Y * 0.8f),
+		FMath::Max(12, FMath::RoundToInt(U * 1.7f)), FLinearColor(1.f, 1.f, 1.f, AirBlend));
+	DrawText(Out, Layer + 2, G, TEXT("PARACHUTE"), FVector2D(Center.X, Min.Y + Size.Y + 1.4f * U),
+		FMath::Max(9, FMath::RoundToInt(U * 1.05f)), TouchStyle::Accent.CopyWithNewOpacity(0.85f * AirBlend));
+}
+
+void SCampusTouchControls::DrawDiveReadout(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
+{
+	// Altitude is the number the whole drop is played on, so it gets a plate of its own rather than a
+	// line of banner text. Drawn with or without the touch buttons: a desktop diver needs it too.
+	if (!IsAirborne() || AirBlend <= 0.01f)
+	{
+		return;
+	}
+	const float U = L.U;
+	const bool bChute = AirPhase == AirChute;
+	const FVector2D Size(FMath::Max(26.f * U, 250.f), FMath::Max(5.2f * U, 56.f));
+	// Below the ALIVE plate and its zone line, never over them, at every aspect ratio we ship.
+	const FVector2D Min(L.W * 0.5f - Size.X * 0.5f, L.H * 0.16f - (1.f - AirBlend) * 10.f);
+	const int32 Caption = FMath::Max(9, FMath::RoundToInt(U * 1.05f));
+	const int32 Value = FMath::Max(14, FMath::RoundToInt(U * 2.f));
+	DrawNotchedBox(Out, Layer, G, Min, Size, 1.5f * U, TouchStyle::Chip.CopyWithNewOpacity(TouchStyle::Chip.A * AirBlend),
+		(bChute ? TouchStyle::Accent.CopyWithNewOpacity(0.55f) : TouchStyle::Hairline).CopyWithNewOpacity(AirBlend), 1.f);
+	const FLinearColor Dim(1.f, 1.f, 1.f, 0.65f * AirBlend);
+	const FLinearColor Ink(1.f, 1.f, 1.f, AirBlend);
+	auto Cell = [&](float AtX, const TCHAR* Label, const FString& Reading)
+	{
+		const float X = Min.X + Size.X * AtX;
+		DrawText(Out, Layer + 2, G, Label, FVector2D(X, Min.Y + Size.Y * 0.3f), Caption, Dim);
+		// Tabular: a metre count that jumps between 299 and 300 must not shuffle sideways as it does.
+		DrawText(Out, Layer + 2, G, Reading, FVector2D(X, Min.Y + Size.Y * 0.69f), Value, Ink, 0.5f, 0.5f, true);
+	};
+	Cell(0.2f, TEXT("ALTITUDE"), DiveAltitude >= 0.f
+		? FString::Printf(TEXT("%d m"), FMath::RoundToInt(DiveAltitude)) : FString(TEXT("-- m")));
+	Cell(0.55f, TEXT("DESCENT"), FString::Printf(TEXT("%d m/s"), FMath::RoundToInt(DiveFallSpeed)));
+	DrawText(Out, Layer + 2, G, bChute ? TEXT("CANOPY") : TEXT("FREEFALL"),
+		FVector2D(Min.X + Size.X * 0.86f, Min.Y + Size.Y * 0.52f), FMath::Max(11, FMath::RoundToInt(U * 1.45f)),
+		(bChute ? TouchStyle::Mate : TouchStyle::Accent).CopyWithNewOpacity(AirBlend));
+	// One line of advice, and it names the control the player actually has in their hands.
+	const FString Prompt = bChute
+		? FString(TEXT("LEFT STICK STEERS THE GLIDE  ·  DRAG TO LOOK"))
+		: FString(bShowButtons ? TEXT("TAP OPEN TO PULL THE CANOPY  ·  AUTO AT 40 m")
+			: TEXT("JUMP TO PULL THE CANOPY  ·  AUTO AT 40 m"));
+	DrawText(Out, Layer + 2, G, Prompt, FVector2D(L.W * 0.5f, Min.Y + Size.Y + 1.6f * U), Caption, Dim);
 }
 
 void SCampusTouchControls::DrawVehicleHud(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
@@ -1442,20 +1670,26 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 		return;
 	}
 
-	// Weapons panel with ammo: big magazine count / reserve; tap to switch to the rifle or fists.
+	// WEAPONS AND AMMO, and not a pixel of either while the player is coming down: there is no gun in
+	// a diver's hands, both slots are untappable in the air (HitTest), and a magazine count over a
+	// 300 m drop is the clutter this screen was asked to lose. Fades with the rest of the combat set.
+	const float GroundFade = 1.f - AirBlend;
+	auto Fade = [GroundFade](const FLinearColor& Color) { return Color.CopyWithNewOpacity(Color.A * GroundFade); };
+	if (GroundFade > 0.01f)
+	{
 	const bool bArmed = Character->IsArmed();
 	DrawNotchedBox(Out, Layer, G, L.WeaponMin, L.WeaponSize, 1.6f * U,
-		TouchStyle::Chip.CopyWithNewOpacity(bArmed ? 0.82f : 0.5f), bArmed ? TouchStyle::Accent.CopyWithNewOpacity(0.55f) : TouchStyle::Hairline, 1.f);
+		Fade(TouchStyle::Chip.CopyWithNewOpacity(bArmed ? 0.82f : 0.5f)), Fade(bArmed ? TouchStyle::Accent.CopyWithNewOpacity(0.55f) : TouchStyle::Hairline), 1.f);
 	if (const FSlateBrush* GunArt = Icon(bArmed ? TEXT("ak") : TEXT("fist")))
 	{
 		const FVector2D ArtSize = bArmed ? FVector2D(L.WeaponSize.X * 0.5f, L.WeaponSize.X * 0.25f) : FVector2D(L.WeaponSize.Y * 0.55f);
-		DrawImage(Out, Layer + 1, G, GunArt, L.WeaponMin + FVector2D(ArtSize.X * 0.5f + U, L.WeaponSize.Y * 0.32f), ArtSize, FLinearColor::White);
+		DrawImage(Out, Layer + 1, G, GunArt, L.WeaponMin + FVector2D(ArtSize.X * 0.5f + U, L.WeaponSize.Y * 0.32f), ArtSize, Fade(FLinearColor::White));
 	}
 	else
 	{
 		const FString Held = FString(Character->GetCurrentWeapon().Short);
 		DrawText(Out, Layer + 1, G, bArmed ? Held : Held + TEXT("  (tap)"), L.WeaponMin + FVector2D(1.2f * U, 1.4f * U), FMath::RoundToInt(U * 1.3f),
-			bArmed ? TouchStyle::IconOn : FLinearColor(1.f, 1.f, 1.f, 0.7f), 0.f, 0.5f);
+			Fade(bArmed ? TouchStyle::IconOn : FLinearColor(1.f, 1.f, 1.f, 0.7f)), 0.f, 0.5f);
 	}
 	// The second slot, along the bottom of the same plate: its gun and its magazine, tap to take it.
 	{
@@ -1464,20 +1698,21 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 		if (Character->HasWeapon(Other))
 		{
 			const FString Name = FString(CampusWeapons::FindOrStarter(Character->GetWeaponId(Other)).Short);
-			DrawText(Out, Layer + 1, G, Name, OtherAnchor, FMath::RoundToInt(U * 1.15f), FLinearColor(1.f, 1.f, 1.f, 0.78f), 0.f, 0.5f);
+			DrawText(Out, Layer + 1, G, Name, OtherAnchor, FMath::RoundToInt(U * 1.15f), Fade(FLinearColor(1.f, 1.f, 1.f, 0.78f)), 0.f, 0.5f);
 			DrawText(Out, Layer + 1, G, FString::FromInt(Character->GetSlotAmmo(Other)),
 				FVector2D(L.WeaponMin.X + L.WeaponSize.X - 1.2f * U, OtherAnchor.Y), FMath::RoundToInt(U * 1.15f),
-				FLinearColor(1.f, 1.f, 1.f, 0.6f), 1.f, 0.5f);
+				Fade(FLinearColor(1.f, 1.f, 1.f, 0.6f)), 1.f, 0.5f);
 		}
 		else
 		{
-			DrawText(Out, Layer + 1, G, TEXT("EMPTY"), OtherAnchor, FMath::RoundToInt(U * 1.05f), FLinearColor(1.f, 1.f, 1.f, 0.35f), 0.f, 0.5f);
+			DrawText(Out, Layer + 1, G, TEXT("EMPTY"), OtherAnchor, FMath::RoundToInt(U * 1.05f), Fade(FLinearColor(1.f, 1.f, 1.f, 0.35f)), 0.f, 0.5f);
 		}
 	}
 	const int32 Mag = Character->GetAmmoInMag();
 	const FVector2D AmmoAnchor = L.WeaponMin + FVector2D(L.WeaponSize.X * 0.55f, L.WeaponSize.Y * 0.62f);
-	DrawText(Out, Layer + 1, G, FString::FromInt(Mag), AmmoAnchor, FMath::RoundToInt(U * 2.2f * 1.4f), Mag <= 5 ? TouchStyle::Red : FLinearColor::White, 1.f, 0.5f);
-	DrawText(Out, Layer + 1, G, FString::Printf(TEXT("/ %d"), Character->GetAmmoReserve()), AmmoAnchor + FVector2D(0.6f * U, 0.4f * U), FMath::RoundToInt(U * 2.2f * 0.8f), FLinearColor(1.f, 1.f, 1.f, 0.8f), 0.f, 0.5f);
+	DrawText(Out, Layer + 1, G, FString::FromInt(Mag), AmmoAnchor, FMath::RoundToInt(U * 2.2f * 1.4f), Fade(Mag <= 5 ? TouchStyle::Red : FLinearColor::White), 1.f, 0.5f);
+	DrawText(Out, Layer + 1, G, FString::Printf(TEXT("/ %d"), Character->GetAmmoReserve()), AmmoAnchor + FVector2D(0.6f * U, 0.4f * U), FMath::RoundToInt(U * 2.2f * 0.8f), Fade(FLinearColor(1.f, 1.f, 1.f, 0.8f)), 0.f, 0.5f);
+	}
 
 	// Health, bottom centre: a slanted trough with the numbers on the plate (Free Fire).
 	const float BarWidth = FMath::Min(L.W * 0.34f, 380.f * L.H / 400.f * 0.5f);
@@ -1511,7 +1746,9 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 	// Crosshair (hidden when scoped), red arms while aiming; gap opens when moving.
 	const bool bScoped = Character->IsAiming() && Character->GetZoom() >= 2.f && Character->GetAimBlend() > 0.5f;
 	const FVector2D Center(L.W * 0.5f, L.H * 0.5f);
-	if (!bScoped && Character->IsArmed())
+	// Nothing to aim at from 300 m up, and a crosshair in the middle of the drop camera reads as a
+	// weapon the diver has not got.
+	if (!bScoped && Character->IsArmed() && !IsAirborne())
 	{
 		const float Moving = Character->GetVelocity().Size2D() > 40.f ? 1.6f : 1.f;
 		const float Pose = Character->bIsCrouched ? 0.8f : 1.f;
@@ -1593,6 +1830,9 @@ int32 SCampusTouchControls::OnPaint(const FPaintArgs& Args, const FGeometry& All
 	DrawHud(OutDrawElements, LayerId, AllottedGeometry, L);
 	// Battle royale only: the circle, its clock, and the alive counter. Draws nothing in TDM.
 	DrawBattleRoyaleHud(OutDrawElements, LayerId + 18, AllottedGeometry, L);
+	// The drop's instrument panel: altitude, descent rate, phase. Outside DrawControls because it is
+	// information, not a button - a desktop diver with no on-screen controls still needs the numbers.
+	DrawDiveReadout(OutDrawElements, LayerId + 19, AllottedGeometry, L);
 	if (bShowButtons)
 	{
 		DrawControls(OutDrawElements, LayerId + 5, AllottedGeometry, L);
@@ -2292,14 +2532,9 @@ void SCampusTouchControls::DrawBattleRoyaleHud(FSlateWindowElementList& Out, int
 			Banner = bOpen ? TEXT("TAP JUMP TO DROP") : TEXT("THE PLANE IS NOT OVER THE MAP YET");
 			BannerTint = bOpen ? TouchStyle::Accent : FLinearColor::White;
 		}
-		else if (Drop->GetState() == ECampusBRDive::Freefall)
-		{
-			Banner = FString::Printf(TEXT("%d m  \u00b7  JUMP TO OPEN CHUTE"), FMath::RoundToInt(Drop->HeightAboveGround() * 0.01f));
-		}
-		else if (Drop->GetState() == ECampusBRDive::Parachute)
-		{
-			Banner = FString::Printf(TEXT("%d m  \u00b7  CHUTE OPEN"), FMath::RoundToInt(Drop->HeightAboveGround() * 0.01f));
-		}
+		// FREEFALL AND THE CANOPY say it with the readout plate instead (DrawDiveReadout): altitude is
+		// a number to watch, not a sentence to re-read, and each of these branches cost a downward
+		// trace per paint for a metre count the plate already caches once a frame in Tick.
 	}
 	// NO END BANNER HERE. This used to print its own BOOYAH! / MATCH OVER over the match, which was
 	// the third card to pile up at the final whistle (SCampusBRHud had one, SCampusMatchWidget had

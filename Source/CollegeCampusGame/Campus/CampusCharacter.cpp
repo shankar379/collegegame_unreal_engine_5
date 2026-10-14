@@ -9,6 +9,7 @@
 #include "Campus/CampusBRGameMode.h"
 #include "Campus/CampusBRPlane.h"
 #include "Campus/CampusBackend.h"
+#include "Campus/CampusBot.h"
 #include "Campus/CampusDoor.h"
 #include "Campus/CampusGameMode.h"
 #include "Campus/CampusLoot.h"
@@ -41,6 +42,7 @@
 #include "Sound/SoundAttenuation.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Animation/AnimSequence.h"
+#include "Campus/CampusShotTrace.h"
 
 namespace CampusLootRules
 {
@@ -960,7 +962,7 @@ void ACampusCharacter::TryFire()
 		Objects.AddObjectTypesToQuery(ECC_Pawn);
 		FHitResult Hit;
 		const FVector End = ViewLocation + Shot * Range;
-		const bool bHit = GetWorld()->LineTraceSingleByObjectType(Hit, ViewLocation, End, Objects, FCollisionQueryParams(SCENE_QUERY_STAT(CampusFireFx), false, this));
+		const bool bHit = CampusShotTrace::FirstSolid(GetWorld(), Hit, ViewLocation, End, Objects, FCollisionQueryParams(SCENE_QUERY_STAT(CampusFireFx), false, this));
 		SpawnShotFx(bHit ? Hit.ImpactPoint : End, bHit ? Hit.ImpactNormal : FVector::UpVector, bHit && !Cast<ACampusCharacter>(Hit.GetActor()));
 	}
 	if (AmmoInMag == 0)
@@ -1083,6 +1085,10 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	}
 	ServerShotCredit -= 1.f;
 	--ServerAmmoInMag;
+	// A rifle is the loudest thing on the campus. Every bot near enough goes to LOOK at where it went
+	// off - it never becomes a target, so no bot has ever shot at a sound. One pass over at most ten
+	// entries, and a no-op in a match with no bots.
+	ACampusBotController::OnGunshot(GetWorld(), FVector(Start), GetController());
 	// The world blocks where it is now; players are checked where the shooter saw them (lag compensation).
 	FCollisionObjectQueryParams Objects;
 	Objects.AddObjectTypesToQuery(ECC_WorldStatic);
@@ -1090,7 +1096,7 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CampusFire), false, this);
 	FHitResult Hit;
 	const FVector End = FVector(Start) + FVector(Direction) * Range;
-	const bool bWall = GetWorld()->LineTraceSingleByObjectType(Hit, Start, End, Objects, Params);
+	const bool bWall = CampusShotTrace::FirstSolid(GetWorld(), Hit, Start, End, Objects, Params);
 
 	// Cars are invisible to the trace above (ECC_Vehicle is not in Objects) and are tested ONLY here, at
 	// the same instant the occupants are rewound to - otherwise a 300 cm-displaced car and the rewound
@@ -1327,6 +1333,14 @@ ACampusCharacter* ACampusCharacter::RewoundVictim(const FVector& Start, const FV
 		FMath::SegmentDistToSegmentSafe(Start, End, Box.Center - Half, Box.Center + Half, OnShot, OnAxis);
 		const float Miss = FVector::Dist(OnShot, OnAxis);
 		if (Miss > Box.Radius)
+		{
+			continue;
+		}
+		// The BODY has to be on the near side of whatever stopped the bullet. Without this, a player
+		// pressed against a wall is hit through it: the shot is clipped at the wall, and the clipped end
+		// point still falls inside their capsule radius on the far side of it. Costs nothing when the
+		// shot was never blocked (BlockDistance is then the weapon's whole range).
+		if (FVector::DotProduct(OnAxis - Start, Direction) > BlockDistance)
 		{
 			continue;
 		}

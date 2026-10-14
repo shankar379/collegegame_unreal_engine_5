@@ -8,6 +8,18 @@
 // phone. Docs/BATTLE_ROYALE_DESIGN.md caps PHYSICAL bots at MaxPhysicalBots (10) - the rest of a BR
 // lobby is simulated as data elsewhere - and the whole level at ~12 animated characters.
 // Everything the bot does to its pawn is server-side; bots never exist on a client.
+//
+// FAIR SIGHT (the thing that stops a bot reading as a hacker), hand-rolled to the same shape as
+// UAISenseConfig_Sight but at a tenth of the cost:
+//   * SightRange / LoseSightShare       <- SightRadius / LoseSightRadius
+//   * ViewHalfAngleCos / LoseHalfAngle  <- PeripheralVisionAngle, with hysteresis
+//   * three-point line of sight (head / chest / pelvis), on the object types the bullet itself blocks
+//     on PLUS the cars (ECC_Vehicle, which no world trace in this project sees)
+//   * a reaction delay before the first shot, aim error that shrinks with time on target and grows
+//     with distance and the target's own speed
+//   * a last-known position it searches when sight breaks, and gunshots it hears but never shoots at
+// The rules are the same for every pair of combatants, so bots fight each other exactly as they fight
+// a player, and EVERY shot is gated by a live muzzle-to-target trace: a bot behind cover holds fire.
 
 #pragma once
 
@@ -54,12 +66,21 @@ public:
 	 *  this - a bot is supposed to read like another player while you are playing against it. */
 	static FString PostMatchTag(const APlayerState* State);
 
+	/** A rifle went off at From. Called once per VALID shot from ACampusCharacter::ServerFire (server
+	 *  only), for players and bots alike. Every bot near enough and not on the shooter's side walks over
+	 *  to LOOK - a heard shot never becomes a target, so no bot has ever fired at a sound. */
+	static void OnGunshot(UWorld* World, const FVector& From, AController* Shooter);
+
 	ECampusBotSkill GetSkill() const { return Skill; }
 	void SetSkill(ECampusBotSkill InSkill);
 
 	virtual void OnPossess(APawn* InPawn) override;
 	virtual void OnUnPossess() override;
 	virtual void Tick(float DeltaSeconds) override;
+	/** Both only keep the static roster OnGunshot walks, so a shot costs one pass over <=10 entries
+	 *  instead of a TActorIterator over the level. */
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 
 	/** The bot owns its control rotation (AimAt): the base version would point it at the path's focal
 	 *  point and flatten the pitch to zero, so a bot could never aim up or down. All this keeps is the
@@ -70,24 +91,32 @@ private:
 	enum class EState : uint8
 	{
 		Roam,
+		/** A target is VISIBLE right now. The only state a shot may be fired from. */
 		Engage,
+		/** Sight broke, or a shot was heard: work the last known position. Never fires. */
+		Search,
 		Cover
 	};
 
 	/** No pawn: back in at the start of a new round (elimination keeps a dead bot out of the current one),
 	 *  or straight away outside a round. Mirrors what ACampusMatchGameMode does for player controllers. */
 	void TickRespawn(const ACampusGameState* State);
-	/** 4 Hz: nearest enemy in the view cone with a clear line, kept for MemorySeconds after it breaks. */
+	/** 2-7 Hz (SenseInterval, staggered per bot): the nearest enemy inside the view cone that at least one
+	 *  of three body points has a clear line to. bTargetVisible is the result and the ONLY licence to
+	 *  shoot; Target itself lingers for MemorySeconds so a re-peek is recognised rather than re-learned. */
 	void TickSenses(ACampusCharacter* Self);
 	void TickRoam(ACampusCharacter* Self);
 	void TickEngage(ACampusCharacter* Self, float DeltaSeconds);
+	/** Walks the last known position (carried on by the way the target was running) or a heard shot. */
+	void TickSearch(ACampusCharacter* Self);
 	void TickCover(ACampusCharacter* Self);
 	/** 1 Hz: AI update rate (20/10/4/2 Hz), replication frequency and anim tick, all by distance to the
 	 *  nearest human-controlled pawn. This is the whole performance story for a phone host. */
 	void TickBudget(ACampusCharacter* Self);
 
-	/** Turns the aim toward Point at the skill's turn rate, plus the drifting human-like error. */
-	void AimAt(ACampusCharacter* Self, const FVector& Point, float DeltaSeconds);
+	/** Turns the aim toward Point at the skill's turn rate, plus the drifting human-like error. The error
+	 *  grows with distance and with TargetSpeed, and shrinks the longer the sight has been held. */
+	void AimAt(ACampusCharacter* Self, const FVector& Point, float TargetSpeed, float DeltaSeconds);
 	/** One shot down the current aim through the server fire path. */
 	void FireOnce(ACampusCharacter* Self);
 	/** Server-side magazine: reloads and reports whether the gun can shoot at all right now. */
@@ -98,7 +127,10 @@ private:
 	/** A nearby spot with no line to the current target. Nav when there is a mesh, else straight back. */
 	bool PickCoverPoint(ACampusCharacter* Self, FVector& OutPoint) const;
 	bool MoveToPoint(ACampusCharacter* Self, const FVector& Point);
-	bool HasLineOfSight(const ACampusCharacter* Self, const ACampusCharacter* Other) const;
+	/** Three traces at worst, one when the target is in the open: head, chest, legs. A wall, a door or a
+	 *  car's bodywork on all three lines means NOT SEEN - which also means not shot at.
+	 *  OutOffsetZ: which body point was clear, as an offset from the capsule centre. */
+	bool HasLineOfSight(const ACampusCharacter* Self, const ACampusCharacter* Other, float& OutOffsetZ) const;
 	/** Aim point: chest, with a little lead on a moving target (the lead is deliberately imperfect). */
 	FVector AimPointFor(const ACampusCharacter* Target, float Distance) const;
 
@@ -115,20 +147,44 @@ private:
 	/** When the pawn went missing outside a round, so the game mode's own respawn timer goes first. */
 	float PawnLostTime = -1.f;
 	float NextSenseTime = 0.f;
+	/** Seconds between perception passes, set by TickBudget. The phase is randomised in OnPossess so ten
+	 *  bots never run their traces on the same frame. */
+	float SenseInterval = 0.2f;
 	float NextBudgetTime = 0.f;
 	float LastSeenTime = -100.f;
+	/** True ONLY on the perception pass that proved a clear line. Every fire gate reads this. */
+	bool bTargetVisible = false;
+	/** When the current unbroken sighting began: time on target, which is what tightens the aim. */
+	float VisibleSinceTime = 0.f;
+	/** Height on the target the aim goes to, from the capsule centre: chest, or lower when the chest is
+	 *  the part behind cover. Never higher than the chest - bots do not hunt heads. */
+	float VisibleOffsetZ = 40.f;
 	/** When the bot is allowed to start shooting at the target it has just noticed (reaction delay). */
 	float ReactionTime = 0.f;
-	float NextShotTime = 0.f;
 	int32 BurstLeft = 0;
 	float NextBurstTime = 0.f;
 	float NextRoamTime = 0.f;
 	float CoverUntil = 0.f;
 	float NextCoverChance = 0.f;
 	FVector RoamPoint = FVector::ZeroVector;
+	/** Where the target was last SEEN, and how it was moving then: the search runs off these two. */
+	FVector LastKnownPoint = FVector::ZeroVector;
+	FVector LastKnownVelocity = FVector::ZeroVector;
+	bool bHasLastKnown = false;
+	/** Where a shot was heard. Investigated, never shot at. HeardTime rate-limits a held trigger to one
+	 *  piece of news a second, so a burst does not cost a navmesh projection per frame. */
+	FVector HeardPoint = FVector::ZeroVector;
+	float HeardTime = -100.f;
+	bool bHasHeard = false;
+	FVector SearchPoint = FVector::ZeroVector;
+	float SearchUntil = 0.f;
+	float NextSearchPointTime = 0.f;
 	/** Goal of the live path request, so MoveToPoint never re-pathfinds for the same destination. */
 	FVector LastMoveGoal = FVector::ZeroVector;
 	bool bHasRoamPoint = false;
+	/** The aim error cone AimAt last worked out, in degrees. TickEngage's shoot-when-near-enough gate
+	 *  scales with it, so a shaking bot still fires (and misses) instead of freezing. */
+	float AimSpreadDeg = 0.f;
 	/** Drifting aim error in degrees (yaw, pitch), re-rolled every ErrorHoldSeconds. */
 	FVector2D AimError = FVector2D::ZeroVector;
 	FVector2D AimErrorTarget = FVector2D::ZeroVector;

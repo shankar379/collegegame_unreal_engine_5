@@ -1,7 +1,10 @@
 #include "Campus/CampusBot.h"
 
 #include "Campus/CampusCharacter.h"
+#include "Campus/CampusDayNight.h"
 #include "Campus/CampusGameMode.h"
+#include "Campus/CampusVehicle.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
@@ -11,6 +14,7 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "AITypes.h"
 #include "UObject/UnrealType.h"
+#include "Campus/CampusShotTrace.h"
 
 namespace CampusBotTuning
 {
@@ -23,11 +27,13 @@ namespace CampusBotTuning
 	/** Everything that makes a bot beatable lives here. Easy shoots late, wide and in short bursts. */
 	struct FSkill
 	{
+		/** UE's SightRadius, in cm. 80 m / 110 m: long, but finite - and halved at night. */
 		float SightRange;
 		/** Degrees of drifting aim error at 20 m, scaled up with distance. */
 		float AimErrorDeg;
 		/** Extra error per 10 m past the first 20. */
 		float AimErrorPerMeterDeg;
+		/** Dead time between noticing a target and the first round leaving the muzzle. */
 		float ReactionSeconds;
 		float TurnRateDeg;
 		int32 BurstMin;
@@ -38,24 +44,64 @@ namespace CampusBotTuning
 		float LeadShare;
 		/** Chance per engage decision of breaking for cover. */
 		float CoverChance;
+		/** Seconds of unbroken sight over which the aim error falls from SettleStartScale to 1x. */
+		float SettleSeconds;
 	};
 
-	constexpr FSkill Easy  = { 4000.f, 4.5f, 0.09f, 0.62f, 170.f, 2, 4, 0.85f, 1.70f, 0.25f, 0.45f };
-	constexpr FSkill Normal = { 6000.f, 2.4f, 0.05f, 0.30f, 320.f, 4, 7, 0.45f, 0.95f, 0.60f, 0.30f };
+	constexpr FSkill Easy   = { 8000.f, 4.5f, 0.09f, 0.55f, 170.f, 2, 4, 0.85f, 1.70f, 0.25f, 0.45f, 2.2f };
+	constexpr FSkill Normal = { 11000.f, 2.4f, 0.05f, 0.33f, 320.f, 4, 7, 0.45f, 0.95f, 0.60f, 0.30f, 1.4f };
 
 	const FSkill& Of(ECampusBotSkill Skill)
 	{
 		return Skill == ECampusBotSkill::Easy ? Easy : Normal;
 	}
 
-	/** How long a bot keeps chasing a target it can no longer see. */
-	constexpr float MemorySeconds = 2.6f;
-	/** Acquisition cone (half-angle). A bot has no eyes in the back of its head. */
-	constexpr float ViewHalfAngleCos = 0.26f; // ~75 deg
+	/** How long a bot remembers the FACE of a target it can no longer see. It does not shoot in that
+	 *  time - bTargetVisible is false - it only recognises the same player on a re-peek. */
+	constexpr float MemorySeconds = 4.f;
+	/** Acquisition cone: cos of half of a ~116 deg horizontal field of view, measured on the yaw plane
+	 *  (UE's PeripheralVisionAngle). cos(58 deg). */
+	constexpr float ViewHalfAngleCos = 0.53f;
+	/** Hysteresis, the angular half of UE's LoseSightRadius: a target already acquired stays acquired
+	 *  inside a wider ~150 deg cone, so a close-quarters fight does not flicker on and off. cos(75 deg). */
+	constexpr float LoseHalfAngleCos = 0.26f;
+	/** Up and down the bot is not blind, but it is not a turret either: sin(60 deg). */
+	constexpr float ViewMaxPitchSin = 0.87f;
+	/** UE's LoseSightRadius, as a share of SightRange. */
+	constexpr float LoseSightShare = 1.15f;
+	/** Inside this a body is noticed whichever way the bot faces: footsteps, breathing, peripheral
+	 *  vision. Line of sight is still required - this only waives the CONE, never the wall. */
+	constexpr float AwarenessRadius = 450.f;
+	/** Night on L_VarsityValley: the same eyes see about half as far. */
+	constexpr float NightSightShare = 0.55f;
+	/** A gap in sight shorter than this is a peek: it does not buy the player a fresh reaction delay.
+	 *  Longer than it, and re-finding the target costs ReacquireReactionShare of one. */
+	constexpr float PeekGraceSeconds = 0.35f;
+	constexpr float ReacquireReactionShare = 0.55f;
+	/** How long a bot works a last known position (or a heard shot) before it goes back to roaming. */
+	constexpr float SearchSeconds = 7.f;
+	/** A rifle is heard this far, and only ever sends a bot to look. */
+	constexpr float HearGunshotRadius = 4000.f;
+	/** How wrong a heard position is: a bot walks toward the noise, not onto the shooter. */
+	constexpr float HearScatter = 600.f;
+	/** Aim error multiplier the instant a bot settles on a target, decaying to 1x over SettleSeconds. */
+	constexpr float SettleStartScale = 2.2f;
+	/** Extra aim error against a moving body, in full at MoveErrorSpeed cm/s. */
+	constexpr float MoveErrorShare = 0.7f;
+	constexpr float MoveErrorSpeed = 600.f;
+	/** The three body points line of sight is tested against, as shares of the target's OWN capsule
+	 *  half-height (standing: 148 / 100 / 62 cm off the ground) - so a crouched or prone body is tested
+	 *  where it actually is. Head first: it is the part that clears a window sill, a car bonnet and a
+	 *  low wall, and the one trace a target in the open ever costs. */
+	constexpr float SightPointShare[3] = { 0.78f, 0.2f, -0.25f };
 	/** The one place the shot start must satisfy: ServerFire refuses a muzzle more than 250 cm off. */
 	constexpr float ChestOffsetZ = 40.f;
 	/** Beyond this from every human, nothing about a bot is worth a phone's frame. */
 	constexpr float AnimCutoff = 6500.f;
+
+	/** Every bot alive in any world, so OnGunshot costs one pass over <=MaxPhysicalBots entries instead
+	 *  of a TActorIterator per shot fired in the match. Filtered by GetWorld() at the call site. */
+	TArray<TWeakObjectPtr<ACampusBotController>> GBots;
 
 	/** First-year names: a bot has to read like another student in the match, never like a bot.
 	 *  The "BOT" tag belongs to the post-match table only (ACampusBotController::PostMatchTag). */
@@ -198,6 +244,108 @@ namespace CampusBotTuning
 		}
 		return OutRadius > 100.f; // a zone we cannot read the size of is a zone we ignore
 	}
+
+	// ---------------------------------------------------------------------------------- sight
+
+	TWeakObjectPtr<ACampusDayNight> GTime;
+	float GNextTimeFind = -1.f;
+
+	/** 1 by day, NightSightShare after dark. Found like the zone: by actor, cached, re-checked rarely,
+	 *  so a level with no ACampusDayNight (the campus maps) pays one failed search every five seconds. */
+	float SightShare(UWorld* World)
+	{
+		ACampusDayNight* Time = GTime.Get();
+		if (!Time || Time->GetWorld() != World)
+		{
+			Time = nullptr;
+			const float Now = World->GetTimeSeconds();
+			if (Now >= GNextTimeFind)
+			{
+				GNextTimeFind = Now + 5.f;
+				for (TActorIterator<ACampusDayNight> It(World); It; ++It)
+				{
+					Time = *It;
+					GTime = *It;
+					break;
+				}
+			}
+		}
+		return Time && Time->IsNight() ? NightSightShare : 1.f;
+	}
+
+	/** True when a car's SOLID bodywork sits on this segment. Glass does not block, exactly as it does
+	 *  not block a bullet in ACampusCharacter::ServerFire (you can see, and shoot, through a window).
+	 *  This is the half that was missing: cars are ECC_Vehicle, so no world trace in this project sees
+	 *  them, and a bot therefore used to look straight through a parked car as if it were air. */
+	bool CarBlocks(const UWorld* World, const ACampusCharacter* Looker, const FVector& From, const FVector& To)
+	{
+		if (!ACampusVehicle::VehiclesEnabled())
+		{
+			return false;
+		}
+		const FVector Delta = To - From;
+		const float Length = float(Delta.Size());
+		if (Length < 1.f)
+		{
+			return false;
+		}
+		const FVector Direction = Delta / Length;
+		const double When = World->GetTimeSeconds();
+		const ACampusVehicle* Own = Looker ? Looker->GetVehicle() : nullptr;
+		for (const TWeakObjectPtr<ACampusVehicle>& Candidate : ACampusVehicle::All())
+		{
+			const ACampusVehicle* Car = Candidate.Get();
+			if (!Car || Car->GetWorld() != World || Car == Own)
+			{
+				continue; // never the car the bot is sitting in: its own doors are not cover from itself
+			}
+			float Distance = Length;
+			ECampusVehiclePart Part = ECampusVehiclePart::None;
+			int32 Wheel = INDEX_NONE;
+			bool bBlocks = false;
+			if (Car->RewoundTrace(From, Direction, Length, When, Distance, Part, Wheel, bBlocks) && bBlocks)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** THE one test behind both "I can see you" and "I can hit you", so the two can never disagree: the
+	 *  world on the object types ACampusCharacter::ServerFire blocks on (every map's invisible box
+	 *  aggregate is ECC_WorldStatic / BlockAll, so walls and buildings count; the invisible stair ramps are
+	 *  skipped by CampusShotTrace, like ServerFire), plus the
+	 *  cars ServerFire tests separately. */
+	bool Unobstructed(const UWorld* World, const ACampusCharacter* Looker, const AActor* Ignore,
+		const FVector& From, const FVector& To)
+	{
+		FCollisionObjectQueryParams Objects;
+		Objects.AddObjectTypesToQuery(ECC_WorldStatic);
+		Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(CampusBotSight), false, Looker);
+		if (Ignore)
+		{
+			Params.AddIgnoredActor(Ignore);
+		}
+		FHitResult Hit;
+		if (CampusShotTrace::FirstSolid(World, Hit, From, To, Objects, Params))
+		{
+			return false;
+		}
+		return !CarBlocks(World, Looker, From, To);
+	}
+
+	/** Head, chest and pelvis of this body, in world space. */
+	void SightPoints(const ACampusCharacter* Other, FVector (&Out)[3])
+	{
+		const UCapsuleComponent* Capsule = Other->GetCapsuleComponent();
+		const FVector Centre = Other->GetActorLocation();
+		const float Half = Capsule ? Capsule->GetScaledCapsuleHalfHeight() : 88.f;
+		for (int32 Index = 0; Index < int32(UE_ARRAY_COUNT(SightPointShare)); ++Index)
+		{
+			Out[Index] = Centre + FVector(0.f, 0.f, SightPointShare[Index] * Half);
+		}
+	}
 }
 
 ACampusBotController::ACampusBotController()
@@ -215,6 +363,71 @@ ACampusBotController::ACampusBotController()
 void ACampusBotController::SetSkill(ECampusBotSkill InSkill)
 {
 	Skill = InSkill;
+}
+
+void ACampusBotController::BeginPlay()
+{
+	Super::BeginPlay();
+	CampusBotTuning::GBots.AddUnique(this);
+}
+
+void ACampusBotController::EndPlay(const EEndPlayReason::Type Reason)
+{
+	// Stale entries go with it: nothing else ever prunes this list, and a world can be torn down.
+	CampusBotTuning::GBots.RemoveAllSwap([this](const TWeakObjectPtr<ACampusBotController>& Weak)
+	{
+		return !Weak.IsValid() || Weak.Get() == this;
+	});
+	Super::EndPlay(Reason);
+}
+
+void ACampusBotController::OnGunshot(UWorld* World, const FVector& From, AController* Shooter)
+{
+	if (!World)
+	{
+		return;
+	}
+	const float Now = World->GetTimeSeconds();
+	for (const TWeakObjectPtr<ACampusBotController>& Weak : CampusBotTuning::GBots)
+	{
+		ACampusBotController* Bot = Weak.Get();
+		const ACampusCharacter* Body = Bot ? Cast<ACampusCharacter>(Bot->GetPawn()) : nullptr;
+		if (!Body || Bot == Shooter || Bot->GetWorld() != World)
+		{
+			continue;
+		}
+		// A bot that can already SEE somebody has better information than a bang in the distance.
+		if (Bot->bTargetVisible || Bot->Target.IsValid())
+		{
+			continue;
+		}
+		if (FVector::DistSquared(Body->GetActorLocation(), From) > FMath::Square(CampusBotTuning::HearGunshotRadius))
+		{
+			continue;
+		}
+		// A thirty-round burst is ONE piece of news. Without this, every round in it would re-roll the
+		// search point and cost a navmesh projection per bot per frame for as long as the trigger is held.
+		if (Now - Bot->HeardTime < 1.f)
+		{
+			continue;
+		}
+		if (CampusBR::AreFriendly(World, Bot, Shooter))
+		{
+			continue; // a teammate's rifle is not news
+		}
+		// The noise becomes a PLACE TO WALK TO and never a target: nothing downstream of here can fire,
+		// because firing needs bTargetVisible and a live muzzle trace, and a sound sets neither.
+		Bot->HeardPoint = From + FVector(FMath::FRandRange(-1.f, 1.f), FMath::FRandRange(-1.f, 1.f), 0.f)
+			* CampusBotTuning::HearScatter;
+		Bot->bHasHeard = true;
+		Bot->HeardTime = Now;
+		Bot->SearchUntil = Now + CampusBotTuning::SearchSeconds;
+		Bot->NextSearchPointTime = 0.f;
+		if (Bot->State == EState::Roam)
+		{
+			Bot->State = EState::Search;
+		}
+	}
 }
 
 ACampusPlayerState* ACampusBotController::GetCampusState() const
@@ -370,6 +583,13 @@ void ACampusBotController::OnPossess(APawn* InPawn)
 	bHasRoamPoint = false;
 	NextRoamTime = 0.f;
 	BurstLeft = 0;
+	bTargetVisible = false;
+	bHasLastKnown = false;
+	bHasHeard = false;
+	LastSeenTime = -100.f;
+	VisibleOffsetZ = CampusBotTuning::ChestOffsetZ;
+	// Stagger: ten bots that all sense on the same frame are ten frames' worth of traces in one.
+	NextSenseTime = (World ? World->GetTimeSeconds() : 0.f) + FMath::FRand() * SenseInterval;
 }
 
 void ACampusBotController::UpdateControlRotation(float DeltaTime, bool bUpdatePawn)
@@ -388,6 +608,7 @@ void ACampusBotController::OnUnPossess()
 	Super::OnUnPossess();
 	Target.Reset();
 	BurstLeft = 0;
+	bTargetVisible = false;
 }
 
 void ACampusBotController::Tick(float DeltaSeconds)
@@ -430,6 +651,9 @@ void ACampusBotController::Tick(float DeltaSeconds)
 	{
 	case EState::Engage:
 		TickEngage(Self, DeltaSeconds);
+		break;
+	case EState::Search:
+		TickSearch(Self);
 		break;
 	case EState::Cover:
 		TickCover(Self);
@@ -499,6 +723,11 @@ void ACampusBotController::TickBudget(ACampusCharacter* Self)
 		PrimaryActorTick.TickInterval = Interval;
 	}
 
+	// Perception is budgeted SEPARATELY from the brain and much harder: the brain is arithmetic, a sense
+	// pass is up to three line traces plus the car boxes. 6.7 Hz next to the player, 1.7 Hz across the
+	// map; with the phase set in OnPossess, ten bots spread their traces over the frames in between.
+	SenseInterval = Distance < 2500.f ? 0.15f : (Distance < 6000.f ? 0.2f : (Distance < 14000.f ? 0.35f : 0.6f));
+
 	// Replication: a bot nobody can see does not need 60 updates a second of its own.
 	Self->SetNetUpdateFrequency(Distance < 6000.f ? 60.f : (Distance < 14000.f ? 20.f : 6.f));
 	Self->SetMinNetUpdateFrequency(Distance < 6000.f ? 30.f : 4.f);
@@ -525,19 +754,25 @@ void ACampusBotController::TickSenses(ACampusCharacter* Self)
 	{
 		Target.Reset();
 		Known = nullptr;
+		bTargetVisible = false;
+		bHasLastKnown = false;
 	}
 	if (Now < NextSenseTime)
 	{
 		return;
 	}
-	NextSenseTime = Now + 0.25f; // 4 Hz, whatever rate the state machine runs at
+	NextSenseTime = Now + SenseInterval;
 
 	const CampusBotTuning::FSkill& Tuning = CampusBotTuning::Of(Skill);
 	const ACampusPlayerState* Mine = GetCampusState();
 	const FVector Eye = Self->GetPawnViewLocation();
-	const FVector Facing = GetControlRotation().Vector();
+	// The cone is measured on the YAW PLANE, like UE's PeripheralVisionAngle. Using the full 3D aim
+	// vector would blind a bot that happens to be looking down a stairwell.
+	const FVector Facing = FRotator(0.f, GetControlRotation().Yaw, 0.f).Vector();
+	const float Reach = Tuning.SightRange * CampusBotTuning::SightShare(World);
 
-	// Nearest enemy in the cone, then at most two line checks (the cheapest thing that still feels fair).
+	// Enemies inside the range and the cone, then at most three multi-point line checks: the cheapest
+	// thing that still behaves like eyes. Everything excluded here is a body the bot cannot act on.
 	TArray<ACampusCharacter*, TInlineAllocator<8>> Candidates;
 	for (const TWeakObjectPtr<ACampusCharacter>& Weak : CampusBotTuning::Characters(World))
 	{
@@ -552,26 +787,44 @@ void ACampusBotController::TickSenses(ACampusCharacter* Self)
 			continue;
 		}
 		const FVector ToOther = Other->GetActorLocation() - Eye;
-		const float DistanceSq = ToOther.SizeSquared();
-		if (DistanceSq > FMath::Square(Tuning.SightRange))
+		const float DistanceSq = float(ToOther.SizeSquared());
+		const bool bKnown = Other == Known;
+		// LoseSightRadius: a body already being fought is kept a little past the range it was found at.
+		const float Limit = bKnown ? Reach * CampusBotTuning::LoseSightShare : Reach;
+		if (DistanceSq > FMath::Square(Limit))
 		{
 			continue;
 		}
-		if (Other != Known && FVector::DotProduct(ToOther.GetSafeNormal(), Facing) < CampusBotTuning::ViewHalfAngleCos)
+		const FVector Direction = ToOther.GetSafeNormal();
+		// Field of view, with two concessions a person also has: a body close enough to hear is noticed
+		// whichever way the bot faces, and a body already acquired is held in a wider cone. Neither
+		// waives line of sight below - a wall still hides a man standing against it.
+		const bool bClose = DistanceSq < FMath::Square(CampusBotTuning::AwarenessRadius);
+		const float Cone = bKnown ? CampusBotTuning::LoseHalfAngleCos : CampusBotTuning::ViewHalfAngleCos;
+		if (!bClose
+			&& (FVector::DotProduct(FVector(Direction.X, Direction.Y, 0.f).GetSafeNormal(), Facing) < Cone
+				|| FMath::Abs(Direction.Z) > CampusBotTuning::ViewMaxPitchSin))
 		{
-			continue; // outside the view cone (the one it is already fighting stays visible)
+			continue;
 		}
 		Candidates.Add(Other);
 	}
-	Candidates.Sort([&Eye](const ACampusCharacter& A, const ACampusCharacter& B)
+	Candidates.Sort([&Eye, Known](const ACampusCharacter& A, const ACampusCharacter& B)
 	{
+		// The face it is already fighting is tested FIRST: with a cap on the traces per pass, the target
+		// a bot holds must never be the one that falls off the end of the list.
+		if ((&A == Known) != (&B == Known))
+		{
+			return &A == Known;
+		}
 		return FVector::DistSquared(A.GetActorLocation(), Eye) < FVector::DistSquared(B.GetActorLocation(), Eye);
 	});
 
 	ACampusCharacter* Seen = nullptr;
-	for (int32 Index = 0; Index < FMath::Min(2, Candidates.Num()); ++Index)
+	float SeenOffsetZ = CampusBotTuning::ChestOffsetZ;
+	for (int32 Index = 0; Index < FMath::Min(3, Candidates.Num()); ++Index)
 	{
-		if (HasLineOfSight(Self, Candidates[Index]))
+		if (HasLineOfSight(Self, Candidates[Index], SeenOffsetZ))
 		{
 			Seen = Candidates[Index];
 			break;
@@ -579,68 +832,115 @@ void ACampusBotController::TickSenses(ACampusCharacter* Self)
 	}
 	if (Seen)
 	{
-		if (Seen != Known)
+		const bool bNewFace = Seen != Known;
+		// A reaction is paid in full for a new face and in part for one re-found after a real break in
+		// sight. A 0.2 s peek buys nothing: the difference between a fair enemy and one that punishes a
+		// player for ever being visible for a single frame. This is most of what separates a bot from
+		// an aimbot, and it now also restarts the aim error, which is the other half.
+		if (bNewFace || Now - LastSeenTime > CampusBotTuning::PeekGraceSeconds)
 		{
-			// A new face costs a reaction: this is most of what separates a bot from an aimbot.
-			ReactionTime = Now + Tuning.ReactionSeconds * FMath::FRandRange(0.8f, 1.4f);
+			const float Share = bNewFace ? 1.f : CampusBotTuning::ReacquireReactionShare;
+			ReactionTime = Now + Tuning.ReactionSeconds * Share * FMath::FRandRange(0.8f, 1.4f);
 			BurstLeft = 0;
 			NextBurstTime = ReactionTime;
+			VisibleSinceTime = Now;
 		}
 		Target = Seen;
+		bTargetVisible = true;
+		// Centre mass at most, never the head: a bot must not farm 2x headshots through the hit zones.
+		// Lower than that when the chest is behind cover and only the legs are out.
+		VisibleOffsetZ = FMath::Min(CampusBotTuning::ChestOffsetZ, SeenOffsetZ);
 		LastSeenTime = Now;
+		LastKnownPoint = Seen->GetActorLocation();
+		LastKnownVelocity = Seen->GetVelocity();
+		bHasLastKnown = true;
+		bHasHeard = false;
 		if (State != EState::Cover)
 		{
 			State = EState::Engage;
 		}
 		return;
 	}
+
+	// NOTHING IS VISIBLE. The target below is REMEMBERED, not seen, and no shot may leave the muzzle
+	// while that is true: TickEngage refuses to run without bTargetVisible, and the per-shot muzzle
+	// trace refuses again. A player who ducks behind a car is not shot at, let alone hit.
+	bTargetVisible = false;
+	if (State == EState::Engage || (State == EState::Roam && bHasLastKnown))
+	{
+		State = EState::Search;
+		SearchUntil = Now + CampusBotTuning::SearchSeconds;
+		NextSearchPointTime = 0.f;
+	}
 	if (Known && Now - LastSeenTime < CampusBotTuning::MemorySeconds)
 	{
-		return; // lost sight for a moment: keep pushing toward where it was
+		return; // keep the face for a moment, so a re-peek is recognised instead of re-learned
 	}
 	Target.Reset();
-	if (State != EState::Cover)
-	{
-		State = EState::Roam;
-	}
 }
 
-bool ACampusBotController::HasLineOfSight(const ACampusCharacter* Self, const ACampusCharacter* Other) const
+bool ACampusBotController::HasLineOfSight(const ACampusCharacter* Self, const ACampusCharacter* Other, float& OutOffsetZ) const
 {
-	// Same object set the server's own bullet uses, so "I can see you" and "I can hit you" agree.
-	FCollisionObjectQueryParams Objects;
-	Objects.AddObjectTypesToQuery(ECC_WorldStatic);
-	Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(CampusBotSight), false, Self);
-	Params.AddIgnoredActor(Other);
-	FHitResult Hit;
+	// Three points, not one, and the SAME obstruction test the bullet is judged by, so "I can see you"
+	// and "I can hit you" can never disagree. One point used to be the whole check: it called a man
+	// whose head and shoulders were in plain sight over a low wall invisible, and - the complaint that
+	// started this - it never once consulted the cars, which are ECC_Vehicle and are tested only by
+	// ACampusCharacter::ServerFire's own rewound loop.
+	const UWorld* World = GetWorld();
 	const FVector Eye = Self->GetPawnViewLocation();
-	const FVector Chest = Other->GetActorLocation() + FVector(0.f, 0.f, CampusBotTuning::ChestOffsetZ);
-	return !GetWorld()->LineTraceSingleByObjectType(Hit, Eye, Chest, Objects, Params);
+	const float Centre = float(Other->GetActorLocation().Z);
+	FVector Points[3];
+	CampusBotTuning::SightPoints(Other, Points);
+	for (const FVector& Point : Points)
+	{
+		if (CampusBotTuning::Unobstructed(World, Self, Other, Eye, Point))
+		{
+			// WHICH point was visible, as an offset from the body's centre: the aim follows the part of
+			// the body the bot can actually see, so a pair of legs under a car is shot at as legs rather
+			// than aimed at through the bonnet.
+			OutOffsetZ = float(Point.Z) - Centre;
+			return true; // head first, so a target in the open costs exactly one trace
+		}
+	}
+	return false;
 }
 
 FVector ACampusBotController::AimPointFor(const ACampusCharacter* InTarget, float Distance) const
 {
 	const CampusBotTuning::FSkill& Tuning = CampusBotTuning::Of(Skill);
-	// Centre mass, never the head: a bot should not farm 2x headshots through the server's hit zones.
-	FVector Point = InTarget->GetActorLocation() + FVector(0.f, 0.f, CampusBotTuning::ChestOffsetZ);
+	// Centre mass, never the head (a bot should not farm 2x headshots through the server's hit zones),
+	// and lower still when that is the only part of the body the senses found a clear line to.
+	FVector Point = InTarget->GetActorLocation() + FVector(0.f, 0.f, VisibleOffsetZ);
 	// Partial lead on a running target, with the travel time a hitscan does not even have: it is a
 	// believable error, not a prediction (and it is what makes strafing work against bots).
 	const float Travel = FMath::Min(Distance / 9000.f, 0.25f);
 	return Point + InTarget->GetVelocity() * Travel * Tuning.LeadShare;
 }
 
-void ACampusBotController::AimAt(ACampusCharacter* Self, const FVector& Point, float DeltaSeconds)
+void ACampusBotController::AimAt(ACampusCharacter* Self, const FVector& Point, float TargetSpeed, float DeltaSeconds)
 {
 	const CampusBotTuning::FSkill& Tuning = CampusBotTuning::Of(Skill);
 	UWorld* World = GetWorld();
 	const float Now = World->GetTimeSeconds();
 	const FVector Eye = Self->GetPawnViewLocation();
-	const float Distance = FVector::Dist(Eye, Point);
+	const float Distance = float(FVector::Dist(Eye, Point));
 
+	// Three things decide how wrong the aim is, and all three are things a person's aim does:
+	//   DISTANCE      - a cone, so the miss grows in metres with the range;
+	//   TIME ON TARGET- wildest in the first instant of a sighting, settling as the sight is held;
+	//   TARGET SPEED  - a strafing player is genuinely harder to track than a standing one.
 	// Error drifts between held values instead of jittering per shot: a bot that shakes reads as a bug,
 	// a bot that drifts reads as a person who cannot hold the sight still.
-	const float Spread = Tuning.AimErrorDeg + Tuning.AimErrorPerMeterDeg * FMath::Max(0.f, (Distance - 2000.f) / 100.f);
+	const float Settle = FMath::GetMappedRangeValueClamped(
+		FVector2D(0.f, FMath::Max(Tuning.SettleSeconds, 0.05f)),
+		FVector2D(CampusBotTuning::SettleStartScale, 1.f), Now - VisibleSinceTime);
+	const float Moving = 1.f + CampusBotTuning::MoveErrorShare
+		* FMath::Min(TargetSpeed / CampusBotTuning::MoveErrorSpeed, 1.f);
+	const float Spread = (Tuning.AimErrorDeg
+		+ Tuning.AimErrorPerMeterDeg * FMath::Max(0.f, (Distance - 2000.f) / 100.f)) * Settle * Moving;
+	// TickEngage's "is the sight near enough to shoot" gate scales with this: a bot whose hands are
+	// shaking by 15 degrees must still pull the trigger (and miss), not stand there holding its breath.
+	AimSpreadDeg = Spread;
 	if (Now >= NextErrorTime)
 	{
 		NextErrorTime = Now + FMath::FRandRange(0.35f, 0.8f);
@@ -686,18 +986,21 @@ void ACampusBotController::FireOnce(ACampusCharacter* Self)
 void ACampusBotController::TickEngage(ACampusCharacter* Self, float DeltaSeconds)
 {
 	ACampusCharacter* Enemy = Target.Get();
-	if (!Enemy)
+	// bTargetVisible is the licence to be in this state at all. The senses own the switch out of it; this
+	// is only the guard for the frames between two perception passes.
+	if (!Enemy || !bTargetVisible)
 	{
-		State = EState::Roam;
+		State = (Target.IsValid() || bHasLastKnown) ? EState::Search : EState::Roam;
+		SearchUntil = FMath::Max(SearchUntil, GetWorld()->GetTimeSeconds() + 1.f);
 		return;
 	}
 	UWorld* World = GetWorld();
 	const float Now = World->GetTimeSeconds();
 	const CampusBotTuning::FSkill& Tuning = CampusBotTuning::Of(Skill);
 	const FVector Eye = Self->GetPawnViewLocation();
-	const float Distance = FVector::Dist(Eye, Enemy->GetActorLocation());
+	const float Distance = float(FVector::Dist(Eye, Enemy->GetActorLocation()));
 	const FVector AimPoint = AimPointFor(Enemy, Distance);
-	AimAt(Self, AimPoint, DeltaSeconds);
+	AimAt(Self, AimPoint, float(Enemy->GetVelocity().Size2D()), DeltaSeconds);
 
 	// Hurt, or out of bullets in the middle of a fight: break away instead of standing and dying.
 	const bool bHurt = Self->GetHealth() < Self->GetMaxHealth() * 0.35f;
@@ -734,20 +1037,38 @@ void ACampusBotController::TickEngage(ACampusCharacter* Self, float DeltaSeconds
 	{
 		return;
 	}
-	// Only shoot once the sight is actually near the target; the turn rate decides when that is.
+	// Past the gun's own reach a bot does not spray at a dot on the horizon. It can SEE that far - it
+	// just has nothing to say about it.
+	if (Distance > Self->Range)
+	{
+		return;
+	}
+	// Only shoot once the sight is actually near the target; the turn rate decides when that is. The
+	// allowance follows the current aim error, or a bot would stop firing altogether exactly when its
+	// hands are least steady - at the start of a sighting, at range, against a sprinting target.
 	const FRotator ToTarget = (AimPoint - Eye).Rotation();
 	const float Off = FMath::Abs(FRotator::NormalizeAxis(ToTarget.Yaw - GetControlRotation().Yaw))
 		+ FMath::Abs(FRotator::NormalizeAxis(ToTarget.Pitch - GetControlRotation().Pitch));
-	if (Off > 9.f)
+	if (Off > FMath::Max(9.f, AimSpreadDeg * 1.7f))
 	{
+		return;
+	}
+	if (BurstLeft <= 0 && Now < NextBurstTime)
+	{
+		return;
+	}
+	// THE SHOT GATE, and the whole answer to "the bots shoot me through the wall": one trace, at the
+	// instant of the shot, from the very point ServerFire will start the bullet from, down the lane to
+	// the body - against the world AND the cars. Blocked means the burst is dropped and nothing is
+	// fired. A target behind a car, a wall, a building or a door is not shot at, so it cannot be hit.
+	if (!CampusBotTuning::Unobstructed(World, Self, Enemy, Eye, AimPoint))
+	{
+		BurstLeft = 0;
+		NextBurstTime = Now + 0.25f;
 		return;
 	}
 	if (BurstLeft <= 0)
 	{
-		if (Now < NextBurstTime)
-		{
-			return;
-		}
 		BurstLeft = FMath::RandRange(Tuning.BurstMin, Tuning.BurstMax);
 	}
 	// One round per AI update: at 20 Hz close in that is ~1200 rpm of intent, which ServerFire's own
@@ -759,6 +1080,66 @@ void ACampusBotController::TickEngage(ACampusCharacter* Self, float DeltaSeconds
 	}
 }
 
+void ACampusBotController::TickSearch(ACampusCharacter* Self)
+{
+	UWorld* World = GetWorld();
+	const float Now = World->GetTimeSeconds();
+	Self->ServerSetAiming_Implementation(false);
+	if (Now >= SearchUntil || (!bHasLastKnown && !bHasHeard))
+	{
+		// Looked, found nothing: back on patrol, and let PickRoamPoint choose somewhere fresh.
+		State = EState::Roam;
+		bHasRoamPoint = false;
+		bHasLastKnown = false;
+		bHasHeard = false;
+		return;
+	}
+	// Where the target was last SEEN, carried on a little by the way it was running when sight broke -
+	// which is roughly where a player who just broke line of sight actually is, not where they were
+	// standing when they broke it. A heard gunshot is the same thing with a worse position.
+	if (Now >= NextSearchPointTime)
+	{
+		NextSearchPointTime = Now + FMath::FRandRange(2.f, 3.5f);
+		FVector Anchor = bHasLastKnown
+			? LastKnownPoint + LastKnownVelocity.GetSafeNormal2D() * FMath::FRandRange(0.f, 800.f)
+			: HeardPoint;
+		if (UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
+		{
+			FNavLocation Result;
+			if (Nav->ProjectPointToNavigation(Anchor, Result, FVector(500.f, 500.f, 400.f)))
+			{
+				Anchor = Result.Location;
+			}
+		}
+		SearchPoint = Anchor;
+	}
+	ManageAmmo(Self); // the quiet moment is exactly when a person reloads too
+
+	if (FVector::DistSquared2D(SearchPoint, Self->GetActorLocation()) < FMath::Square(260.f))
+	{
+		// Standing on the spot with nobody there: hold still and sweep, then give it up shortly. The
+		// player gets a real window here, which is the point of the whole state.
+		StopMovement();
+		SetStick(Self, FVector2D::ZeroVector);
+		SearchUntil = FMath::Min(SearchUntil, Now + 2.5f);
+		if (Now >= NextStrafeTime)
+		{
+			NextStrafeTime = Now + FMath::FRandRange(0.9f, 1.6f);
+			StrafeSign = -StrafeSign;
+		}
+		const FRotator Sweep(0.f, GetControlRotation().Yaw + StrafeSign * 70.f, 0.f);
+		SetControlRotation(FMath::RInterpConstantTo(GetControlRotation(), Sweep, World->GetDeltaSeconds(), 90.f));
+		return;
+	}
+	// Face the way it walks, so the search reads as a man looking for you rather than a man gliding.
+	const FVector Direction = (SearchPoint - Self->GetActorLocation()).GetSafeNormal2D();
+	if (!Direction.IsNearlyZero())
+	{
+		SetControlRotation(FMath::RInterpConstantTo(GetControlRotation(), Direction.Rotation(), World->GetDeltaSeconds(), 220.f));
+	}
+	MoveToPoint(Self, SearchPoint);
+}
+
 void ACampusBotController::TickCover(ACampusCharacter* Self)
 {
 	UWorld* World = GetWorld();
@@ -766,7 +1147,14 @@ void ACampusBotController::TickCover(ACampusCharacter* Self)
 	ManageAmmo(Self); // the point of cover: reload here
 	if (Now >= CoverUntil)
 	{
-		State = Target.IsValid() ? EState::Engage : EState::Roam;
+		// Reloaded and ready: back out to fight only if the threat is actually VISIBLE. Otherwise go
+		// looking for it - coming out of cover is not a licence to shoot through the cover.
+		State = bTargetVisible ? EState::Engage : (Target.IsValid() || bHasLastKnown ? EState::Search : EState::Roam);
+		if (State == EState::Search)
+		{
+			SearchUntil = Now + CampusBotTuning::SearchSeconds;
+			NextSearchPointTime = 0.f;
+		}
 		return;
 	}
 	if (const ACampusCharacter* Enemy = Target.Get())
@@ -869,14 +1257,11 @@ bool ACampusBotController::PickCoverPoint(ACampusCharacter* Self, FVector& OutPo
 	}
 	UWorld* World = GetWorld();
 	const FVector Chest = Enemy->GetActorLocation() + FVector(0.f, 0.f, CampusBotTuning::ChestOffsetZ);
-	FCollisionObjectQueryParams Objects;
-	Objects.AddObjectTypesToQuery(ECC_WorldStatic);
-	Objects.AddObjectTypesToQuery(ECC_WorldDynamic);
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(CampusBotCover), false, Self);
-	Params.AddIgnoredActor(Enemy);
 
 	UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
-	// Three candidates, three traces: a spot nearby that the enemy cannot see into.
+	// Three candidates, three traces: a spot nearby the enemy cannot see into. Run through the same
+	// obstruction test as sight and shots, so a parked car counts as cover for a bot exactly as it now
+	// counts as cover against one.
 	for (int32 Try = 0; Try < 3; ++Try)
 	{
 		FVector Candidate = Here + FRotator(0.f, FMath::FRandRange(-180.f, 180.f), 0.f).Vector() * FMath::FRandRange(600.f, 1400.f);
@@ -889,8 +1274,7 @@ bool ACampusBotController::PickCoverPoint(ACampusCharacter* Self, FVector& OutPo
 			}
 			Candidate = Result.Location;
 		}
-		FHitResult Hit;
-		if (World->LineTraceSingleByObjectType(Hit, Chest, Candidate + FVector(0.f, 0.f, CampusBotTuning::ChestOffsetZ), Objects, Params))
+		if (!CampusBotTuning::Unobstructed(World, Self, Enemy, Chest, Candidate + FVector(0.f, 0.f, CampusBotTuning::ChestOffsetZ)))
 		{
 			OutPoint = Candidate;
 			return true;

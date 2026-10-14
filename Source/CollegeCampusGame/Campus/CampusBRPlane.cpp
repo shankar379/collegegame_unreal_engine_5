@@ -159,7 +159,8 @@ namespace CampusBRArt
 	constexpr float OpenSeconds = 0.6f;
 	constexpr float PackedScale = 0.12f;
 
-	/** One cosmetic primitive: no collision, no shadow, no decals. Used by the plane and the chute. */
+	/** One cosmetic primitive: no collision, no shadow, no decals. Used by the plane, the chute and
+	 *  the imported canopy. */
 	void Dress(UStaticMeshComponent* Part, UStaticMesh* Mesh, UMaterialInterface* Material,
 		const FVector& Where, const FRotator& Turn, const FVector& Size)
 	{
@@ -184,6 +185,49 @@ namespace CampusBRArt
 	}
 }
 
+namespace CampusChuteModel
+{
+	/** The model measured 7.14 m across, 3.54 m deep and 6.36 m tall in the glb, with its origin at the
+	 *  harness hook under the risers (Scripts/import_parachute.py prints all three from the file).
+	 *
+	 *  0.70 is the one number that matters. It puts the span at exactly 5 m over a 1.8 m character -
+	 *  inside the 4-6 m a real sport canopy is - and lands the whole parachute in the SAME piece of
+	 *  sky the dome it replaces occupied, which is what keeps the drop camera's framing good: hung
+	 *  from the shoulders the rim is 3.1 m and the apex 4.5 m up, so from the 9 m boom
+	 *  (ACampusCharacter::ChuteArmLength, pivot 1.2 m over the capsule) the canopy spans about 18 to
+	 *  23 degrees above the view axis, well inside the 62 degree vertical frustum, and it stays inside
+	 *  it when the diver looks down at where they are landing. */
+	constexpr float ModelScale = 0.70f;
+	/** The model's own footprint centre, in its own centimetres: the canopy is not quite centred on the
+	 *  harness, so this slides it back over the wearer's head. The 15.5 cm of X leaves the risers about
+	 *  6 cm behind the body's centre line, which is where a pack is anyway. */
+	constexpr float ModelCentreX = 15.5f;
+	constexpr float ModelCentreY = -3.6f;
+
+	UStaticMesh* Mesh()
+	{
+		static ConstructorHelpers::FObjectFinder<UStaticMesh> Found(
+			TEXT("/Game/CampusVehicles/Parachute/SM_Parachute.SM_Parachute"));
+		return Found.Object;
+	}
+
+	UMaterialInterface* Cloth()
+	{
+		static ConstructorHelpers::FObjectFinder<UMaterialInterface> Found(
+			TEXT("/Game/CampusVehicles/Parachute/MI_Parachute_Canopy.MI_Parachute_Canopy"));
+		return Found.Object;
+	}
+
+	FTransform OverShoulders(float ShoulderRise)
+	{
+		// No rotation: the import already put the span on Y and the chord on X, so the canopy turns
+		// with the wearer's yaw and nothing else.
+		return FTransform(FRotator::ZeroRotator,
+			FVector(-ModelCentreX * ModelScale, -ModelCentreY * ModelScale, ShoulderRise),
+			FVector(ModelScale));
+	}
+}
+
 // ---------------------------------------------------------------------------------------------
 // The canopy
 
@@ -203,6 +247,19 @@ ACampusBRChute::ACampusBRChute()
 	Harness = CreateDefaultSubobject<USceneComponent>(TEXT("Harness"));
 	SetRootComponent(Harness);
 
+	// The parachute itself: one imported mesh, one material, one draw call, hung so its harness hook
+	// sits on the shoulders (see CampusChuteModel). Fifty of these can be in the sky at once.
+	CanopyModel = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("CanopyModel"));
+	CanopyModel->SetupAttachment(Harness);
+	UStaticMesh* const Model = CampusChuteModel::Mesh();
+	const FTransform Hang = CampusChuteModel::OverShoulders(0.f); // Harness already rides the shoulders
+	CampusBRArt::Dress(CanopyModel, Model, CampusChuteModel::Cloth(),
+		Hang.GetLocation(), Hang.Rotator(), Hang.GetScale3D());
+	CanopyModel->SetVisibility(Model != nullptr);
+
+	// EVERYTHING BELOW IS THE FALLBACK, drawn only if that asset never loaded (it is cooked from
+	// /Game/CampusVehicles, which Config/DefaultGame.ini takes whole, so in practice it is dead
+	// weight - but a battle royale with no parachute at all is not a thing to risk on one import).
 	// The canopy is TWO primitives, because one is not a parachute:
 	//   the dome - a sphere squashed hard on Z (7 m across, 70 cm deep) - is the underside, the part
 	//   the wearer and anyone below actually looks at, and it is nearly flat so it reads as cloth
@@ -247,6 +304,18 @@ ACampusBRChute::ACampusBRChute()
 	LineBackLeft = MakeLine(TEXT("LineBackLeft"), 1);
 	LineBackRight = MakeLine(TEXT("LineBackRight"), 2);
 	LineFrontRight = MakeLine(TEXT("LineFrontRight"), 3);
+
+	// Hidden for the life of the actor when the model is there: an invisible primitive builds no scene
+	// proxy, so the six of them cost nothing to draw.
+	UStaticMeshComponent* const Fallback[6] =
+		{ Canopy, CanopyRidge, LineFrontLeft, LineBackLeft, LineBackRight, LineFrontRight };
+	for (UStaticMeshComponent* Part : Fallback)
+	{
+		if (Part)
+		{
+			Part->SetVisibility(Model == nullptr);
+		}
+	}
 }
 
 void ACampusBRChute::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -319,8 +388,10 @@ void ACampusBRChute::Inflate(float Alpha)
 	{
 		return;
 	}
-	// One scale on the root: the dome, the ridge and the four lines all grow out of the diver's back,
-	// which is what a canopy coming out of its pack looks like. Eased out (1 - (1-a)^3), so it snaps
+	// One scale on the root: the whole parachute - the model, or the dome and the four lines - grows
+	// out of the diver's back, which is what a canopy coming out of its pack looks like. It works on
+	// the model for the same reason it worked on the primitives: everything hangs off Harness, and
+	// Harness is already standing on the shoulders. Eased out (1 - (1-a)^3), so it snaps
 	// open and settles instead of arriving at a constant rate.
 	const float Eased = 1.f - FMath::Pow(1.f - FMath::Clamp(Alpha, 0.f, 1.f), 3.f);
 	const float Scale = FMath::Lerp(CampusBRArt::PackedScale, 1.f, Eased);

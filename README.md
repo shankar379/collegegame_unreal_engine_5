@@ -16,3 +16,6 @@ Then open the `.uproject` and let it compile. `Binaries/`, `Intermediate/`, `Sav
 All assets (`.uasset`, `.umap`, models, textures, audio) are stored with **Git LFS**.
 
 The previous (2025) prototype is kept in this repo's history (commits before the Campus Combat project).
+
+## Credits
+Third-party assets and the credit their licences require: [CREDITS.md](CREDITS.md).
