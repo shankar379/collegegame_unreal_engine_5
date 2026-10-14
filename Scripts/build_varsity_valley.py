@@ -44,6 +44,7 @@ def _sp(obj, prop, value):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import varsity_layout as L  # noqa: E402  (needs the path above)
+import varsity_college_collision as CollegeCollision  # noqa: E402  (same)
 
 LEVEL = "/Game/Maps/L_VarsityValley"
 ROOT = "/Game/VarsityValley"
@@ -54,11 +55,11 @@ REPORT = os.environ.get("VARSITY_REPORT",
                                      "Saved", "build_varsity_valley_report.txt"))
 # Geometry Script's DynamicMesh takes (b - a) x (c - a) as pointing INTO the surface (see build_campus.py).
 FLIP = True
-# Which campus parts get a box collider: the buildings you bump into. Ground art, windows, palms and
-# outlines stay non-blocking (the apron slab under them is what you walk on).
-CAMPUS_SOLID = ("front_block_L", "front_block_R", "side_wing_L", "side_wing_R", "canteen",
-                "corner_stair_tower_L", "corner_stair_tower_R", "c_base", "extra_room_bay",
-                "corner_frame_L", "corner_frame_R", "Gazebo")
+# The college collision is NOT derived from the art meshes. It is the game's own box export, placed at
+# the same anchor by Scripts/varsity_college_collision.py: see that file for why. This used to be a
+# per-part bounding box (CAMPUS_SOLID), which is an invisible brick around each building: no floors
+# above ground, no rooms, no stairs, and every doorway sealed shut.
+COLLEGE_PREFIX = "VVColCollege_"
 
 EAL = unreal.EditorAssetLibrary
 AT = unreal.AssetToolsHelpers.get_asset_tools()
@@ -367,6 +368,10 @@ def collision_mesh(name, boxes):
     if EAL.does_asset_exist(path):
         EAL.delete_asset(path)
     mesh = EAL.duplicate_asset("/Engine/BasicShapes/Cube", path)
+    if mesh is None:
+        # Two callers asking for the same name is how the college lost its collision once: the second
+        # call deleted the asset out from under the actor the first call had already placed.
+        raise RuntimeError("collider name %s is already taken in this build" % path)
     body = mesh.get_editor_property("body_setup")
     agg = body.get_editor_property("agg_geom")
     elements = []
@@ -412,12 +417,17 @@ def place_mesh(eas, mesh, label, folder, location=None, collide=False, cull=0.0,
 
 
 def place_campus(eas, anchor, builder):
-    """Instance the existing campus art once as the college block, with a collider per building part."""
+    """Instance the existing campus art once as the college block, then give it the real collision.
+
+    The art meshes carry no collision at all (build_campus.py writes them with enable_collision=False),
+    so the box export is the only thing standing between the player and the void. It is placed at the
+    SAME anchor as the art, which is what makes floors, rooms, stairs, doors and railings line up.
+    """
     if not EAL.does_directory_exist(CAMPUS_MESHES):
         log("WARN %s is missing: no college block (run Scripts/build_campus.py first)" % CAMPUS_MESHES)
         return 0
     location = unreal.Vector(anchor[0], anchor[1], anchor[2])
-    placed, boxes = 0, []
+    placed = 0
     for asset in EAL.list_assets(CAMPUS_MESHES, recursive=False, include_folder=False):
         path = asset.rstrip("/")
         name = path.split("/")[-1].split(".")[0]
@@ -426,20 +436,18 @@ def place_campus(eas, anchor, builder):
         mesh = unreal.load_asset(path)
         if not mesh:
             continue
-        part = name[len("SM_Campus_"):]
-        place_mesh(eas, mesh, "VV_College_" + part, FOLDER + "/CollegeBlock", location, cull=0.0)
+        place_mesh(eas, mesh, "VV_College_" + name[len("SM_Campus_"):], FOLDER + "/CollegeBlock",
+                   location, cull=0.0)
         placed += 1
-        if part in CAMPUS_SOLID:
-            bounds = mesh.get_bounding_box()
-            centre = (anchor[0] + (bounds.min.x + bounds.max.x) * 0.5,
-                      anchor[1] + (bounds.min.y + bounds.max.y) * 0.5,
-                      anchor[2] + (bounds.min.z + bounds.max.z) * 0.5)
-            size = (bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y, bounds.max.z - bounds.min.z)
-            boxes.append((centre, size, 0.0))
-    if boxes:
-        mesh = collision_mesh("SM_VVCol_CollegeBlock", boxes)
-        place_mesh(eas, mesh, "VVCol_CollegeBlock", FOLDER + "/Collision", collide=True, visible=False)
-    log("college block: %d campus meshes instanced at %s, %d colliders" % (placed, anchor, len(boxes)))
+    log("college block: %d campus meshes instanced at %s" % (placed, anchor))
+    try:
+        counts = CollegeCollision.build(eas, anchor, ROOT + "/CollegeCollision",
+                                        FOLDER + "/Collision/College", COLLEGE_PREFIX, log)
+        log("college collision counts %s" % counts)
+    except Exception:
+        log("ERR college collision not built, the valley college would have no collision:\n%s"
+            % traceback.format_exc())
+        raise
     return placed
 
 
@@ -567,7 +575,7 @@ def main():
     else:
         les.new_level(LEVEL)
         log("created %s" % LEVEL)
-    for folder in ("/Meshes", "/Collision", "/Materials"):
+    for folder in ("/Meshes", "/Collision", "/CollegeCollision", "/Materials"):
         if EAL.does_directory_exist(ROOT + folder):
             EAL.delete_directory(ROOT + folder)
 

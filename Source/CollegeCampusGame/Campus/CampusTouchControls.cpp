@@ -287,6 +287,12 @@ SCampusTouchControls::FLayout SCampusTouchControls::MakeLayout(const FVector2D& 
 	// mis-tapped for one another. Floors of 128 x 84 px keep it past a 64 dp target on a small phone.
 	L.ChuteSize = FVector2D(FMath::Max(12.f * U, 128.f), FMath::Max(8.f * U, 84.f));
 	L.Chute = FVector2D(L.Fire.X, L.Fire.Y - L.ChuteSize.Y * 0.55f);
+
+	// ZIPLINE / CANCEL in the web HUD's own slot (hud.css #btn-zip: right 30%, top 26%) - right side,
+	// above the trigger and clear of the aim row, the weapons panel and the zoom pill at every aspect
+	// ratio we ship. A plate rather than the web's disc, because CANCEL is a word and not a glyph.
+	L.ZiplineSize = FVector2D(FMath::Max(10.f * U, 104.f), FMath::Max(5.f * U, 54.f));
+	L.Zipline = FVector2D(L.W * 0.70f - L.ZiplineSize.X * 0.5f, L.H * 0.26f + L.ZiplineSize.Y * 0.5f);
 	return L;
 }
 
@@ -301,6 +307,11 @@ SCampusTouchControls::EControl SCampusTouchControls::HitTest(const FLayout& L, c
 	auto In = [&P](const FVector2D& C, float R) { return FVector2D::DistSquared(P, C) <= R * R; };
 	// Slightly generous hit areas for thumbs.
 	const float Pad = 1.15f;
+	/** The same, for the two plates (OPEN PARACHUTE, ZIPLINE), which are boxes and not discs. */
+	auto InPlate = [&P, Pad](const FVector2D& C, const FVector2D& Size)
+	{
+		return FMath::Abs(P.X - C.X) <= Size.X * 0.5f * Pad && FMath::Abs(P.Y - C.Y) <= Size.Y * 0.5f * Pad;
+	};
 	// The gear is checked first: it must stay reachable even if a control creeps near the corner.
 	if (In(L.Gear, L.GearR * 1.25f)) return EControl::Settings;
 	// THE SKY HUD owns the screen while the player is coming down. A button that is not drawn must not
@@ -309,8 +320,7 @@ SCampusTouchControls::EControl SCampusTouchControls::HitTest(const FLayout& L, c
 	// through to the stick on the left and the look drag on the right, which is the whole point.
 	if (IsAirborne())
 	{
-		if (CanOpenChute() && FMath::Abs(P.X - L.Chute.X) <= L.ChuteSize.X * 0.5f * Pad
-			&& FMath::Abs(P.Y - L.Chute.Y) <= L.ChuteSize.Y * 0.5f * Pad)
+		if (CanOpenChute() && InPlate(L.Chute, L.ChuteSize))
 		{
 			return EControl::Chute;
 		}
@@ -319,6 +329,18 @@ SCampusTouchControls::EControl SCampusTouchControls::HitTest(const FLayout& L, c
 		if (In(L.Speaker, L.VoiceR * 1.4f)) return EControl::Speaker;
 		return EControl::None;
 	}
+	// ON THE CABLE, and the same rule as the sky above: both hands are on the line, so the combat half
+	// of the HUD is not drawn (DrawControls' bGroundControls) and must not be hit either. CANCEL, the
+	// voice toggles, the stick and the look drag are all that is left of the screen.
+	if (IsRiding())
+	{
+		if (InPlate(L.Zipline, L.ZiplineSize)) return EControl::Zipline;
+		if (In(L.Mic, L.VoiceR * 1.4f)) return EControl::Mic;
+		if (In(L.Speaker, L.VoiceR * 1.4f)) return EControl::Speaker;
+		return EControl::None;
+	}
+	// ZIPLINE, before the combat row: it only exists within reach of a gantry, like ENTER with a car.
+	if (CanUseZipline() && InPlate(L.Zipline, L.ZiplineSize)) return EControl::Zipline;
 	// Only hit-testable when drawn: ENTER near a car, EXIT / SWITCH SEAT while seated.
 	if ((bCarNear || bSeated) && In(L.Vehicle, L.VehicleR * Pad)) return EControl::Vehicle;
 	if (bSeated && In(L.SeatSwitch, L.SeatSwitchR * Pad)) return EControl::SeatSwitch;
@@ -434,6 +456,9 @@ void SCampusTouchControls::PressControl(EControl Control)
 	}
 	case EControl::Pickup:
 		Character->PickupPressed();
+		break;
+	case EControl::Zipline:
+		Character->ZiplinePressed();
 		break;
 	case EControl::Mic:
 		if (ACampusMatchPlayerController* Voice = Cast<ACampusMatchPlayerController>(Controller.Get()))
@@ -1037,6 +1062,28 @@ void SCampusTouchControls::DrawIcon(FSlateWindowElementList& Out, int32 Layer, c
 		DrawCircle(Out, Layer, G, FVector2D(Hang.X, Hang.Y), S * 0.17f, Color);
 		break;
 	}
+	case EControl::Zipline:
+	{
+		// A sagging cable between two posts, a trolley on it, and the rider hanging under the trolley.
+		const float S = R * 0.78f;
+		const float Tie = -S * 0.52f; // where the cable is tied to each post
+		TArray<FVector2f> Rope;
+		for (int32 I = 0; I <= 12; ++I)
+		{
+			const float Across = -1.f + 2.f * I / 12.f;
+			Rope.Add(P(Across * S, Tie + (1.f - Across * Across) * S * 0.26f));
+		}
+		DrawPolyline(Out, Layer, G, Rope, Color, T);
+		DrawPolyline(Out, Layer, G, { P(-S, Tie), P(-S, S * 0.3f) }, Color, T);
+		DrawPolyline(Out, Layer, G, { P(S, Tie), P(S, S * 0.3f) }, Color, T);
+		// The trolley at the bottom of the dip, its strap, and the rider's head.
+		const float Dip = Tie + S * 0.26f;
+		DrawPolyline(Out, Layer, G, { P(-S * 0.18f, Dip - S * 0.1f), P(S * 0.18f, Dip - S * 0.1f),
+			P(S * 0.18f, Dip + S * 0.12f), P(-S * 0.18f, Dip + S * 0.12f), P(-S * 0.18f, Dip - S * 0.1f) }, Color, T * 0.8f);
+		DrawPolyline(Out, Layer, G, { P(0.f, Dip + S * 0.12f), P(0.f, Dip + S * 0.42f) }, Color, T * 0.7f);
+		DrawCircle(Out, Layer, G, FVector2D(C.X, C.Y + Dip + S * 0.58f), S * 0.16f, Color);
+		break;
+	}
 	case EControl::SeatSwitch:
 	{
 		// Two arrows trading places.
@@ -1065,7 +1112,10 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	// stops being hit-testable (HitTest); the stick, the look drag, the voice toggles, the minimap and
 	// the gear are untouched, because those are the four things a diver actually uses.
 	const float GroundFade = 1.f - AirBlend;
-	const bool bGroundControls = GroundFade > 0.01f;
+	// ON THE CABLE the combat half goes with it, for the same reason: a trigger that cannot fire, an
+	// ENTER that cannot be taken and a crouch that is refused are three buttons a thumb would go
+	// looking for and find dead. HitTest drops them in the same breath, and CANCEL takes the screen.
+	const bool bGroundControls = GroundFade > 0.01f && !IsRiding();
 	auto Fade = [GroundFade](const FLinearColor& Color) { return Color.CopyWithNewOpacity(Color.A * GroundFade); };
 	auto IsHeld = [this](EControl Control)
 	{
@@ -1379,6 +1429,54 @@ void SCampusTouchControls::DrawControls(FSlateWindowElementList& Out, int32 Laye
 	DrawChuteButton(Out, Layer + 8, G, L);
 }
 
+bool SCampusTouchControls::IsRiding() const
+{
+	const ACampusCharacter* Character = GetCharacter();
+	return Character && Character->IsZipping();
+}
+
+bool SCampusTouchControls::CanUseZipline() const
+{
+	const ACampusCharacter* Character = GetCharacter();
+	// Never in the sky: the gantry a diver is flying over is not a gantry they are standing at, and
+	// the plate would be a second thing under a thumb that has only one job up there.
+	return Character && !IsAirborne() && Character->CanUseZipline();
+}
+
+void SCampusTouchControls::DrawZiplineButton(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
+{
+	const bool bRiding = IsRiding();
+	if (!bRiding && !CanUseZipline())
+	{
+		return; // nothing within reach: no button, the same as PICK UP and ENTER
+	}
+	const float U = L.U;
+	bool bHeld = false;
+	for (const TPair<int32, FFinger>& Pair : Fingers)
+	{
+		bHeld |= Pair.Value.Control == EControl::Zipline;
+	}
+	const FVector2D Size = L.ZiplineSize * (bHeld ? 0.96f : 1.f);
+	const FVector2D Min = L.Zipline - Size * 0.5f;
+	// The same dark glass and hairline as the OPEN plate, so the two read as one family. CANCEL takes
+	// the accent border it has earned - and the word changes too, because colour is never the only
+	// signal: ZIPLINE is a thing you may do, CANCEL is the one you are in the middle of.
+	const FLinearColor Fill = bHeld ? FLinearColor(0.09f, 0.07f, 0.01f, 0.62f) : FLinearColor(0.015f, 0.025f, 0.04f, 0.46f);
+	const FLinearColor Border = bHeld || bRiding ? TouchStyle::Accent : FLinearColor(1.f, 1.f, 1.f, 0.42f);
+	DrawNotchedBox(Out, Layer, G, Min, Size, Size.Y * 0.26f, Fill, Border, bHeld || bRiding ? 2.f : 1.5f);
+	DrawIcon(Out, Layer + 2, G, EControl::Zipline, FVector2D(Min.X + Size.X * 0.22f, L.Zipline.Y), Size.Y * 0.34f,
+		bHeld || bRiding ? TouchStyle::Accent : FLinearColor::White, 0.f);
+	DrawText(Out, Layer + 2, G, bRiding ? TEXT("CANCEL") : TEXT("ZIPLINE"),
+		FVector2D(Min.X + Size.X * 0.62f, L.Zipline.Y), FMath::Max(11, FMath::RoundToInt(U * 1.5f)), FLinearColor::White);
+	if (!bShowButtons)
+	{
+		// Desktop: the plate is a prompt and not a button, so it has to name the key (E, and F beside
+		// it - ACampusCharacter::BuildInput maps both).
+		DrawText(Out, Layer + 2, G, TEXT("PRESS E"), FVector2D(L.Zipline.X, Min.Y + Size.Y + 1.3f * U),
+			FMath::Max(9, FMath::RoundToInt(U * 1.05f)), TouchStyle::Accent.CopyWithNewOpacity(0.85f));
+	}
+}
+
 void SCampusTouchControls::DrawChuteButton(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const
 {
 	// FREEFALL ONLY. Aboard the plane the press is the bottom-centre JUMP (SCampusBRHud) and under the
@@ -1673,7 +1771,11 @@ void SCampusTouchControls::DrawHud(FSlateWindowElementList& Out, int32 Layer, co
 	// WEAPONS AND AMMO, and not a pixel of either while the player is coming down: there is no gun in
 	// a diver's hands, both slots are untappable in the air (HitTest), and a magazine count over a
 	// 300 m drop is the clutter this screen was asked to lose. Fades with the rest of the combat set.
-	const float GroundFade = 1.f - AirBlend;
+	//
+	// ON A ZIPLINE the plates DIM instead of going: both hands are on the cable so neither slot can be
+	// tapped, but what you are holding and how much is in it is still worth knowing on the way over -
+	// which is exactly the call the web HUD makes (hud.css #hud.on-zip #weapons .ic { opacity: .35 }).
+	const float GroundFade = (1.f - AirBlend) * (IsRiding() ? 0.35f : 1.f);
 	auto Fade = [GroundFade](const FLinearColor& Color) { return Color.CopyWithNewOpacity(Color.A * GroundFade); };
 	if (GroundFade > 0.01f)
 	{
@@ -1833,6 +1935,9 @@ int32 SCampusTouchControls::OnPaint(const FPaintArgs& Args, const FGeometry& All
 	// The drop's instrument panel: altitude, descent rate, phase. Outside DrawControls because it is
 	// information, not a button - a desktop diver with no on-screen controls still needs the numbers.
 	DrawDiveReadout(OutDrawElements, LayerId + 19, AllottedGeometry, L);
+	// ZIPLINE / CANCEL. Outside DrawControls for the same reason: with no on-screen controls it is
+	// still the prompt that tells a keyboard player there is a line here and which key takes it.
+	DrawZiplineButton(OutDrawElements, LayerId + 19, AllottedGeometry, L);
 	if (bShowButtons)
 	{
 		DrawControls(OutDrawElements, LayerId + 5, AllottedGeometry, L);

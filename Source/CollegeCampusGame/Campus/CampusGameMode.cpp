@@ -6,6 +6,7 @@
 #include "Campus/CampusDoor.h"
 #include "Campus/CampusMapArt.h"
 #include "Campus/CampusVehicle.h"
+#include "Campus/CampusZipline.h"
 #include "EngineUtils.h"
 #include "Campus/CampusMatchState.h"
 #include "Campus/CampusPlayerControllers.h"
@@ -165,6 +166,10 @@ void ACampusMatchGameMode::InitGameState()
 			GameSession->MaxPlayers = State->MaxPlayers;
 		}
 	}
+	// The ziplines this level carries (ACampusZipline::SpawnForLevel's own table). Spawned here for the
+	// same reason the battle mode spawns its zone and its sky in InitGameState: it is the first moment
+	// the world exists and the one place that runs exactly once, on the host only.
+	ACampusZipline::SpawnForLevel(GetWorld());
 }
 
 void ACampusMatchGameMode::PostLogin(APlayerController* NewPlayer)

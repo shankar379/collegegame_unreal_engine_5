@@ -444,6 +444,7 @@ void ACampusCharacter::BuildInput()
 	AimAction = NewAction(TEXT("IA_CampusAim"), EInputActionValueType::Boolean);
 	FireAction = NewAction(TEXT("IA_CampusFire"), EInputActionValueType::Boolean);
 	ReloadAction = NewAction(TEXT("IA_CampusReload"), EInputActionValueType::Boolean);
+	ZiplineAction = NewAction(TEXT("IA_CampusZipline"), EInputActionValueType::Boolean);
 
 	InputMapping = NewObject<UInputMappingContext>(this, TEXT("IMC_Campus"));
 
@@ -483,6 +484,11 @@ void ACampusCharacter::BuildInput()
 	InputMapping->MapKey(FireAction, EKeys::Gamepad_RightTrigger);
 	InputMapping->MapKey(ReloadAction, EKeys::R);
 	InputMapping->MapKey(ReloadAction, EKeys::Gamepad_FaceButton_Left);
+	// E is the web game's zipline key; F is the key a mouse-and-keyboard player reaches for on a
+	// prompt, and neither is bound to anything else. Both do the same one thing.
+	InputMapping->MapKey(ZiplineAction, EKeys::E);
+	InputMapping->MapKey(ZiplineAction, EKeys::F);
+	InputMapping->MapKey(ZiplineAction, EKeys::Gamepad_RightShoulder);
 }
 
 void ACampusCharacter::PawnClientRestart()
@@ -526,6 +532,7 @@ void ACampusCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 	Input->BindAction(FireAction, ETriggerEvent::Started, this, &ACampusCharacter::FirePressed);
 	Input->BindAction(FireAction, ETriggerEvent::Completed, this, &ACampusCharacter::FireReleased);
 	Input->BindAction(ReloadAction, ETriggerEvent::Started, this, &ACampusCharacter::Reload);
+	Input->BindAction(ZiplineAction, ETriggerEvent::Started, this, &ACampusCharacter::ZiplinePressed);
 }
 
 void ACampusCharacter::ApplyMove(const FVector2D& Axis)
@@ -618,9 +625,9 @@ void ACampusCharacter::ToggleSprint()
 
 void ACampusCharacter::ToggleCrouch()
 {
-	if (Vehicle)
+	if (Vehicle || Zip)
 	{
-		return; // a seated character is already crouched, by the seat
+		return; // a seated character is already crouched, by the seat; a rider is hanging off a cable
 	}
 	if (bSliding)
 	{
@@ -677,12 +684,20 @@ void ACampusCharacter::ApplySliding(bool bNewSliding)
 ACampusZipline* ACampusCharacter::FindZipline(int32& OutEnd) const
 {
 	const FVector Feet = GetActorLocation() - FVector(0.f, 0.f, GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
-	for (TActorIterator<ACampusZipline> It(GetWorld()); It; ++It)
+	// The registry and not a TActorIterator: the HUD asks this on every painted frame to decide
+	// whether to draw the ZIPLINE plate, and a walk of every actor in a fifty-player level is not a
+	// thing to do sixty times a second on a phone.
+	for (const TWeakObjectPtr<ACampusZipline>& Candidate : ACampusZipline::All())
 	{
-		OutEnd = It->NearEnd(Feet);
+		ACampusZipline* Line = Candidate.Get();
+		if (!Line || Line->GetWorld() != GetWorld())
+		{
+			continue;
+		}
+		OutEnd = Line->NearEnd(Feet);
 		if (OutEnd != INDEX_NONE)
 		{
-			return *It;
+			return Line;
 		}
 	}
 	return nullptr;
@@ -690,8 +705,59 @@ ACampusZipline* ACampusCharacter::FindZipline(int32& OutEnd) const
 
 bool ACampusCharacter::CanUseZipline() const
 {
+	// zipline.js useZipline: a gantry is no use from a car seat, from the ground after a death, or in
+	// mid-air on the way down from the plane.
+	if (Zip || bTraversing || bDead || Vehicle || IsDiving())
+	{
+		return false;
+	}
 	int32 End = INDEX_NONE;
-	return !Zip && !bTraversing && FindZipline(End) != nullptr;
+	return FindZipline(End) != nullptr;
+}
+
+void ACampusCharacter::ZiplinePressed()
+{
+	// ONE BUTTON, TWO MEANINGS, exactly as the web HUD has it (hud.js showZip: 'use' / 'cancel').
+	if (Zip)
+	{
+		StopZip(false); // let go: you drop from wherever you are on the cable
+		if (HasAuthority())
+		{
+			MulticastStopZip();
+		}
+		else
+		{
+			ServerStopZip();
+		}
+		return;
+	}
+	TryStartZip();
+}
+
+bool ACampusCharacter::TryStartZip()
+{
+	if (!CanUseZipline())
+	{
+		return false;
+	}
+	int32 End = INDEX_NONE;
+	ACampusZipline* Line = FindZipline(End);
+	if (!Line)
+	{
+		return false;
+	}
+	// The owner starts riding on its own phone the moment it presses, and the server confirms (or
+	// refuses: ClientCancelZip) - the same optimistic start the traversal moves use.
+	StartZip(Line, End);
+	if (HasAuthority())
+	{
+		MulticastStartZip(Line, End);
+	}
+	else
+	{
+		ServerStartZip(Line, End);
+	}
+	return true;
 }
 
 void ACampusCharacter::ServerStartZip_Implementation(ACampusZipline* Line, int32 FromEnd)
@@ -713,15 +779,7 @@ void ACampusCharacter::ServerStartZip_Implementation(ACampusZipline* Line, int32
 
 void ACampusCharacter::ClientCancelZip_Implementation()
 {
-	if (!Zip)
-	{
-		return;
-	}
-	Zip = nullptr;
-	bUseControllerRotationYaw = true;
-	UCharacterMovementComponent* Movement = GetCharacterMovement();
-	Movement->SetMovementMode(MOVE_Walking);
-	Movement->StopMovementImmediately();
+	StopZip(false); // the server never let us on: drop off the line we only ever rode locally
 }
 
 void ACampusCharacter::ClientCancelTraversal_Implementation()
@@ -741,6 +799,25 @@ void ACampusCharacter::MulticastStartZip_Implementation(ACampusZipline* Line, in
 	StartZip(Line, FromEnd);
 }
 
+void ACampusCharacter::ServerStopZip_Implementation()
+{
+	if (!Zip)
+	{
+		return;
+	}
+	StopZip(false);
+	MulticastStopZip();
+}
+
+void ACampusCharacter::MulticastStopZip_Implementation()
+{
+	// NO authority / owner filter here, unlike MulticastStartZip: this multicast also carries the
+	// stops the SERVER decides on its own (shot off the cable), which the rider's own phone has not
+	// run yet. StopZip is a no-op once we are off the line, so the machines that already let go
+	// simply ignore it.
+	StopZip(false);
+}
+
 void ACampusCharacter::StartZip(ACampusZipline* Line, int32 FromEnd)
 {
 	if (!Line)
@@ -757,36 +834,64 @@ void ACampusCharacter::StartZip(ACampusZipline* Line, int32 FromEnd)
 	}
 	Zip = Line;
 	ZipDir = FromEnd == 0 ? 1 : -1;
-	ZipS = FromEnd == 0 ? 0.f : Line->Length;
+	ZipS = FromEnd == 0 ? 0.f : Line->GetLength();
 	ZipV = 0.f;
+	// Both hands go on the line: the trigger is let go of and the sight comes down (zipline.js
+	// zipHands / setAim(false)). TryFire refuses while Zip is set, so nothing can pull it back.
 	bFireHeld = false;
+	bAiming = false;
 	UCharacterMovementComponent* Movement = GetCharacterMovement();
 	Movement->StopMovementImmediately();
 	Movement->SetMovementMode(MOVE_Flying);
 	bUseControllerRotationYaw = false;
+	UpdateMovementSettings();
+}
+
+void ACampusCharacter::StopZip(bool bAtFarEnd)
+{
+	if (!Zip)
+	{
+		return;
+	}
+	// Worked out before the line is let go of: which way we were travelling, and the slab we would
+	// step onto if this is the far end.
+	const FVector Travel = Zip->TangentAt(ZipS / Zip->GetLength()) * float(ZipDir);
+	const FVector Land = Zip->Landing(ZipDir > 0 ? 1 : 0);
+	Zip = nullptr;
+	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	bUseControllerRotationYaw = true;
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	// Walking at the far end (the slab is right under the feet); falling on a cancel, which is the
+	// whole point of letting go halfway.
+	Movement->SetMovementMode(bAtFarEnd ? MOVE_Walking : MOVE_Falling);
+	Movement->StopMovementImmediately();
+	if (bAtFarEnd)
+	{
+		SetActorLocation(Land + FVector(0.f, 0.f, HalfHeight), false, nullptr, ETeleportType::TeleportPhysics);
+		// A step off the gantry instead of a stop dead on its slab.
+		Movement->Velocity = FVector(Travel.X, Travel.Y, 0.f).GetSafeNormal() * ACampusZipline::DismountPush;
+	}
+	UpdateMovementSettings();
 }
 
 void ACampusCharacter::TickZip(float DeltaSeconds)
 {
-	// three.js Zipline.update: accelerate to the line speed, brake smoothly into the far tower.
-	const float Left = ZipDir > 0 ? Zip->Length - ZipS : ZipS;
+	// three.js Zipline.update: accelerate to the line speed, brake smoothly into the far gantry.
+	const float Length = Zip->GetLength();
+	const float Left = ZipDir > 0 ? Length - ZipS : ZipS;
 	const float BrakeV = FMath::Sqrt(2.f * ACampusZipline::Accel * FMath::Max(Left - 150.f, 0.f)) + 150.f;
 	ZipV = FMath::Min3(ZipV + ACampusZipline::Accel * DeltaSeconds, ACampusZipline::Speed, BrakeV);
-	ZipS = FMath::Clamp(ZipS + ZipDir * ZipV * DeltaSeconds, 0.f, Zip->Length);
-	const float Alpha = ZipS / FMath::Max(Zip->Length, 1.f);
+	ZipS = FMath::Clamp(ZipS + ZipDir * ZipV * DeltaSeconds, 0.f, Length);
+	const float Alpha = ZipS / Length;
 	const FVector Feet = Zip->PointAt(Alpha) - FVector(0.f, 0.f, ACampusZipline::Hang);
-	const FVector Travel = Zip->TangentAt(Alpha) * ZipDir;
+	const FVector Travel = Zip->TangentAt(Alpha) * float(ZipDir);
 	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 	SetActorLocationAndRotation(Feet + FVector(0.f, 0.f, HalfHeight), FRotator(0.f, Travel.Rotation().Yaw, 0.f), false, nullptr, ETeleportType::TeleportPhysics);
-	if ((ZipDir > 0 && ZipS >= Zip->Length) || (ZipDir < 0 && ZipS <= 0.f))
+	if ((ZipDir > 0 && ZipS >= Length) || (ZipDir < 0 && ZipS <= 0.f))
 	{
-		const FVector Land = Zip->Landing(ZipDir > 0 ? 1 : 0);
-		Zip = nullptr;
-		SetActorLocation(Land + FVector(0.f, 0.f, HalfHeight), false, nullptr, ETeleportType::TeleportPhysics);
-		bUseControllerRotationYaw = true;
-		UCharacterMovementComponent* Movement = GetCharacterMovement();
-		Movement->SetMovementMode(MOVE_Walking);
-		Movement->StopMovementImmediately();
+		// The far end needs no event: every machine runs the same ride off the same start and arrives
+		// here on its own (which is why only a CANCEL is an RPC).
+		StopZip(true);
 	}
 }
 
@@ -890,9 +995,9 @@ void ACampusCharacter::AddFreeLook(float YawDegrees, float PitchDegrees)
 
 void ACampusCharacter::SetAiming(bool bAim)
 {
-	if (bAim && (bFreeLookHeld || IsDriving()))
+	if (bAim && (bFreeLookHeld || IsDriving() || Zip))
 	{
-		return; // a driver never aims: one thumb cannot steer and aim on a phone
+		return; // a driver never aims, and a rider has both hands on the line
 	}
 	if (bAim && !bArmed)
 	{
@@ -906,7 +1011,9 @@ void ACampusCharacter::SetAiming(bool bAim)
 void ACampusCharacter::TryFire()
 {
 	const float Now = GetWorld()->GetTimeSeconds();
-	if (!bArmed || bDead || bTraversing || IsFreeLooking() || Now < NextFireTime || Now < ReloadEndTime || IsDriving())
+	// Zip: both hands are on the line, so nobody shoots off a zipline (three.js game.js handleTrigger).
+	// You are still hit exactly as you would be on foot - riding is exposure, not cover.
+	if (!bArmed || bDead || bTraversing || Zip || IsFreeLooking() || Now < NextFireTime || Now < ReloadEndTime || IsDriving())
 	{
 		return;
 	}
@@ -1541,24 +1648,21 @@ void ACampusCharacter::JumpPressed()
 	{
 		return;
 	}
+	// Riding: Jump is the hand that lets go of the cable, the same as the HUD's CANCEL.
+	if (Zip)
+	{
+		ZiplinePressed();
+		return;
+	}
 	// Seated: Jump does nothing. Getting out of a car is a multi-second commitment and it has its own
 	// button - vaulting a railing when you meant to stay in the car is a rage-quit bug.
-	if (bTraversing || Zip || Vehicle)
+	if (bTraversing || Vehicle)
 	{
 		return;
 	}
-	int32 ZipEnd = INDEX_NONE;
-	if (ACampusZipline* Line = FindZipline(ZipEnd))
+	// Standing at a gantry: Jump rides, as it always has (the ZIPLINE button is the other way in).
+	if (TryStartZip())
 	{
-		StartZip(Line, ZipEnd);
-		if (HasAuthority())
-		{
-			MulticastStartZip(Line, ZipEnd);
-		}
-		else
-		{
-			ServerStartZip(Line, ZipEnd);
-		}
 		return;
 	}
 	if (bSliding)
@@ -1998,6 +2102,13 @@ void ACampusCharacter::ApplyHit(float InDamage, AController* InstigatorControlle
 	if (Health <= 0.f)
 	{
 		bDead = true;
+		if (Zip)
+		{
+			// Shot off the cable: the hands let go on every machine. Without this the body would ride
+			// serenely on to the far gantry and step off it.
+			StopZip(false);
+			MulticastStopZip();
+		}
 		// Two modes, two bookkeepers: BR eliminates and places, TDM scores the round.
 		if (ACampusBRGameMode* BattleRoyale = GetWorld()->GetAuthGameMode<ACampusBRGameMode>())
 		{

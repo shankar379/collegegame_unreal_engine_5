@@ -51,7 +51,9 @@ private:
 		/** PICK UP: appears when a ground-loot box is in reach (battle royale). */
 		Pickup,
 		/** OPEN PARACHUTE: right thumb, freefall only (battle royale drop). */
-		Chute };
+		Chute,
+		/** ZIPLINE near a gantry, CANCEL while riding one (three.js hud.js #btn-zip). */
+		Zipline };
 	enum class ERole : uint8 { Look, Joystick, FireDrag, Button, FreeLook };
 
 	struct FFinger
@@ -75,6 +77,8 @@ private:
 		float PickupR = 0.f;
 		/** OPEN PARACHUTE: a plate, not a disc (icon over a label), so it carries its own size. */
 		FVector2D Chute, ChuteSize;
+		/** ZIPLINE / CANCEL: the same kind of plate, in the web HUD's own slot on the right. */
+		FVector2D Zipline, ZiplineSize;
 		float VoiceR = 0.f;
 		float FireR = 0.f, FireLeftR = 0.f, ScopeR = 0.f, ReloadR = 0.f, JumpR = 0.f, CrouchR = 0.f, ProneR = 0.f, SprintR = 0.f, EyeR = 0.f;
 		float VehicleR = 0.f, SeatSwitchR = 0.f;
@@ -126,6 +130,17 @@ private:
 	void DrawDiveReadout(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
 	/** OPEN PARACHUTE, right thumb: translucent plate, canopy glyph, press feedback. Freefall only. */
 	void DrawChuteButton(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
+
+	// ---- ZIPLINE (three.js hud.js showZip). Standing at a gantry the plate says ZIPLINE; riding, it
+	// says CANCEL and is the hand that lets go. While riding, both hands are on the cable - so the
+	// combat half of the HUD is neither drawn nor hit-testable, by the same rule the sky HUD goes by.
+	/** On the cable right now. */
+	bool IsRiding() const;
+	/** Within reach of a gantry and able to grab it. */
+	bool CanUseZipline() const;
+	/** ZIPLINE / CANCEL: translucent plate, trolley glyph, press feedback. Drawn only when it does
+	 *  something, which is at a gantry or on the line. */
+	void DrawZiplineButton(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
 
 	void DrawHud(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
 	/** While seated: car HP under the player's bar, 4 wheel pips, the seat chip, and the BAIL OUT warning. */

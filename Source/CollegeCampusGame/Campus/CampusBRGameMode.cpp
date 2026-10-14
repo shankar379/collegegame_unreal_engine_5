@@ -10,6 +10,7 @@
 #include "Campus/CampusMapArt.h"
 #include "Campus/CampusNetSettings.h"
 #include "Campus/CampusPlayerControllers.h"
+#include "Campus/CampusZipline.h"
 #include "AIController.h"
 #include "CollisionQueryParams.h"
 #include "Engine/World.h"
@@ -162,6 +163,9 @@ void ACampusBRGameMode::InitGameState()
 	// has baked in, and places the atmosphere if the level has none. A no-op when the build script
 	// already put one in the level.
 	ACampusDayNight::EnsureFor(GetWorld());
+	// The ziplines this level carries (ACampusZipline::SpawnForLevel's own table), beside the zone and
+	// the sky: one pass, on the host, before anybody can be standing at a gantry.
+	ACampusZipline::SpawnForLevel(GetWorld());
 	State->Phase = ECampusPhase::Waiting;
 	EnterPhase(ECampusBRPhase::Waiting);
 

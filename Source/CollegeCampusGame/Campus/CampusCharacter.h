@@ -65,8 +65,12 @@ public:
 	/** Server: ACampusBRDrop sets this as the dive moves through its states. */
 	void SetDivePose(uint8 Pose);
 
-	/** Standing at a zipline tower: the Jump button rides it. */
+	/** Standing at a zipline gantry with nothing in the way: the ZIPLINE button and the Jump button
+	 *  both ride it from here. */
 	bool CanUseZipline() const;
+	/** ZIPLINE / CANCEL, the web game's one button (hud.js showZip): grab the line at the gantry you
+	 *  are standing at, or let go of it and drop if you are already riding. */
+	void ZiplinePressed();
 	float GetHealth() const { return Health; }
 	float GetMaxHealth() const { return MaxHealth; }
 	int32 GetAmmoInMag() const { return AmmoInMag; }
@@ -221,6 +225,15 @@ private:
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastStartZip(class ACampusZipline* Line, int32 FromEnd);
 
+	/** LETTING GO IS AN EVENT, not a state every machine can work out for itself: the far end is
+	 *  deterministic (TickZip reaches it on its own), but a CANCEL in the middle of the cable is a
+	 *  decision, so it goes through the server and back out to everyone. */
+	UFUNCTION(Server, Reliable)
+	void ServerStopZip();
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastStopZip();
+
 	/** The server refused a zip / traversal the owner already started locally: undo it there (else the owner keeps
 	 *  flying along the cable / up the wall while the server corrects it every frame). */
 	UFUNCTION(Client, Reliable)
@@ -230,7 +243,13 @@ private:
 	void ClientCancelTraversal();
 
 	class ACampusZipline* FindZipline(int32& OutEnd) const;
+	/** Grab the line at the gantry we are standing at, if there is one. True if the ride started -
+	 *  the one path both the ZIPLINE button and the Jump button take. */
+	bool TryStartZip();
 	void StartZip(class ACampusZipline* Line, int32 FromEnd);
+	/** Off the line: back on our feet, facing the way we were travelling. bAtFarEnd places us on the
+	 *  far gantry's slab with a step forward; otherwise we simply let go and fall from here. */
+	void StopZip(bool bAtFarEnd);
 	void TickZip(float DeltaSeconds);
 	/** Sprint + crouch: knee slide that bleeds speed, then crouch (or stand up if still sprinting). */
 	void SetSliding(bool bNewSliding);
@@ -380,6 +399,10 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UInputAction> ReloadAction;
+
+	/** ZIPLINE / CANCEL on a keyboard: E, the key the web game's HUD binds (hud.js KeyE). */
+	UPROPERTY(Transient)
+	TObjectPtr<UInputAction> ZiplineAction;
 
 	// Speeds match the three.js game (player.js): stand 4.2 m/s, sprint 6.6, crouch 2.0, aiming x0.55.
 	UPROPERTY(EditAnywhere, Category="Movement")
