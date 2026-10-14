@@ -61,6 +61,8 @@ void ACampusBRGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
 	DOREPLIFETIME(ACampusBRGameState, AliveCombatants);
 	DOREPLIFETIME(ACampusBRGameState, TotalCombatants);
 	DOREPLIFETIME(ACampusBRGameState, AliveSquads);
+	DOREPLIFETIME(ACampusBRGameState, TotalSquads);
+	DOREPLIFETIME(ACampusBRGameState, MatchSeconds);
 	DOREPLIFETIME(ACampusBRGameState, WinningSquad);
 	DOREPLIFETIME(ACampusBRGameState, HumansJoined);
 	DOREPLIFETIME(ACampusBRGameState, Zone);
@@ -140,6 +142,7 @@ void ACampusBRGameMode::InitGameState()
 	// The SESSION's shape, so the HUD's SQUADS counter does not read "1" at the one moment the first
 	// player to arrive is looking at it. RefreshCounts takes over the instant the roster is sealed.
 	State->AliveSquads = FMath::Max(1, MaxCombatants / FMath::Max(1, SquadSize));
+	State->TotalSquads = State->AliveSquads;
 	if (GameSession)
 	{
 		GameSession->MaxPlayers = MaxHumans;
@@ -940,6 +943,9 @@ void ACampusBRGameMode::Eliminate(int32 Index, const FString& KillerName)
 	if (ACampusPlayerState* DeadState = Controller ? Controller->GetPlayerState<ACampusPlayerState>() : nullptr)
 	{
 		DeadState->Placement = Slot.Placement;
+		// How long they lasted, for the result screen's SURVIVAL TIME. Measured from the whistle, not
+		// from the drop: everyone in the match shares that start, so two squadmates can compare.
+		DeadState->SurvivalSeconds = FMath::Max(0.f, float(GetWorld()->GetTimeSeconds()) - MatchStartTime);
 	}
 	if (Controller)
 	{
@@ -958,11 +964,43 @@ void ACampusBRGameMode::Eliminate(int32 Index, const FString& KillerName)
 		}
 	}
 	RefreshCounts();
+	// THE SQUAD'S OWN PLACE, written only when this elimination was the squad's LAST one. Counted in
+	// teams, not in bodies: with AliveSquads teams still standing after the wipe, this squad came in
+	// one behind them. Every member gets it, dead or disconnected, because "#3 / 13" has to read the
+	// same on all four phones.
+	if (!HasLivingMember(Slot.Squad))
+	{
+		const int32 SquadPlace = FMath::Max(1, State->AliveSquads + 1);
+		for (const FCampusBRCombatant& Each : Combatants)
+		{
+			if (Each.Squad != Slot.Squad)
+			{
+				continue;
+			}
+			if (ACampusPlayerState* MateState = Each.Controller.IsValid()
+				? Each.Controller->GetPlayerState<ACampusPlayerState>() : nullptr)
+			{
+				MateState->SquadPlacement = SquadPlace;
+			}
+		}
+	}
 
 	if (State->AliveSquads <= 1)
 	{
 		EndMatch();
 	}
+}
+
+bool ACampusBRGameMode::HasLivingMember(int32 Squad) const
+{
+	for (const FCampusBRCombatant& Each : Combatants)
+	{
+		if (Each.bAlive && Each.Squad == Squad)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 APawn* ACampusBRGameMode::LivingSquadmatePawn(int32 Squad, const AController* Except) const
@@ -1007,6 +1045,19 @@ void ACampusBRGameMode::RefreshCounts()
 	// humans who have walked in, and a HUD reading "PLAYERS 1 / 1" off it told the first player to
 	// arrive that they were the whole match. The bots take the rest of the slots at the seal.
 	State->TotalCombatants = FMath::Max(Combatants.Num(), MaxCombatants);
+	// The denominator of "#3 / N" is fixed for the whole match, so it is only ever raised: counting
+	// DISTINCT squads on a sealed roster, and never dropping below the shape the session advertised.
+	if (bSealed)
+	{
+		TSet<int32> AllSquads;
+		for (const FCampusBRCombatant& Each : Combatants)
+		{
+			AllSquads.Add(Each.Squad);
+		}
+		State->TotalSquads = FMath::Max(State->TotalSquads, AllSquads.Num());
+	}
+	State->TotalSquads = FMath::Max3(State->TotalSquads, State->AliveSquads,
+		State->TotalCombatants / FMath::Max(1, SquadSize));
 }
 
 void ACampusBRGameMode::EndMatch()
@@ -1026,6 +1077,11 @@ void ACampusBRGameMode::EndMatch()
 	EnterPhase(ECampusBRPhase::Ended);
 	State->Phase = ECampusPhase::Ended;
 
+	// The whole match in whole seconds, for MATCH DURATION on the result screen. Measured once, here,
+	// because the host's world clock is the only one every phone in the session agrees about.
+	const float Ran = FMath::Max(0.f, float(GetWorld()->GetTimeSeconds()) - MatchStartTime);
+	State->MatchSeconds = FMath::RoundToInt(Ran);
+
 	int32 WinningSquad = -1;
 	for (FCampusBRCombatant& Each : Combatants)
 	{
@@ -1037,6 +1093,9 @@ void ACampusBRGameMode::EndMatch()
 				? Each.Controller->GetPlayerState<ACampusPlayerState>() : nullptr)
 			{
 				Won->Placement = 1;
+				Won->SquadPlacement = 1;
+				// They never died, so nothing wrote their survival time: they lasted the whole match.
+				Won->SurvivalSeconds = Ran;
 			}
 		}
 	}

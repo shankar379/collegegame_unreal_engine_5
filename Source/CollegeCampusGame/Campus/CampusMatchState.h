@@ -78,6 +78,15 @@ public:
 	UPROPERTY(Replicated)
 	int32 Placement = 0;
 
+	/** BATTLE ROYALE ONLY: the SQUAD's finishing place, out of ACampusBRGameState::TotalSquads.
+	 *
+	 *  Placement above counts COMBATANTS (a solo player dying 37th out of 50); this counts TEAMS, and
+	 *  it is the number the result screen shows as "#3 / 13" because it is the one the whole squad
+	 *  shares. Written to every member the moment the squad is wiped, and to the winners at the end.
+	 *  0 = the squad was still standing. In SOLO a squad is one player, so the two agree by nature. */
+	UPROPERTY(Replicated)
+	int32 SquadPlacement = 0;
+
 	/** Server only: the account the API admitted for this connection, and the ticket it came with. */
 	FString AccountId;
 	FString JoinTicket;
@@ -99,6 +108,23 @@ public:
 
 	UPROPERTY(Replicated)
 	float DamageTaken = 0.f;
+
+	/** Hits that landed on an enemy's HEAD (zone 1 in ACampusCharacter::ServerFire). Counted on the
+	 *  server, where the zone is decided, so a client cannot inflate it. */
+	UPROPERTY(Replicated)
+	int32 Headshots = 0;
+
+	/** Centimetres this player has actually moved under their own power, summed on the server from
+	 *  the pawn's own position. Teleports (the drop, a respawn, a zipline hand-off) jump further in
+	 *  one frame than anyone can run, so they are discarded rather than counted - see
+	 *  ACampusCharacter::TickDistance. The result screen divides by 100000 for kilometres. */
+	UPROPERTY(Replicated)
+	float DistanceCm = 0.f;
+
+	/** Seconds this player lasted in the match: written when they are eliminated, and at the final
+	 *  whistle for everybody still standing. 0 until the match ends one way or the other. */
+	UPROPERTY(Replicated)
+	float SurvivalSeconds = 0.f;
 
 	UPROPERTY(Replicated)
 	bool bIsHost = false;

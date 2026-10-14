@@ -5,6 +5,7 @@
 #include "Camera/CameraComponent.h"
 #include "Campus/CampusAnimInstance.h"
 #include "Campus/CampusBR.h"
+#include "Campus/CampusBREnd.h"
 #include "Campus/CampusBRHud.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusEOS.h"
@@ -907,6 +908,10 @@ void ACampusMatchPlayerController::EndPlay(const EEndPlayReason::Type EndPlayRea
 	Widget.Reset();
 	TouchControls.Reset();
 	BRHud.Reset();
+	// The result line-up and its camera are plain actors in this level; the level is going away, but
+	// taking them down here keeps the ownership obvious and survives a travel that does not tear the
+	// world down behind us.
+	ClearResultStage();
 	// The queue subsystem outlives this level, so the handle comes off here or the next match would
 	// fire into a dead `this`.
 	if (SessionEndedHandle.IsValid())
@@ -934,7 +939,145 @@ void ACampusMatchPlayerController::PlayerTick(float DeltaTime)
 	if (State && State->Phase == ECampusPhase::Ended)
 	{
 		RecordResult();
+		// THE MATCH IS OVER, SO THE MATCH HUD IS OVER. SetActive only makes the touch layer
+		// hit-test-invisible - it keeps PAINTING, which is how the stick, the minimap and the kill
+		// feed used to sit underneath the result screen. Collapsed means gone, and gone is the only
+		// honest state for a control that no longer controls anything. (SCampusBRHud stands itself
+		// down the same way, from its own view.)
+		if (TouchControls.IsValid() && TouchControls->GetVisibility() != EVisibility::Collapsed)
+		{
+			TouchControls->SetVisibility(EVisibility::Collapsed);
+		}
 	}
+	// The result line-up is measured in the pose it actually holds, not the reference pose it was
+	// spawned in, so it keeps re-planting its feet for a moment after it is built. Same reasoning as
+	// the lobby's RegroundWindow, and the same dead-band: nothing moves once the pose agrees.
+	if (ResultStageTime >= 0.f)
+	{
+		ResultStageTime += DeltaTime;
+		GroundResultFigures();
+		if (ResultStageTime >= CampusLobbyScene::RegroundWindow)
+		{
+			ResultStageTime = -1.f;
+		}
+	}
+}
+
+void ACampusMatchPlayerController::ShowResultStage()
+{
+	UWorld* World = GetWorld();
+	// Once only, and only on the phone that is looking at it. A second call is the widget being
+	// rebuilt, not a second match.
+	if (!World || !IsLocalController() || ResultCamera)
+	{
+		return;
+	}
+	FCampusBREndView Stage;
+	Stage.Read(this);
+	if (!Stage.bFound || Stage.Squad.Num() == 0)
+	{
+		return;
+	}
+
+	// CLEAR AIR, ALWAYS. The stage is built a long way straight up from wherever the player's camera
+	// ended the match: on the ground it would land inside a building, a tree or the zone wall
+	// depending only on where the last circle happened to close, and that is not a thing to find out
+	// in Shipping on somebody's phone.
+	FVector Origin = FVector::ZeroVector;
+	FRotator Unused = FRotator::ZeroRotator;
+	GetPlayerViewPoint(Origin, Unused);
+	Origin.Z += CampusVictoryStage::AltitudeCm;
+	ResultFloorZ = float(Origin.Z);
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	ResultCamera = World->SpawnActor<ACameraActor>(
+		Origin + FVector(CampusVictoryStage::CameraDistanceCm, 0.f, CampusVictoryStage::CameraHeightCm),
+		FRotator(CampusVictoryStage::CameraPitchDeg, 180.f, 0.f), Params);
+	if (!ResultCamera)
+	{
+		return;
+	}
+	// The VERTICAL framing is the fixed one (CampusVictoryStage), so the horizontal FOV is derived
+	// from this device's aspect - which is also what the name plates anchor themselves off.
+	ResultCamera->GetCameraComponent()->SetConstraintAspectRatio(false);
+	ResultCamera->GetCameraComponent()->SetFieldOfView(
+		CampusVictoryStage::HorizontalFovDeg(CampusVictoryStage::ViewportAspect()));
+	// Half a second of blend: long enough to read as "the camera pulled back for the photo", short
+	// enough that the screen's own entrance is not animating over an empty frame.
+	SetViewTargetWithBlend(ResultCamera, 0.5f);
+
+	USkeletalMesh* Mesh = LoadObject<USkeletalMesh>(nullptr, CampusLobbyScene::MeshPath);
+	const int32 Figures = FMath::Min(Stage.Squad.Num(), CampusVictoryStage::MaxFigures);
+	for (int32 Rank = 0; Rank < Figures; ++Rank)
+	{
+		const CampusVictoryStage::FStagePose& Spot = CampusVictoryStage::Pose(Rank);
+		// The camera looks down -X, so ITS right is -Y: a figure to the player's right on screen is -Y.
+		ASkeletalMeshActor* Actor = World->SpawnActor<ASkeletalMeshActor>(
+			Origin + FVector(Spot.DepthCm, -Spot.LateralCm, 0.f),
+			FRotator(0.f, CampusLineUp::MeshYawOffset + CampusVictoryStage::FacingYaw(Rank), 0.f), Params);
+		if (!Actor)
+		{
+			continue;
+		}
+		USkeletalMeshComponent* Component = Actor->GetSkeletalMeshComponent();
+		// Display only, exactly like the lobby line-up: no collision, so nothing can stack them up.
+		Actor->SetActorEnableCollision(false);
+		Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Component->SetMobility(EComponentMobility::Movable);
+		Component->SetSkeletalMeshAsset(Mesh);
+		Component->SetAnimationMode(EAnimationMode::AnimationBlueprint);
+		Component->SetAnimInstanceClass(UCampusAnimInstance::StaticClass());
+		// The MVP is a tenth larger. Scaling an actor moves its feet too, which is exactly what the
+		// re-grounding window below is for.
+		Actor->SetActorScale3D(FVector(Spot.Scale));
+		ResultFigures.Add(Actor);
+	}
+	ResultStageTime = 0.f;
+	GroundResultFigures();
+}
+
+void ACampusMatchPlayerController::GroundResultFigures()
+{
+	for (const TObjectPtr<ASkeletalMeshActor>& Each : ResultFigures)
+	{
+		ASkeletalMeshActor* Actor = Each;
+		USkeletalMeshComponent* Component = Actor ? Actor->GetSkeletalMeshComponent() : nullptr;
+		if (!Component || !Component->GetSkeletalMeshAsset())
+		{
+			continue;
+		}
+		// CalcBounds rather than the cached Bounds: it answers for the pose the component holds right
+		// now. On the frame the actor is spawned that is only the REFERENCE pose, which is why this
+		// runs again for a moment afterwards.
+		const FBoxSphereBounds Posed = Component->CalcBounds(Component->GetComponentTransform());
+		const float SoleZ = float(Posed.Origin.Z - Posed.BoxExtent.Z);
+		const float Lift = ResultFloorZ - SoleZ;
+		if (FMath::IsNearlyZero(Lift, 0.5f))
+		{
+			continue;
+		}
+		const FVector Where = Actor->GetActorLocation();
+		Actor->SetActorLocation(FVector(Where.X, Where.Y, Where.Z + Lift), false, nullptr, ETeleportType::TeleportPhysics);
+	}
+}
+
+void ACampusMatchPlayerController::ClearResultStage()
+{
+	for (const TObjectPtr<ASkeletalMeshActor>& Each : ResultFigures)
+	{
+		if (Each)
+		{
+			Each->Destroy();
+		}
+	}
+	ResultFigures.Reset();
+	if (ResultCamera)
+	{
+		ResultCamera->Destroy();
+		ResultCamera = nullptr;
+	}
+	ResultStageTime = -1.f;
 }
 
 void ACampusMatchPlayerController::ApplyInputMode(bool bGameplay)

@@ -230,6 +230,7 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	{
 		RecordHitbox();
 		TickMedkit(DeltaSeconds);
+		TickDistance(DeltaSeconds);
 		// fall damage: remember the top of every fall (zipline / vault moves are not falls)
 		const bool bFalling = GetCharacterMovement()->IsFalling() && !bTraversing && !Zip;
 		if (bFalling)
@@ -1182,6 +1183,15 @@ void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVec
 	const float Dealt = Damage * ZoneScale * Falloff;
 	const bool bWasAlive = Victim->GetHealth() > 0.f;
 	const float Before = Victim->GetHealth();
+	// HEADSHOTS ARE COUNTED HERE, where the zone is decided and the shot has already passed the
+	// friendly-fire test - the client is only ever TOLD about one (ClientConfirmHit), never asked.
+	if (Zone == 1 && bWasAlive)
+	{
+		if (ACampusPlayerState* ShooterState = GetController() ? GetController()->GetPlayerState<ACampusPlayerState>() : nullptr)
+		{
+			++ShooterState->Headshots;
+		}
+	}
 	Victim->ApplyHit(Dealt, GetController());
 	ClientConfirmHit(bWasAlive && Victim->GetHealth() <= 0.f, Zone == 1, int16(FMath::RoundToInt(Before - Victim->GetHealth())));
 }
@@ -2458,7 +2468,7 @@ FVector ACampusCharacter::SpreadDirection(const FVector& Aim) const
 {
 	// Hip fire opens the gun's cone; aiming down the sight closes it to AdsSpreadShare of it.
 	const float Cone = SpreadDeg * FMath::Lerp(1.f, AdsSpreadShare, FMath::Clamp(AimBlend, 0.f, 1.f));
-	if (Cone <= KINDA_SMALL_NUMBER)
+	if (Cone <= UE_KINDA_SMALL_NUMBER)
 	{
 		return Aim;
 	}
@@ -2706,4 +2716,37 @@ void ACampusCharacter::TickMedkit(float DeltaSeconds)
 	const float Heal = FMath::Min(MedkitRemaining, MedkitRate * DeltaSeconds);
 	MedkitRemaining -= Heal;
 	Health = FMath::Min(MaxHealth, Health + Heal);
+}
+
+void ACampusCharacter::TickDistance(float DeltaSeconds)
+{
+	if (bDead)
+	{
+		// A fresh pawn must not be measured from where the last one fell: re-anchor on the next frame.
+		bHasDistanceMark = false;
+		return;
+	}
+	const FVector Here = GetActorLocation();
+	if (!bHasDistanceMark)
+	{
+		DistanceMark = Here;
+		bHasDistanceMark = true;
+		return;
+	}
+	const float Step = float(FVector::Dist(DistanceMark, Here));
+	DistanceMark = Here;
+	// DISCARD THE JUMPS, DO NOT CLAMP THEM. The drop out of the plane, a zipline hand-off and a
+	// respawn all move the pawn further in one frame than anybody can travel, and counting even a
+	// clamped share of those would quietly add kilometres nobody ran. The gate is the fastest thing
+	// in the game (a vehicle, 1200 cm/s) with room to spare, measured per frame so a hitch cannot trip it.
+	constexpr float MaxTravelCmPerSecond = 2500.f;
+	const float Ceiling = MaxTravelCmPerSecond * FMath::Max(DeltaSeconds, UE_KINDA_SMALL_NUMBER);
+	if (Step <= 0.f || Step > Ceiling)
+	{
+		return;
+	}
+	if (ACampusPlayerState* State = GetPlayerState<ACampusPlayerState>())
+	{
+		State->DistanceCm += Step;
+	}
 }

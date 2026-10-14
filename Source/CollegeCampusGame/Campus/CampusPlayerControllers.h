@@ -160,6 +160,14 @@ public:
 	/** Look speed from the saved settings; the touch HUD multiplies its deltas by this. */
 	float GetLookSensitivity() const;
 
+	/** BATTLE ROYALE RESULT SCREEN: stands the squad up as real character meshes on a stage in clear
+	 *  air above the map and points a camera at it, so SCampusBREnd can be drawn over a live 3D
+	 *  line-up instead of a render target (Campus/CampusBREnd.h explains why not a SceneCapture).
+	 *  Idempotent - the widget calls it on its first tick and never again. */
+	void ShowResultStage();
+	/** Takes the stage down. Called from EndPlay; safe when there is no stage. */
+	void ClearResultStage();
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -171,6 +179,10 @@ private:
 
 	void ApplyInputMode(bool bGameplay);
 
+	/** Plants the result line-up's feet on the stage floor, measured from the pose it is actually
+	 *  drawn in. Cheap: at most four bounds, and it only writes when the pose disagrees. */
+	void GroundResultFigures();
+
 	TSharedPtr<SCampusMatchWidget> Widget;
 	TSharedPtr<SCampusTouchControls> TouchControls;
 	/** The BATTLE ROYALE overlay. Present in every match and collapsed in the ones that are not BR. */
@@ -178,6 +190,19 @@ private:
 	/** UCampusBRQueue::OnSessionEnded (bs.ended): the battle session was settled without a result. */
 	FDelegateHandle SessionEndedHandle;
 	int32 AppliedMode = -1;
+
+	/** THE RESULT STAGE. Display only: no collision, no replication, local to this phone. */
+	UPROPERTY(Transient)
+	TObjectPtr<ACameraActor> ResultCamera;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<ASkeletalMeshActor>> ResultFigures;
+
+	/** The stage floor the figures stand on (the stage origin's Z). */
+	float ResultFloorZ = 0.f;
+	/** Seconds since the stage went up while the figures keep re-checking their footing, or -1 when
+	 *  that window is shut. Same reasoning as the lobby line-up's. */
+	float ResultStageTime = -1.f;
 
 	bool bResultRecorded = false;
 

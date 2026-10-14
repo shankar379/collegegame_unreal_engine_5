@@ -1,4 +1,4 @@
-#include "Campus/CampusBRHud.h"
+﻿#include "Campus/CampusBRHud.h"
 
 #include "Campus/CampusAngular.h"
 #include "Campus/CampusMatchState.h"
@@ -550,7 +550,13 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 		{
 			// Not a BR match (or nothing readable yet): the widget is not there at all, so it cannot
 			// eat a tap meant for the controls underneath it.
-			return View.IsBattleRoyale() ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed;
+			//
+			// AND NOTHING AT ALL ONCE THE MATCH IS OVER. The result screen (SCampusBREnd) is the only
+			// end-of-match surface; this HUD used to paint its own BOOYAH! card and the two stacked.
+			// Collapsing the whole widget - not just that card - also takes the ALIVE / KILLS chips,
+			// the squad list and the kill feed off the victory photo, which is the point of it.
+			return View.IsBattleRoyale() && !View.bEnded
+				? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed;
 		})
 		+ SOverlay::Slot()
 		[
@@ -806,63 +812,6 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 						]
 					]
 				]
-				// ---- the end: BOOYAH! / #7 PLACE, the kills, and one way out.
-				+ SOverlay::Slot()
-				[
-					SNew(SBox)
-					.Visibility_Lambda([this]() { return View.bEnded ? EVisibility::Visible : EVisibility::Collapsed; })
-					[
-						SNew(SOverlay)
-						+ SOverlay::Slot()
-						[
-							SNew(SBorder)
-							.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
-							.BorderBackgroundColor(FLinearColor(0.f, 0.f, 0.f, 0.82f))
-						]
-						+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
-						[
-							SNew(SVerticalBox)
-							+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
-							[
-								SNew(STextBlock)
-								.Text_Lambda([this]()
-								{
-									if (View.bWon || (View.bHasPlacement && View.Placement == 1))
-									{
-										return LOCTEXT("BrBooyah", "BOOYAH!");
-									}
-									return View.bHasPlacement
-										? FText::Format(LOCTEXT("BrPlace", "#{0}  PLACE"), FText::AsNumber(View.Placement))
-										: LOCTEXT("BrOver", "MATCH OVER");
-								})
-								.Font(CampusAngular::Display(84))
-								.ColorAndOpacity_Lambda([this]()
-								{
-									const bool bFirst = View.bWon || (View.bHasPlacement && View.Placement == 1);
-									return bFirst ? CampusAngular::Accent : FLinearColor::White;
-								})
-								.ShadowOffset(FVector2D(4.f, 4.f))
-								.ShadowColorAndOpacity(BrShadow)
-							]
-							+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 14.f, 0.f, 0.f)
-							[
-								SNew(STextBlock)
-								.Text_Lambda([this]()
-								{
-									return FText::Format(LOCTEXT("BrEndKills", "{0} KILLS"), FText::AsNumber(View.Kills));
-								})
-								.Font(CampusAngular::Numeric(34))
-								.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.9f))
-							]
-							+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 36.f, 0.f, 0.f)
-							[
-								CampusStyle::StartButton(LOCTEXT("BrReturn", "RETURN TO LOBBY"),
-									FOnClicked::CreateLambda([this]() { ReturnToLobby(); return FReply::Handled(); }),
-									FVector2D(440.f, 96.f))
-							]
-						]
-					]
-				]
 			]
 		]
 	];
@@ -910,15 +859,6 @@ void SCampusBRHud::BRJump()
 		}
 	}
 	bJumpUnavailable = true;
-}
-
-void SCampusBRHud::ReturnToLobby()
-{
-	// The match controller already knows how to bank the result and travel; BR adds nothing to it.
-	if (ACampusMatchPlayerController* PC = Cast<ACampusMatchPlayerController>(Controller.Get()))
-	{
-		PC->ClaimAndLeave();
-	}
 }
 
 #undef LOCTEXT_NAMESPACE

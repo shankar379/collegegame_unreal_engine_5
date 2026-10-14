@@ -292,6 +292,8 @@ private:
 	void ApplyWeapon();
 	/** Server: the medkit's health, paid out over MedkitSeconds. */
 	void TickMedkit(float DeltaSeconds);
+	/** Server: adds this frame's honest travel to ACampusPlayerState::DistanceCm (result screen). */
+	void TickDistance(float DeltaSeconds);
 	/** A shot leaves the muzzle inside the gun's cone (tight while aiming). Owner side; the server
 	 *  judges the direction it is sent, as it always has. */
 	FVector SpreadDirection(const FVector& Aim) const;
@@ -599,6 +601,9 @@ private:
 	/** Server: highest point of the current fall (fall damage on landing). */
 	float FallTopZ = 0.f;
 	bool bTrackingFall = false;
+	/** Server: where this pawn stood last frame, for the DISTANCE TRAVELED stat. */
+	FVector DistanceMark = FVector::ZeroVector;
+	bool bHasDistanceMark = false;
 	bool bFireHeld = false;
 	bool bDead = false;
 	FVector2D TouchMove = FVector2D::ZeroVector;

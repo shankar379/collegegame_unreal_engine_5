@@ -651,7 +651,8 @@ private:
 	TSharedRef<SWidget> BuildWaiting();
 	/** ROOM ONLY: RED WINS / BLUE WINS and the round score. */
 	TSharedRef<SWidget> BuildWin();
-	/** BATTLE ROYALE: the placement screen. BOOYAH at #1, "#7 / 50" otherwise - never a team colour. */
+	/** BATTLE ROYALE: the one result screen (SCampusBREnd, Campus/CampusBREnd.h) - CAMPUS KING at #1,
+	 *  the honest placement otherwise. Never a team colour. */
 	TSharedRef<SWidget> BuildBattleRoyaleResult();
 	TSharedRef<SWidget> BuildSettings();
 	TSharedRef<SWidget> TeamColumn(uint8 Team);

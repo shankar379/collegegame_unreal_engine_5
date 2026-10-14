@@ -2090,15 +2090,13 @@ void SCampusTouchControls::DrawBattleRoyaleHud(FSlateWindowElementList& Out, int
 			Banner = FString::Printf(TEXT("%d m  \u00b7  CHUTE OPEN"), FMath::RoundToInt(Drop->HeightAboveGround() * 0.01f));
 		}
 	}
-	if (State->BRPhase == ECampusBRPhase::Ended)
-	{
-		Banner = State->WinningSquad >= 0 ? FString(TEXT("BOOYAH!")) : FString(TEXT("MATCH OVER"));
-		BannerTint = TouchStyle::Accent;
-	}
+	// NO END BANNER HERE. This used to print its own BOOYAH! / MATCH OVER over the match, which was
+	// the third card to pile up at the final whistle (SCampusBRHud had one, SCampusMatchWidget had
+	// one). The one result screen is SCampusBREnd, and the match controller collapses this whole
+	// widget the moment the phase turns Ended - so anything drawn from here would never be seen.
 	if (!Banner.IsEmpty())
 	{
-		DrawText(Out, Layer + 2, G, Banner, FVector2D(L.W * 0.5f, L.H * 0.17f),
-			State->BRPhase == ECampusBRPhase::Ended ? FMath::RoundToInt(U * 5.f) : Big, BannerTint);
+		DrawText(Out, Layer + 2, G, Banner, FVector2D(L.W * 0.5f, L.H * 0.17f), Big, BannerTint);
 	}
 
 	const ACampusBRZone* Zone = State->Zone;

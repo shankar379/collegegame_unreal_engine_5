@@ -2,6 +2,7 @@
 
 #include "Brushes/SlateRoundedBoxBrush.h"
 #include "Campus/CampusAngular.h"
+#include "Campus/CampusBREnd.h"
 #include "Campus/CampusBRGameMode.h"
 #include "Campus/CampusGameInstance.h"
 #include "Campus/CampusMatchState.h"
@@ -836,65 +837,12 @@ TSharedRef<SWidget> SCampusMatchWidget::BuildWin()
 
 TSharedRef<SWidget> SCampusMatchWidget::BuildBattleRoyaleResult()
 {
-	const UWorld* World = Controller.IsValid() ? Controller->GetWorld() : nullptr;
-	const ACampusBRGameState* State = World ? World->GetGameState<ACampusBRGameState>() : nullptr;
-	const ACampusPlayerState* Mine = Controller.IsValid() ? Controller->GetPlayerState<ACampusPlayerState>() : nullptr;
-	// PLACEMENT, never a team colour. The whole squad shares it, which is what makes "#7" mean the
-	// same thing to all four of them. Zero means this player was still standing when it was called.
-	const int32 Placement = Mine ? Mine->Placement : 0;
-	const int32 MySquad = CampusBR::GetSquadId(Mine);
-	const bool bWon = State && MySquad != 0 && State->WinningSquad == MySquad;
-	const int32 Total = State ? FMath::Max(1, State->TotalCombatants) : 50;
-	const int32 Squads = State ? State->AliveSquads : 0;
-
-	const FText Headline = bWon ? LOCTEXT("Booyah", "BOOYAH!")
-		: (Placement > 0 ? FText::Format(LOCTEXT("Placed", "#{0}"), FText::AsNumber(Placement))
-		: LOCTEXT("BrOver", "MATCH OVER"));
-	const FText Line = bWon
-		? FText::Format(LOCTEXT("WonSquad", "SQUAD {0}  ·  LAST SQUAD STANDING"), FText::AsNumber(MySquad))
-		: FText::Format(LOCTEXT("PlacedOf", "{0} OF {1}  ·  {2} SQUADS LEFT"),
-			FText::AsNumber(FMath::Max(Placement, 1)), FText::AsNumber(Total), FText::AsNumber(Squads));
-	const int32 Reward = Controller.IsValid() ? Controller->ComputeReward() : 0;
-
-	return SNew(SOverlay)
-		+ SOverlay::Slot()
-		[
-			SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox")).BorderBackgroundColor(FLinearColor(0.f, 0.f, 0.f, 0.6f))
-		]
-		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
-		[
-			CampusStyle::Panel(
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
-				[
-					Label(Headline, 56, bWon ? Go : Accent)
-				]
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 2.f, 0.f, 10.f)
-				[
-					SNew(SCampusAngularPanel).Shape(FCampusShape::Slanted(14.f)).Fill(bWon ? Go : Accent)
-					[
-						SNew(SBox).WidthOverride(260.f).HeightOverride(5.f)
-					]
-				]
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
-				[
-					Label(Line, 24)
-				]
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 4.f, 0.f, 24.f)
-				[
-					Label(FText::Format(LOCTEXT("BrYourStats", "You: {0} kills  ·  {1} deaths"),
-						FText::AsNumber(Mine ? Mine->Kills : 0), FText::AsNumber(Mine ? Mine->Deaths : 0)), 20, Muted, false)
-				]
-				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
-				[
-					StartButton(FText::Format(LOCTEXT("BrClaim", "CLAIM {0} COINS"), FText::AsNumber(Reward)), FOnClicked::CreateLambda([this]()
-					{
-						if (Controller.IsValid()) { Controller->ClaimAndLeave(); }
-						return FReply::Handled();
-					}), FVector2D(420.f, 92.f))
-				],
-				FMargin(60.f, 36.f), 26.f, true)
-		];
+	// ONE END SCREEN. This used to build a second "BOOYAH! / CLAIM N COINS" card on top of the one
+	// SCampusBRHud was already painting, and the two stacked. The BR HUD now stands down completely at
+	// the final whistle and the whole result - the CAMPUS KING title, the 3D squad line-up, the stats
+	// and the way out - lives in Campus/CampusBREnd.cpp. The reward is still banked exactly once, by
+	// ClaimAndLeave behind BACK TO LOBBY (and by RecordResult the moment the match ends, as before).
+	return SNew(SCampusBREnd).Controller(Controller);
 }
 
 #undef LOCTEXT_NAMESPACE

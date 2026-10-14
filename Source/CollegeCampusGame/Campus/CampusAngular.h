@@ -140,6 +140,11 @@ namespace CampusAngular
 		const FVector2f& Min, const FVector2f& Size, const FCampusShape& Shape,
 		const FLinearColor& Top, const FLinearColor& Bottom);
 
+	/** The same ramp across X: the left / right vignette on the battle royale result screen. */
+	void DrawHorizontalFade(FSlateWindowElementList& Out, int32 Layer, const FGeometry& Geometry,
+		const FVector2f& Min, const FVector2f& Size, const FCampusShape& Shape,
+		const FLinearColor& Left, const FLinearColor& Right);
+
 	/** Small vector icons; no texture assets, so they never fail to load. */
 	enum class EGlyph : uint8 { Gear, Mail, Friends, Plus, Rank, Coin, Gem, Wifi, Crown, Close, Chevron, Lock, Clock, Tick,
 		/** Profile page: deaths, headshots / accuracy, wins + MVP, likes. Drawn, not textured, for the

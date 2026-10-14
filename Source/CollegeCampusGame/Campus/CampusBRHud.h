@@ -13,6 +13,11 @@
 //
 // So this compiles and runs against today's build (nothing found -> nothing drawn) and lights up
 // piece by piece as the BR state lands, with no edit here.
+//
+// IT OWNS NOTHING AFTER THE FINAL WHISTLE. This widget used to paint its own BOOYAH! / #7 PLACE card
+// at the end, which stacked under SCampusMatchWidget's. The one result screen is now
+// SCampusBREnd (Campus/CampusBREnd.h) and the whole of this HUD collapses the moment View.bEnded is
+// true - chips, zone dial, squad list and all - so nothing is left on the victory photo.
 
 #pragma once
 
@@ -121,7 +126,6 @@ private:
 	/** The plane's JUMP button. Calls a no-argument UFUNCTION on the pawn or the controller, whichever
 	 *  has one - "BRJump", "JumpFromPlane", "ServerBRJump", "Dive" - and says so when there is none. */
 	void BRJump();
-	void ReturnToLobby();
 
 	TWeakObjectPtr<APlayerController> Controller;
 	FCampusBRView View;

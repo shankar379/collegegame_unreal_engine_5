@@ -1897,7 +1897,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStartButton()
 		// §5), so the plate says whose press it is. The member does nothing and is pulled in by
 		// `bs.placed` the moment the matchmaker places the squad.
 		const FString LeaderName = Live->GetServerParty().LeaderName().ToUpper();
-		const FText Waiting = true
+		const FText Waiting = LeaderName.IsEmpty()
 			? LOCTEXT("LeaderStarts", "LEADER STARTS")
 			: FText::Format(LOCTEXT("WaitingForLeader", "WAITING FOR {0}"), FText::FromString(LeaderName));
 		return SNew(SBox).IsEnabled(false).MinDesiredWidth(300.f).MinDesiredHeight(96.f)

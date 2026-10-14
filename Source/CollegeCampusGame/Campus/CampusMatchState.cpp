@@ -56,10 +56,14 @@ void ACampusPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
 	DOREPLIFETIME(ACampusPlayerState, Team);
 	DOREPLIFETIME(ACampusPlayerState, Squad);
 	DOREPLIFETIME(ACampusPlayerState, Placement);
+	DOREPLIFETIME(ACampusPlayerState, SquadPlacement);
 	DOREPLIFETIME(ACampusPlayerState, Kills);
 	DOREPLIFETIME(ACampusPlayerState, Deaths);
 	DOREPLIFETIME(ACampusPlayerState, DamageDealt);
 	DOREPLIFETIME(ACampusPlayerState, DamageTaken);
+	DOREPLIFETIME(ACampusPlayerState, Headshots);
+	DOREPLIFETIME(ACampusPlayerState, DistanceCm);
+	DOREPLIFETIME(ACampusPlayerState, SurvivalSeconds);
 	DOREPLIFETIME(ACampusPlayerState, bIsHost);
 }
 

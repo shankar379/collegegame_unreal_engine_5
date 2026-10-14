@@ -492,6 +492,47 @@ namespace CampusAngular
 		FSlateDrawElement::MakeCustomVerts(Out, Layer, Handle, Verts, Indices, nullptr, 0, 0);
 	}
 
+	void DrawHorizontalFade(FSlateWindowElementList& Out, int32 Layer, const FGeometry& Geometry,
+		const FVector2f& Min, const FVector2f& Size, const FCampusShape& Shape,
+		const FLinearColor& Left, const FLinearColor& Right)
+	{
+		// DrawVerticalFade's twin, ramping across X instead of down Y: the left and right vignette on
+		// the result screen, which has nothing else to make a side falloff out of.
+		if (Size.X <= 0.f || Size.Y <= 0.f || (Left.A <= 0.f && Right.A <= 0.f))
+		{
+			return;
+		}
+		TArray<FVector2f>& Points = ScratchOutline();
+		BuildOutline(Min, Size, Shape, Points);
+		if (Points.Num() < 3)
+		{
+			return;
+		}
+		const FSlateRenderTransform Transform = Geometry.ToPaintGeometry().GetAccumulatedRenderTransform();
+		TArray<FSlateVertex>& Verts = ScratchVerts();
+		TArray<SlateIndex>& Indices = ScratchIndices();
+		Verts.Reset(Points.Num());
+		Indices.Reset((Points.Num() - 2) * 3);
+		for (const FVector2f& Point : Points)
+		{
+			const float Alpha = FMath::Clamp((Point.X - Min.X) / Size.X, 0.f, 1.f);
+			Verts.Add(FSlateVertex::Make(Transform, Point, FVector2f(0.5f, 0.5f),
+				FMath::Lerp(Left, Right, Alpha).ToFColor(false)));
+		}
+		for (int32 Index = 1; Index + 1 < Points.Num(); ++Index)
+		{
+			Indices.Add(0);
+			Indices.Add(SlateIndex(Index));
+			Indices.Add(SlateIndex(Index + 1));
+		}
+		static FSlateResourceHandle Handle;
+		if (!Handle.IsValid())
+		{
+			Handle = FSlateApplication::Get().GetRenderer()->GetResourceHandle(*WhiteBrush());
+		}
+		FSlateDrawElement::MakeCustomVerts(Out, Layer, Handle, Verts, Indices, nullptr, 0, 0);
+	}
+
 	TSharedRef<SWidget> Logo(int32 Size)
 	{
 		const int32 Small = FMath::Max(10, FMath::RoundToInt(Size * 0.42f));

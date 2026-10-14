@@ -83,6 +83,16 @@ public:
 	UPROPERTY(Replicated)
 	int32 AliveSquads = 0;
 
+	/** Squads this session was built with - the "N" in the result screen's "#3 / N". Counted off the
+	 *  sealed roster; before the seal it is the session's intended shape (fifty slots / squad size). */
+	UPROPERTY(Replicated)
+	int32 TotalSquads = 0;
+
+	/** How long the match actually ran, in whole seconds, written at the final whistle. Clients cannot
+	 *  derive it: they have their own world clock and most of them joined partway through the gather. */
+	UPROPERTY(Replicated)
+	int32 MatchSeconds = 0;
+
 	/** The winning squad number once the match ends, else -1. */
 	UPROPERTY(Replicated)
 	int32 WinningSquad = -1;
@@ -263,6 +273,9 @@ private:
 	void RefreshCounts();
 	/** Someone still alive on the same squad, for the elimination camera. */
 	APawn* LivingSquadmatePawn(int32 Squad, const AController* Except) const;
+
+	/** Anyone at all still standing on Squad - the test for "that elimination wiped the team". */
+	bool HasLivingMember(int32 Squad) const;
 
 	int32 IndexOf(const AController* Controller) const;
 	/** A HUMAN's squad, from the session's team id it travelled in with. One team id is one squad, so
