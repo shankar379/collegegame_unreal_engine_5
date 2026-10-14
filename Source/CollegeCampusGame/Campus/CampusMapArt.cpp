@@ -192,41 +192,61 @@ namespace CampusMapArt
 		}
 	}
 
+	namespace
+	{
+		/** The cache entry for a name, decoding it on the first ask. Null only for an empty name.
+		 *  Both Get (resource handle, MakeCustomVerts) and Brush (FSlateBrush, MakeBox) come through
+		 *  here, so one PNG is decoded once however it is drawn. */
+		FCacheEntry* Resolve(const TCHAR* Name)
+		{
+			if (!Name || *Name == TEXT('\0'))
+			{
+				return nullptr;
+			}
+			const FString Key(Name);
+			if (const TSharedPtr<FCacheEntry>* Found = Cache().Find(Key))
+			{
+				FCacheEntry& Entry = **Found;
+				// Handles can be dropped when the renderer flushes its atlases; re-acquire, never re-decode.
+				if (!Entry.Art.Handle.IsValid() && Entry.Brush.GetResourceObject() && FSlateApplication::IsInitialized())
+				{
+					Entry.Art.Handle = FSlateApplication::Get().GetRenderer()->GetResourceHandle(Entry.Brush);
+				}
+				return &Entry;
+			}
+
+			TSharedPtr<FCacheEntry> Entry = MakeShared<FCacheEntry>();
+			Cache().Add(Key, Entry);
+
+			const FString Path = FPaths::ProjectContentDir() / TEXT("CampusUI/MapArt/") + Key + TEXT(".png");
+			UTexture2D* Texture = DecodePng(Path);
+			if (!Texture || !FSlateApplication::IsInitialized())
+			{
+				// No picture shipped (or no renderer yet): the plate paints its gradient instead.
+				return Entry.Get();
+			}
+			Entry->Brush.SetResourceObject(Texture);
+			Entry->Brush.ImageSize = FVector2D(Texture->GetSizeX(), Texture->GetSizeY());
+			Entry->Brush.DrawAs = ESlateBrushDrawType::Image;
+			Entry->Art.Handle = FSlateApplication::Get().GetRenderer()->GetResourceHandle(Entry->Brush);
+			Entry->Art.Size = FVector2f(float(Texture->GetSizeX()), float(Texture->GetSizeY()));
+			return Entry.Get();
+		}
+	}
+
 	const FArt& Get(const TCHAR* Name)
 	{
 		static const FArt Missing;
-		if (!Name || *Name == TEXT('\0'))
-		{
-			return Missing;
-		}
-		const FString Key(Name);
-		if (const TSharedPtr<FCacheEntry>* Found = Cache().Find(Key))
-		{
-			FCacheEntry& Entry = **Found;
-			// Handles can be dropped when the renderer flushes its atlases; re-acquire, never re-decode.
-			if (!Entry.Art.Handle.IsValid() && Entry.Brush.GetResourceObject() && FSlateApplication::IsInitialized())
-			{
-				Entry.Art.Handle = FSlateApplication::Get().GetRenderer()->GetResourceHandle(Entry.Brush);
-			}
-			return Entry.Art;
-		}
+		const FCacheEntry* Entry = Resolve(Name);
+		return Entry ? Entry->Art : Missing;
+	}
 
-		TSharedPtr<FCacheEntry> Entry = MakeShared<FCacheEntry>();
-		Cache().Add(Key, Entry);
-
-		const FString Path = FPaths::ProjectContentDir() / TEXT("CampusUI/MapArt/") + Key + TEXT(".png");
-		UTexture2D* Texture = DecodePng(Path);
-		if (!Texture || !FSlateApplication::IsInitialized())
-		{
-			// No picture shipped (or no renderer yet): the plate paints its gradient instead.
-			return Entry->Art;
-		}
-		Entry->Brush.SetResourceObject(Texture);
-		Entry->Brush.ImageSize = FVector2D(Texture->GetSizeX(), Texture->GetSizeY());
-		Entry->Brush.DrawAs = ESlateBrushDrawType::Image;
-		Entry->Art.Handle = FSlateApplication::Get().GetRenderer()->GetResourceHandle(Entry->Brush);
-		Entry->Art.Size = FVector2f(float(Texture->GetSizeX()), float(Texture->GetSizeY()));
-		return Entry->Art;
+	const FSlateBrush* Brush(const TCHAR* Name)
+	{
+		const FCacheEntry* Entry = Resolve(Name);
+		// GetResourceObject(), not Art.IsValid(): a brush can be drawn as a box the frame before the
+		// renderer has handed out a resource handle for it, and a null return here would blank the map.
+		return Entry && Entry->Brush.GetResourceObject() ? &Entry->Brush : nullptr;
 	}
 }
 

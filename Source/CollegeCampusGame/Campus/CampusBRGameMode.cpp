@@ -149,7 +149,7 @@ void ACampusBRGameMode::InitGameState()
 	}
 
 	WaitingArea = GetWorld()->SpawnActor<ACampusBRWaitingArea>(ACampusBRWaitingArea::StaticClass(),
-		FTransform(ACampusBRWaitingArea::Place()));
+		FTransform(ACampusBRWaitingArea::Place(GetWorld())));
 	ZoneActor = GetWorld()->SpawnActor<ACampusBRZone>(ACampusBRZone::StaticClass(), FTransform::Identity);
 	State->Zone = ZoneActor;
 	// The sky, on every machine: applies the day / night preset, retires any sky dome the level still
@@ -544,7 +544,7 @@ void ACampusBRGameMode::RestartPlayer(AController* NewPlayer)
 	// again, so an index-per-player stacked two of them on the same square metre the moment anybody
 	// dropped out - and fifty in a lattice looked like a parade, not a lobby.
 	const FTransform Where = WaitingArea ? WaitingArea->FreeSlot()
-		: FTransform(ACampusBRWaitingArea::Place() + FVector(0.f, 0.f, 200.f));
+		: FTransform(ACampusBRWaitingArea::Place(GetWorld()) + FVector(0.f, 0.f, 200.f));
 	RestartPlayerAtTransform(NewPlayer, Where);
 }
 
@@ -571,6 +571,7 @@ void ACampusBRGameMode::FillWithBots()
 	// particular player's teammate filler, so no bot is ever seated on a human's squad: in duo and
 	// squad every bot is an enemy, and in solo every bot is its own squad of one.
 	const int32 Seats = FMath::Max(1, SquadSize);
+	const FVector2D Middle = CampusBRMap::Center(GetWorld());
 	int32 Next = 0;
 	int32 BotSquad = 0;
 	int32 Filled = 0;
@@ -586,7 +587,7 @@ void ACampusBRGameMode::FillWithBots()
 		++Filled;
 		Slot.Name = FString::Printf(TEXT("%s%02d"),
 			CampusBRRoster::BotNames[Next % int32(UE_ARRAY_COUNT(CampusBRRoster::BotNames))], Next + 1);
-		Slot.Where = FVector(CampusBRMap::Center().X, CampusBRMap::Center().Y, 0.f);
+		Slot.Where = FVector(Middle.X, Middle.Y, 0.f);
 		++Next;
 	}
 	RefreshCounts();
@@ -811,7 +812,7 @@ int32 ACampusBRGameMode::TargetAlive(float SecondsIntoMatch) const
 
 void ACampusBRGameMode::TickVirtual()
 {
-	const FVector2D Middle = ZoneActor ? ZoneActor->GetCenter() : CampusBRMap::Center();
+	const FVector2D Middle = ZoneActor ? ZoneActor->GetCenter() : CampusBRMap::Center(GetWorld());
 	const float Drift = CampusBRRoster::DriftSpeed * CampusBRRoster::VirtualInterval;
 	const bool bGhostsAllowed = VirtualAllowed();
 
@@ -870,8 +871,19 @@ void ACampusBRGameMode::TickVirtual()
 
 void ACampusBRGameMode::KillVirtual(int32 Index)
 {
-	// A plausible killer, so the feed reads like a world that is alive.
-	FString Killer = TEXT("the zone");
+	if (!Combatants.IsValidIndex(Index))
+	{
+		return;
+	}
+	// A plausible killer, so the feed reads like a world that is alive. The fallback is the ZONE only
+	// when the zone could have done it (it is burning and this ghost is standing outside the circle);
+	// otherwise nobody is named, because naming the zone for a death it did not cause is the same lie
+	// the real elimination path used to tell.
+	FString Killer;
+	if (ZoneActor && ZoneActor->IsHot() && ZoneActor->MetresOutside(Combatants[Index].Where) > 0.f)
+	{
+		Killer = TEXT("the play zone");
+	}
 	for (const FCampusBRCombatant& Each : Combatants)
 	{
 		if (Each.bAlive && Each.Squad != Combatants[Index].Squad && !Each.bHuman)
@@ -913,14 +925,42 @@ void ACampusBRGameMode::OnKilled(AController* Victim, AController* Killer)
 	ACampusPlayerState* KillerState = Killer ? Killer->GetPlayerState<ACampusPlayerState>() : nullptr;
 	// KILL CREDIT KEYS OFF THE SQUAD. Friendly fire is already off upstream, so this is a belt on the
 	// braces - but a credited squadmate kill is exactly the kind of thing that becomes an exploit.
+	// A KILLER-LESS DEATH CREDITS NOBODY, which is the whole of the zone rule: ACampusBRZone passes a
+	// null instigator, so KillerState is null and no counter moves.
 	if (KillerState && Killer != Victim && !AreFriendly(Killer, Victim))
 	{
 		++KillerState->Kills;
 	}
+
+	// WHO TO NAME IN THE FEED. It used to be "the zone" for every death with no killer, which made the
+	// zone the author of every fall off a 40 m slab, every 100 m drop with no chute and every trip
+	// below the kill plane. Ask the circle instead: it is only the zone if the zone could have done it.
+	FString Cause;
+	if (KillerState)
+	{
+		Cause = KillerState->GetPlayerName();
+	}
+	else if (const APawn* Body = Victim ? Victim->GetPawn() : nullptr)
+	{
+		if (ZoneActor && ZoneActor->IsHot() && ZoneActor->MetresOutside(Body->GetActorLocation()) > 0.f)
+		{
+			Cause = TEXT("the play zone");
+		}
+	}
+
 	const int32 Index = IndexOf(Victim);
 	if (Index != INDEX_NONE)
 	{
-		Eliminate(Index, KillerState ? KillerState->GetPlayerName() : TEXT("the zone"));
+		Eliminate(Index, Cause);
+		return;
+	}
+	// NOT ON THE ROSTER and still holding a pawn. This used to fall straight out of the bottom of the
+	// function: the pawn kept standing in the world at zero health, un-killable (ApplyHit returns on
+	// bDead), blocking shots and a doorway, while ALIVE never came down and the last-squad-standing
+	// test could never fire. Whoever it is, it is dead - take the pawn.
+	if (APawn* Orphan = Victim ? Victim->GetPawn() : nullptr)
+	{
+		Orphan->Destroy();
 	}
 }
 
@@ -934,7 +974,11 @@ void ACampusBRGameMode::Eliminate(int32 Index, const FString& KillerName)
 	FCampusBRCombatant& Slot = Combatants[Index];
 	Slot.bAlive = false;
 	Slot.Placement = FMath::Max(1, State->AliveCombatants); // the place they finished in
-	State->MulticastFeed(FString::Printf(TEXT("%s  >  %s"), *KillerName, *Slot.Name));
+	// An EMPTY killer name means "nobody did this": a fall, the kill plane, a vehicle wreck. The feed
+	// has to say so rather than hand the body to whichever name was convenient.
+	State->MulticastFeed(KillerName.IsEmpty()
+		? FString::Printf(TEXT("%s  was eliminated"), *Slot.Name)
+		: FString::Printf(TEXT("%s  >  %s"), *KillerName, *Slot.Name));
 
 	AController* Controller = Slot.Controller.Get();
 	// The placement goes on the player state so the BR result screen can show "#7" without a second

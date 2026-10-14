@@ -341,8 +341,11 @@ public:
 	/** Cells on the slab. More than fifty, so the last of the fifty still has a choice. */
 	static int32 SlotCount();
 
-	/** The slab's own place: a corner of the map square, high above anything that can be shot. */
-	static FVector Place();
+	/** The slab's own place: a corner of THIS LEVEL's map square (CampusBRMap::For), high above
+	 *  anything that can be shot. The world is an argument because the square is per level - the BR
+	 *  map is 800 m and the college room map is 227 m, and a slab placed off the college numbers
+	 *  landed a tenth of the way across Varsity Valley. */
+	static FVector Place(const UWorld* World);
 
 private:
 	/** No pawn standing on the slab within the design's 1.5 m of this spot. */

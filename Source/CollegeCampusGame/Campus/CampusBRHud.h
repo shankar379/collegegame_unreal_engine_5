@@ -59,14 +59,20 @@ struct FCampusBRView
 	/** The circle is closing NOW, so the clock means "closing in", not "shrinking in". */
 	bool bZoneClosing = false;
 
-	/** World-space circle this player should be inside, and where they are. */
+	/** THE CURRENT circle - the one the player must be inside RIGHT NOW, and the only one bOutside is
+	 *  ever measured against. Interpolated while the zone closes, so it is the same edge the host's
+	 *  ACampusBRZone::BurnOutside is testing. */
 	bool bHasZone = false;
 	FVector ZoneCenter = FVector::ZeroVector;
 	float ZoneRadius = 0.f;
+	/** THE NEXT circle - where the player has to get to. Drives the dial's arrow and nothing else;
+	 *  pointing the warning at this one is what made the HUD shout at players who were safe. */
+	FVector NextCenter = FVector::ZeroVector;
+	float NextRadius = 0.f;
 	FVector Me = FVector::ZeroVector;
 	/** Yaw the player is facing, so the arrow points relative to the camera and not to north. */
 	float MeYaw = 0.f;
-	/** True once the player is outside the circle: the arrow and the timer go red. */
+	/** True once the player is outside the CURRENT circle, on the ground, with the zone live. */
 	bool bOutside = false;
 	float DistanceToEdge = 0.f;
 

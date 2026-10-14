@@ -9,24 +9,48 @@
 #include "GameFramework/Actor.h"
 #include "CampusBRZone.generated.h"
 
-/** The square the BR play area covers, in Unreal world cm.
- *  This is the SAME square the minimap picture covers (SCampusTouchControls / CampusMapArea in
- *  CampusTouchControls.cpp: the college bounds + 15 m, campus origin (15710, 8222.6) in L_Match),
- *  spelled out here because the zone, the plane and the HUD ring all need it and only one of the
- *  three lives in the HUD file. Change both together or the ring stops matching the damage. */
+class UInstancedStaticMeshComponent;
+class UMaterialInstanceDynamic;
+
+/** The square the BR play area covers, in Unreal world cm - PER LEVEL.
+ *
+ *  THIS USED TO BE ONE HARDCODED SQUARE, and it was the L_Match college square: 227 m centred on
+ *  (14855, 28). Battle royale does not play there. CampusBR::LevelForMap sends every battle session
+ *  to /Game/Maps/L_VarsityValley, which Scripts/varsity_layout.py builds as 800 m x 800 m CENTRED ON
+ *  THE WORLD ORIGIN (HALF = 40000). The consequence on a phone was the whole bug report: the first
+ *  circle opened 107 m wide over one corner of an 800 m map, so a player standing anywhere else was
+ *  genuinely outside it and genuinely burning - while the minimap, which drew that same circle onto
+ *  the college picture, put it dead centre and nearly full width and so said "you are inside".
+ *
+ *  So the square is resolved from the LEVEL, identically on the host and on every client (both ask
+ *  the same question of the same level name), and the zone, the plane, the waiting slab and the two
+ *  maps all read it through here. One square per level, stated once. */
 namespace CampusBRMap
 {
-	constexpr float MinX = -12210.f + 15710.f;
-	constexpr float MinY = -19549.45f + 8222.6f;
-	constexpr float Span = 22710.f;
-
-	inline FVector2D Center() { return FVector2D(MinX + Span * 0.5f, MinY + Span * 0.5f); }
-	/** Half the map square: the widest the first circle can be. */
-	inline float HalfSpan() { return Span * 0.5f; }
-	/** Normalised position on the map picture (0..1 across, 0..1 down), matching CampusMapArea::ToUV. */
-	inline FVector2D ToUV(const FVector& World)
+	struct FSquare
 	{
-		return FVector2D((World.X - MinX) / Span, (World.Y - MinY) / Span);
+		/** Middle of the play square in world cm. */
+		FVector2D Middle = FVector2D::ZeroVector;
+		/** Width of the square in cm; the first circle is half of this, less a margin. */
+		float Span = 0.f;
+		/** True on L_VarsityValley (the BR map). False on the college room map. */
+		bool bValley = false;
+	};
+
+	/** The square of this level. Cheap: resolved once per world and cached. */
+	const FSquare& For(const UWorld* World);
+
+	inline FVector2D Center(const UWorld* World) { return For(World).Middle; }
+	inline float Span(const UWorld* World) { return For(World).Span; }
+	/** Half the map square: the widest the first circle can be. */
+	inline float HalfSpan(const UWorld* World) { return For(World).Span * 0.5f; }
+	/** Normalised position on the map picture (0..1 across, 0..1 down). */
+	inline FVector2D ToUV(const UWorld* World, const FVector& Where)
+	{
+		const FSquare& Square = For(World);
+		const float Wide = FMath::Max(Square.Span, 1.f);
+		return FVector2D((Where.X - (Square.Middle.X - Wide * 0.5f)) / Wide,
+			(Where.Y - (Square.Middle.Y - Wide * 0.5f)) / Wide);
 	}
 }
 
@@ -80,7 +104,12 @@ public:
 	int32 GetPhase() const { return PhaseIndex; }
 	int32 GetPhaseCount() const;
 	float GetDamagePerSecond() const { return DamagePerSecond; }
-	/** Metres this location is outside the circle (0 when safe). */
+	/** True once the circle can actually hurt you: the schedule has opened AND this phase burns.
+	 *  False in the waiting area, in the plane, through the freefall and for the whole of the first
+	 *  circle's wait - which is the rule the three.js game plays by (zone.js: dps 0 while 'open'). */
+	bool IsHot() const { return PhaseIndex >= 0 && DamagePerSecond > 0.f; }
+	/** Metres this location is outside the CURRENT circle (0 when safe). 2D: height never counts, so
+	 *  the 40 m waiting slab and the plane are "inside" exactly like the ground under them. */
 	float MetresOutside(const FVector& Where) const;
 
 private:
@@ -91,6 +120,22 @@ private:
 	void BurnOutside();
 	/** A circle of RadiusShare that stays inside the current one. */
 	void PickNextCircle(float NewRadius);
+	/** Every machine: move / resize / fade the blue wall to the circle as it stands this frame. */
+	void UpdateWall();
+
+	/** THE WALL, every machine: a ring of thin translucent unlit blue panels standing at the circle's
+	 *  edge, which is the three.js game's look (game.js showZone: a 60 m see-through glowing cylinder
+	 *  at #3aa0ff, fainter while waiting, stronger while closing).
+	 *
+	 *  One instanced component, NOT a cylinder mesh: the engine cylinder has caps, and a 200 m-wide
+	 *  translucent cap overhead washes the whole sky blue. The ring is built ONCE at a 1 m radius and
+	 *  then moved and scaled as a whole, so a shrink costs two transform calls a frame and never
+	 *  touches the instance buffer - which is what keeps it free on a phone. */
+	UPROPERTY()
+	TObjectPtr<UInstancedStaticMeshComponent> Wall;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> WallPaint;
 
 	UPROPERTY(Replicated)
 	FVector_NetQuantize CenterFrom = FVector_NetQuantize();

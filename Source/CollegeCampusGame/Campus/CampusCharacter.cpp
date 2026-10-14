@@ -254,7 +254,7 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	// Fell off the map: dead, like any other death (the death screen offers the way back to the lobby).
 	if (HasAuthority() && !bDead && GetActorLocation().Z < KillHeight)
 	{
-		ApplyHit(Health + 1.f, nullptr);
+		ApplyHit(Health + 1.f, nullptr, true);
 	}
 	if (bSliding)
 	{
@@ -1955,14 +1955,16 @@ void ACampusCharacter::MulticastUpperBody_Implementation(bool bReload)
 	}
 }
 
-void ACampusCharacter::ApplyHit(float InDamage, AController* InstigatorController)
+void ACampusCharacter::ApplyHit(float InDamage, AController* InstigatorController, bool bIgnoreArmor)
 {
 	if (!HasAuthority() || bDead)
 	{
 		return;
 	}
 	// The vest eats its share first and wears out doing it; what is left reaches the body.
-	if (Armor > 0.f && InDamage > 0.f)
+	// THE ZONE IS THE ONE EXCEPTION (bIgnoreArmor): it is not a projectile, so there is nothing for a
+	// vest to stop - the burn goes straight to health and leaves the armour untouched.
+	if (!bIgnoreArmor && Armor > 0.f && InDamage > 0.f)
 	{
 		const float Soaked = FMath::Min(Armor, InDamage * CampusLootRules::ArmorAbsorbShare);
 		Armor -= Soaked;

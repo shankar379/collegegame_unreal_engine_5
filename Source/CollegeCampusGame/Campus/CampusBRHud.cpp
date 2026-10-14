@@ -1,6 +1,9 @@
 ﻿#include "Campus/CampusBRHud.h"
 
 #include "Campus/CampusAngular.h"
+#include "Campus/CampusBRPlane.h"
+#include "Campus/CampusBRZone.h"
+#include "Campus/CampusCharacter.h"
 #include "Campus/CampusMatchState.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "Campus/CampusUI.h"
@@ -20,6 +23,14 @@
 #include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "CampusBRHud"
+
+/** THE ZONE'S COLOUR, one value for this whole file: #3aa0ff, the same blue as the wall in the world
+ *  (CampusBRWall::Colour) and the circle on the map (TouchStyle::ZoneBlue). The out-of-zone warning
+ *  used to be Danger red, which read as "you are being shot at" rather than "you are in the gas". */
+namespace CampusBRHudZone
+{
+	const FLinearColor Ink = FLinearColor(FColor(0x3A, 0xA0, 0xFF));
+}
 
 using namespace CampusStyle;
 
@@ -333,28 +344,50 @@ void FCampusBRView::Read(const APlayerController* PC)
 
 	// The zone: the actor first (it owns the circle), then the game state as a fallback.
 	UObject* ZoneSource = Zone ? static_cast<UObject*>(Zone) : const_cast<AGameStateBase*>(GameState);
-	// THE ARROW POINTS AT THE CIRCLE YOU MUST BE IN NEXT, not the one you are standing in - that is
-	// the only version of this HUD piece that is any use. ACampusBRZone replicates both: CenterTo /
-	// RadiusTo is the next circle, CenterFrom / RadiusFrom the one closing.
-	if (BrHudReadNumber(ZoneSource, Number, TEXT("RadiusTo"), TEXT("ZoneRadius"), TEXT("CurrentRadius"), TEXT("SafeRadius"))
+	// THE CIRCLE YOU ARE JUDGED AGAINST IS THE ONE YOU ARE STANDING IN.
+	//
+	// This used to read CenterTo / RadiusTo - the NEXT circle - on the grounds that the arrow should
+	// point where you have to go. The arrow should; bOutside must not. The next circle is 58% of this
+	// one and sits at a random offset inside it, so for the whole of every wait phase any player not
+	// already standing in the next circle was told "OUTSIDE THE ZONE" in danger red while they were
+	// perfectly safe. That is the HUD half of the phone bug report, and it was true on a correct map
+	// as well as on the wrong one.
+	//
+	// So: the CURRENT circle through the actor's own accessors, which interpolate while it closes and
+	// are the same numbers ACampusBRZone::BurnOutside uses on the host. The reflection path below is
+	// kept only for a zone actor this HUD does not know (it is written to survive the BR module being
+	// replaced), and it now reads CenterFrom / RadiusFrom - the circle that is closing, not its target.
+	if (const ACampusBRZone* Circle = Cast<ACampusBRZone>(Zone))
+	{
+		if (Circle->GetPhase() >= 0 && Circle->GetRadius() > 0.f)
+		{
+			const FVector2D Middle = Circle->GetCenter();
+			ZoneCenter = FVector(Middle.X, Middle.Y, 0.f);
+			ZoneRadius = Circle->GetRadius();
+			const FVector2D Target = Circle->GetNextCenter();
+			NextCenter = FVector(Target.X, Target.Y, 0.f);
+			NextRadius = Circle->GetNextRadius();
+			bHasZone = true;
+		}
+	}
+	else if (BrHudReadNumber(ZoneSource, Number, TEXT("RadiusFrom"), TEXT("ZoneRadius"), TEXT("CurrentRadius"), TEXT("SafeRadius"))
 		&& Number > 0.0)
 	{
 		ZoneRadius = float(Number);
-		if (!BrHudReadVector(ZoneSource, ZoneCenter, TEXT("CenterTo"), TEXT("ZoneCenter"), TEXT("CurrentCenter")) && Zone)
+		if (!BrHudReadVector(ZoneSource, ZoneCenter, TEXT("CenterFrom"), TEXT("ZoneCenter"), TEXT("CurrentCenter")) && Zone)
 		{
 			// No centre field: the zone actor's own location is the obvious answer.
 			ZoneCenter = Zone->GetActorLocation();
 		}
 		bHasZone = true;
-	}
-	else if (BrHudReadNumber(ZoneSource, Number, TEXT("RadiusFrom")) && Number > 0.0)
-	{
-		ZoneRadius = float(Number);
-		if (!BrHudReadVector(ZoneSource, ZoneCenter, TEXT("CenterFrom")) && Zone)
+		NextCenter = ZoneCenter;
+		NextRadius = ZoneRadius;
+		if (BrHudReadNumber(ZoneSource, Number, TEXT("RadiusTo")) && Number > 0.0)
 		{
-			ZoneCenter = Zone->GetActorLocation();
+			NextRadius = float(Number);
+			// No CenterTo on this zone: the next circle is concentric, which NextCenter already is.
+			(void)BrHudReadVector(ZoneSource, NextCenter, TEXT("CenterTo"));
 		}
-		bHasZone = true;
 	}
 	if (BrHudDeadline(ZoneSource, World, Seconds, TEXT("EventEndTime"), TEXT("NextShrinkTime"), TEXT("ZoneCloseTime"))
 		|| BrHudSecondsLeft(ZoneSource, World, Seconds, TEXT("ZoneSecondsLeft"), TEXT("ShrinkIn")))
@@ -373,9 +406,16 @@ void FCampusBRView::Read(const APlayerController* PC)
 		MeYaw = PC->GetControlRotation().Yaw;
 		if (bHasZone)
 		{
+			// 2D, deliberately: the circle is a column, so the 40 m waiting slab and the 500 m plane
+			// are inside it exactly like the ground beneath them. Height must never count - reading
+			// this as a 3D distance is one of the ways a player standing in the zone "drains".
 			const float Flat = FVector::Dist2D(Me, ZoneCenter);
 			DistanceToEdge = Flat - ZoneRadius;
-			bOutside = DistanceToEdge > 0.f;
+			// AND NOT WHILE BEING DEPLOYED. The flight line starts outside the map square, so in the
+			// plane and under the chute everybody is outside a circle that cannot reach them (which is
+			// the same test ACampusBRZone::BurnOutside makes before it burns anyone).
+			const ACampusCharacter* Body = Cast<ACampusCharacter>(Pawn);
+			bOutside = DistanceToEdge > 0.f && !(Body && ACampusBRPlane::IsDeploying(Body));
 		}
 		if (BrHudReadNumber(Pawn, Number, TEXT("bInPlane"), TEXT("bOnPlane"), TEXT("bAboard"), TEXT("bInAircraft")))
 		{
@@ -475,7 +515,11 @@ int32 SCampusBRZoneDial::OnPaint(const FPaintArgs& Args, const FGeometry& Allott
 		return LayerId;
 	}
 	const FPaintGeometry Paint = AllottedGeometry.ToPaintGeometry();
-	const FLinearColor Ring = View->bOutside ? CampusAngular::Danger : CampusAngular::Accent;
+	// THE ZONE IS BLUE, the same #3aa0ff as the wall standing on it in the world and the circle on the
+	// map (TouchStyle::ZoneBlue / CampusBRWall::Colour). Being outside it does not change the colour -
+	// it brightens it - because "blue" has to keep meaning "the zone" and nothing else.
+	const FLinearColor ZoneInk(FColor(0x3A, 0xA0, 0xFF));
+	const FLinearColor Ring = View->bOutside ? ZoneInk : ZoneInk.CopyWithNewOpacity(0.75f);
 
 	// The circle, 28 segments: one draw element, no texture, no per-frame allocation beyond the array.
 	TArray<FVector2f> Circle;
@@ -518,6 +562,27 @@ int32 SCampusBRZoneDial::OnPaint(const FPaintArgs& Args, const FGeometry& Allott
 	}
 	FSlateDrawElement::MakeLines(OutDrawElements, LayerId + 1, Paint, Pip, ESlateDrawEffect::None,
 		FLinearColor::White, true, 2.f);
+
+	// THE NEXT CIRCLE, WHITE, inside the blue one: where this circle is closing to, drawn to scale and
+	// at its real offset, so the dial answers "which way do I rotate" without opening the map.
+	if (View->NextRadius > 0.f && View->ZoneRadius > 0.f && View->NextRadius < View->ZoneRadius - 1.f)
+	{
+		const float Shrunk = Dial * (View->NextRadius / View->ZoneRadius);
+		FVector2f Offset(float(View->NextCenter.Y - View->ZoneCenter.Y), -float(View->NextCenter.X - View->ZoneCenter.X));
+		Offset *= Dial / View->ZoneRadius;
+		const FVector2f Shifted(
+			Offset.X * FMath::Cos(Yaw) + Offset.Y * FMath::Sin(Yaw),
+			-Offset.X * FMath::Sin(Yaw) + Offset.Y * FMath::Cos(Yaw));
+		TArray<FVector2f> Next;
+		Next.Reserve(21);
+		for (int32 Step = 0; Step <= 20; ++Step)
+		{
+			const float Angle = (2.f * PI * float(Step)) / 20.f;
+			Next.Add(Middle + Shifted + FVector2f(FMath::Cos(Angle), FMath::Sin(Angle)) * Shrunk);
+		}
+		FSlateDrawElement::MakeLines(OutDrawElements, LayerId + 1, Paint, Next, ESlateDrawEffect::None,
+			FLinearColor(1.f, 1.f, 1.f, 0.8f), true, 1.5f);
+	}
 
 	// The arrow: a chevron at the rim pointing the way to the middle of the circle.
 	const FVector2f Tip = Middle + Turned * Dial;
@@ -600,7 +665,7 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 						SNew(SCampusAngularPanel)
 						.Shape(FCampusShape::Notched(8.f))
 						.Fill(BrInk)
-						.Border_Lambda([this]() { return View.bOutside ? CampusAngular::Danger : CampusAngular::Hairline; })
+						.Border_Lambda([this]() { return View.bOutside ? CampusBRHudZone::Ink : CampusAngular::Hairline; })
 						.BorderWidth(1.f)
 						.ContentPadding(FMargin(14.f, 6.f))
 						[
@@ -608,7 +673,7 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 10.f, 0.f)
 							[
 								SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Clock).Size(17.f)
-								.Color_Lambda([this]() { return View.bOutside ? CampusAngular::Danger : CampusAngular::Accent; })
+								.Color_Lambda([this]() { return View.bOutside ? CampusBRHudZone::Ink : CampusAngular::Accent; })
 							]
 							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 							[
@@ -618,7 +683,7 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 									// Colour is never the only signal: outside the circle the WORDS change too.
 									if (View.bOutside)
 									{
-										return FText::Format(LOCTEXT("BrOutside", "OUTSIDE THE ZONE  ·  {0} M TO THE EDGE"),
+										return FText::Format(LOCTEXT("BrOutside", "MOVE TO SAFE ZONE  ·  {0} M"),
 											FText::AsNumber(FMath::Max(1, int32(View.DistanceToEdge / 100.f))));
 									}
 									return View.bZoneClosing
@@ -630,7 +695,7 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 								.Font(CampusAngular::Display(19))
 								.ColorAndOpacity_Lambda([this]()
 								{
-									return View.bOutside ? CampusAngular::Danger : FLinearColor::White;
+									return View.bOutside ? CampusBRHudZone::Ink : FLinearColor::White;
 								})
 								.ShadowOffset(FVector2D(2.f, 2.f))
 								.ShadowColorAndOpacity(BrShadow)

@@ -83,6 +83,12 @@ namespace CampusMapArt
 	/** Decodes Content/CampusUI/MapArt/<Name>.png once and caches it. Never null; an entry whose
 	 *  file is missing simply reports !IsValid() and the card falls back to its gradient. */
 	const FArt& Get(const TCHAR* Name);
+
+	/** The SAME cached picture as a Slate brush, for the drawing code that goes through
+	 *  FSlateDrawElement::MakeBox instead of MakeCustomVerts - the in-match minimap and full map
+	 *  (SCampusTouchControls::DrawMap). Null when the PNG is not shipped or not yet decoded, which
+	 *  the caller reads as "paint the flat backing instead". Decodes on the first ask, like Get. */
+	const FSlateBrush* Brush(const TCHAR* Name);
 }
 
 /** An angular card filled with banner art: the map banners and the mode key-art strips.

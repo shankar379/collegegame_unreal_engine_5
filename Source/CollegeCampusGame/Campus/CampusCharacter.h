@@ -100,8 +100,14 @@ public:
 	void ToggleArmed();
 	void Reload();
 
-	/** Server: apply a hit from another player. */
-	void ApplyHit(float Damage, AController* InstigatorController);
+	/** Server: apply a hit from another player.
+	 *
+	 *  bIgnoreArmor: the damage goes STRAIGHT to health and the vest neither soaks it nor wears out.
+	 *  That is the battle-royale zone and only the zone (ACampusBRZone::BurnOutside): the blue wall is
+	 *  not a bullet, so a vest cannot stop it - and with the vest in the way the burn was both
+	 *  survivable far too long and silently stripping the armour a player had just looted. Every
+	 *  weapon, vehicle and fall path leaves this false and keeps the vest exactly as it was. */
+	void ApplyHit(float Damage, AController* InstigatorController, bool bIgnoreArmor = false);
 
 	/** Jump button: climbs onto a ledge in front when there is one (mantle), otherwise jumps. */
 	void JumpPressed();

@@ -5,14 +5,18 @@
 #include "Campus/CampusBRPlane.h"
 #include "Campus/CampusBRZone.h"
 #include "Campus/CampusCharacter.h"
+#include "Campus/CampusMapArt.h"
 #include "Campus/CampusMatchState.h"
 #include "Campus/CampusSave.h"
 #include "Campus/CampusVehicle.h"
+#include "Containers/ArrayView.h"
 #include "Engine/World.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
 #include "GameFramework/PlayerController.h"
 #include "Campus/CampusPlayerControllers.h"
+#include "Layout/Clipping.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
 #include "Engine/Texture2D.h"
@@ -37,6 +41,11 @@ namespace TouchStyle
 	const FLinearColor Minimap(FColor(0x1D, 0x3B, 0x4F, 230));
 	const FLinearColor Red(FColor(0xE5, 0x3E, 0x3E));
 	const FLinearColor Blue(FColor(0x3E, 0x8E, 0xE5));
+	/** THE SAFE ZONE's one colour, shared with the wall in the world (CampusBRWall::Colour) and with
+	 *  the three.js game it is copied from (game.js SAFE_ZONE_COLOR = #3aa0ff). The current circle,
+	 *  the out-of-zone warning and the screen-edge tint are all this and nothing else, so "blue"
+	 *  means "the zone" everywhere a player looks. */
+	const FLinearColor ZoneBlue(FColor(0x3A, 0xA0, 0xFF));
 	/** BATTLE ROYALE: the one friendly colour. A squad is marked; everyone else is simply an enemy and
 	 *  gets no colour at all, which is why this is a single value and not a palette of team tints. */
 	const FLinearColor Mate(FColor(0x3C, 0xE0, 0x8A));
@@ -85,6 +94,12 @@ void SCampusTouchControls::LoadIcons()
 			IconBrushes.Add(FName(Name), Brush);
 		}
 	}
+	// THE VALLEY MAP PICTURE, warmed here with the icons rather than on the first paint of the minimap.
+	// It is not a cooked texture: it is a 1024 px PNG under Content/CampusUI/MapArt that CampusMapArt
+	// decodes at runtime (MapPicture explains why), and decoding it costs a frame. Doing that here means
+	// the cost lands while the HUD is being built, not on the frame a player first glances at the map
+	// mid-fight. The call is also the cache fill: MapPicture only ever reads it back.
+	CampusMapArt::Get(TEXT("minimap_valley"));
 }
 
 const FSlateBrush* SCampusTouchControls::Icon(FName Name) const
@@ -644,6 +659,14 @@ void SCampusTouchControls::Tick(const FGeometry& AllottedGeometry, const double 
 {
 	CachedLayout = MakeLayout(FVector2D(AllottedGeometry.GetLocalSize()));
 	SpinAngle = FMath::Fmod(SpinAngle + InDeltaTime * UE_TWO_PI / 0.7f, UE_TWO_PI);
+
+	// THIS HUD IS A LIVE INSTRUMENT, SO IT IS DIRTY EVERY FRAME. Everything OnPaint draws - health, the
+	// zone clock, the safe circle and above all the player's own arrow on the minimap - is read out of
+	// the world inside the paint itself, so a paint that Slate decides it may reuse is a frozen map.
+	// Slate only repaints what it is told has changed (and with global invalidation on it caches the
+	// whole widget), which is exactly how a marker ends up moving in jumps, or not at all. One flag a
+	// frame on a leaf widget costs nothing and makes "live" mean live.
+	Invalidate(EInvalidateWidgetReason::Paint);
 
 	// Settings cached once a frame instead of once per look event / draw call.
 	if (const ACampusMatchPlayerController* Match = Cast<ACampusMatchPlayerController>(Controller.Get()))
@@ -1588,20 +1611,24 @@ int32 SCampusTouchControls::OnPaint(const FPaintArgs& Args, const FGeometry& All
 
 namespace CampusMapArea
 {
-	// The square the map picture covers, in Unreal world cm (tools/export-unreal-map.mjs in the three.js repo: the
-	// college bounds + 15 m, north = -Y up, +X right; the campus sits at (15710, 8222.6) in L_Match).
-	constexpr float MinX = -12210.f + 15710.f;
-	constexpr float MinY = -19549.45f + 8222.6f;
-	constexpr float Span = 22710.f;
+	// THE SQUARE IS CampusBRMap's, and only CampusBRMap's. It used to be spelled out again here - the
+	// college bounds + 15 m from tools/export-unreal-map.mjs, north = -Y up, +X right, campus origin
+	// (15710, 8222.6) in L_Match - and that copy is exactly how the maps came to disagree with the
+	// zone on L_VarsityValley: the circle was drawn through college numbers onto the college picture
+	// and so sat dead centre and nearly full width, while the damage was measured 800 m away.
+	// One square per level, resolved in CampusBRMap::For, and every map marker now reaches it through
+	// SCampusTouchControls::FMapView::Of - there is no second route from a world point to a map pixel.
 
-	FVector2D ToUV(const FVector& World)
-	{
-		return FVector2D((World.X - MinX) / Span, (World.Y - MinY) / Span);
-	}
+	/** HOW MUCH OF THE MAP THE MINIMAP SHOWS, in metres across. Big enough to plan a rotation with,
+	 *  small enough that walking reads as movement: at 800 m across a ~330 px minimap a sprint moves the
+	 *  player's dot under two pixels a second, which is why it looked frozen. The full-screen map still
+	 *  shows the whole square, and so does any map smaller than this (the 227 m college room). */
+	constexpr double MinimapMetres = 260.0;
 
-	/** Liang-Barsky against the unit square, in UV. The flight line is launched from OUTSIDE the map
-	 *  square (CampusBRDive::LineOvershoot) so the plane is never seen turning, which means the part
-	 *  worth drawing is the part that crosses the picture. Clamping each endpoint on its own would
+	/** Liang-Barsky against the unit square, in the DRAWN map's own 0..1 (FMapView::Of) - the whole play
+	 *  square on the full map, the window it is showing on the minimap. The flight line is launched from
+	 *  OUTSIDE the map square (CampusBRDive::LineOvershoot) so the plane is never seen turning, which
+	 *  means the part worth drawing is the part that crosses what is on screen. Clamping each endpoint on its own would
 	 *  bend a diagonal route; this keeps the line straight and puts the markers on the edges it
 	 *  actually enters and leaves by. False when the line misses the picture completely. */
 	bool ClipToPicture(FVector2D& A, FVector2D& B)
@@ -1641,31 +1668,157 @@ namespace CampusMapArea
 		return true;
 	}
 
+	/** A label on the big map, in WORLD cm (not campus-local: the two levels do not share an origin). */
 	struct FPlace { const TCHAR* Name; float X; float Y; };
-	const FPlace Places[] = {
-		{ TEXT("Front Block"), -2530.f, -11370.f }, { TEXT("Front Block"), 2835.f, -11370.f },
-		{ TEXT("West Wing"), -5022.f, -6160.f }, { TEXT("East Wing"), 5022.f, -6160.f },
-		{ TEXT("Courtyard"), 0.f, -6625.f }, { TEXT("Canteen"), -8870.f, -12152.f },
+
+	/** L_Match, the college room map: campus-local numbers plus the campus origin. */
+	const FPlace CollegePlaces[] = {
+		{ TEXT("Front Block"), -2530.f + 15710.f, -11370.f + 8222.6f }, { TEXT("Front Block"), 2835.f + 15710.f, -11370.f + 8222.6f },
+		{ TEXT("West Wing"), -5022.f + 15710.f, -6160.f + 8222.6f }, { TEXT("East Wing"), 5022.f + 15710.f, -6160.f + 8222.6f },
+		{ TEXT("Courtyard"), 0.f + 15710.f, -6625.f + 8222.6f }, { TEXT("Canteen"), -8870.f + 15710.f, -12152.f + 8222.6f },
 	};
+
+	/** L_VarsityValley, straight off Scripts/varsity_layout.py ZONE_CENTRES. */
+	const FPlace ValleyPlaces[] = {
+		{ TEXT("College Block"), -13000.f, -13000.f }, { TEXT("Hostels"), 13000.f, -13000.f },
+		{ TEXT("Sports"), -13000.f, 13000.f }, { TEXT("Market"), 13000.f, 13000.f },
+		{ TEXT("Water Tower"), 4600.f, -4600.f },
+	};
+
+	TArrayView<const FPlace> PlacesFor(const UWorld* World)
+	{
+		return World && CampusBRMap::For(World).bValley
+			? MakeArrayView(ValleyPlaces, int32(UE_ARRAY_COUNT(ValleyPlaces)))
+			: MakeArrayView(CollegePlaces, int32(UE_ARRAY_COUNT(CollegePlaces)));
+	}
+}
+
+FVector2D SCampusTouchControls::FMapView::Of(const UWorld* World, const FVector& Where) const
+{
+	// ONE conversion from the world to a map, for every map and every marker: CampusBRMap::ToUV puts the
+	// point on the play square (which IS the picture, by construction - Scripts/render_varsity_map.py
+	// renders exactly that square), and the window then says where on the drawn widget it falls.
+	return (CampusBRMap::ToUV(World, Where) - MinUV) / FMath::Max(SpanUV, UE_DOUBLE_SMALL_NUMBER);
+}
+
+SCampusTouchControls::FMapView SCampusTouchControls::MapWindow(const UWorld* World, const FVector& Eye, bool bBig) const
+{
+	FMapView View;
+	const double Wide = double(CampusBRMap::Span(World)) * 0.01; // metres across the whole play square
+	if (bBig || Wide <= CampusMapArea::MinimapMetres)
+	{
+		return View; // all of it: the full-screen map always, and any map already small enough
+	}
+	View.SpanUV = CampusMapArea::MinimapMetres / Wide;
+	const FVector2D Middle = CampusBRMap::ToUV(World, Eye);
+	// CLAMPED INSIDE THE SQUARE, so the window never hangs off the edge of the picture and shows a bar
+	// of nothing. Near a corner the player's dot stops sitting dead centre and starts moving towards
+	// that corner instead, which is the honest reading: the map has run out, you have not.
+	View.MinUV = FVector2D(
+		FMath::Clamp(Middle.X - View.SpanUV * 0.5, 0.0, 1.0 - View.SpanUV),
+		FMath::Clamp(Middle.Y - View.SpanUV * 0.5, 0.0, 1.0 - View.SpanUV));
+	return View;
+}
+
+const FSlateBrush* SCampusTouchControls::MapPicture(const UWorld* World) const
+{
+	// VARSITY VALLEY: the top-down plan Scripts/render_varsity_map.py renders onto EXACTLY the
+	// CampusBRMap square straight out of Scripts/varsity_layout.py, so map UVs are 1:1 with the world
+	// and north is up the same way CampusBRMap::ToUV reads it. It ships as a loose PNG beside the
+	// map-select banners (Content/CampusUI/MapArt, staged UFS by DefaultGame.ini) and is decoded at
+	// runtime by CampusMapArt - no .uasset, so no editor and no cook stands between the script and an
+	// Android Shipping build, which is the whole reason it is not a texture asset.
+	if (World && CampusBRMap::For(World).bValley)
+	{
+		return CampusMapArt::Brush(TEXT("minimap_valley"));
+	}
+	// The college room (L_Match): T_Icon_campusmap, the cooked UI texture that covers that square.
+	// No world (the controller went away between a tap and this paint) keeps the old behaviour.
+	return Icon(TEXT("campusmap"));
+}
+
+bool SCampusTouchControls::LocalMapMarker(FVector& OutWhere, float& OutYawDegrees) const
+{
+	const APlayerController* PC = Controller.Get();
+	if (!PC)
+	{
+		return false;
+	}
+	// THE CONTROL ROTATION, not the pawn's: an arrow on a map means "this is the way you are looking",
+	// and while free-looking or riding in a car the body and the view do not agree.
+	OutYawDegrees = float(PC->GetControlRotation().Yaw);
+	if (const APawn* Pawn = PC->GetPawn())
+	{
+		// Covers every live state: on foot, driving, aboard the plane and under the chute all keep the
+		// pawn possessed (ACampusBRDrop attaches it), so this one line is the whole drop sequence.
+		OutWhere = Pawn->GetActorLocation();
+		return true;
+	}
+	// NO PAWN: knocked out and spectating. Mark whatever the camera is actually looking through, so the
+	// map still answers "where am I looking" instead of going blank at the moment it matters most.
+	if (const AActor* Eye = PC->GetViewTarget())
+	{
+		if (Eye != PC)
+		{
+			OutWhere = Eye->GetActorLocation();
+			return true;
+		}
+	}
+	if (const APlayerCameraManager* Camera = PC->PlayerCameraManager)
+	{
+		OutWhere = Camera->GetCameraLocation();
+		OutYawDegrees = float(Camera->GetCameraRotation().Yaw);
+		return true;
+	}
+	return false;
 }
 
 void SCampusTouchControls::DrawMap(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size, bool bBig, float U) const
 {
+	const APlayerController* Viewer = Controller.Get();
+	const UWorld* Level = Viewer ? Viewer->GetWorld() : nullptr;
+
+	// WHERE THE LOCAL PLAYER IS, READ RIGHT HERE, EVERY PAINT. Nothing about the marker is remembered
+	// between frames: the pawn moves every tick and this paint runs every tick (Tick invalidates the
+	// widget), so the dot IS the character's live position - never one cached when the map was opened.
+	FVector Eye = FVector::ZeroVector;
+	float EyeYaw = 0.f;
+	const bool bHaveEye = LocalMapMarker(Eye, EyeYaw);
+	const FVector2D Centre = CampusBRMap::Center(Level);
+	const FMapView View = MapWindow(Level, bHaveEye ? Eye : FVector(Centre.X, Centre.Y, 0.0), bBig);
+
 	DrawRect(Out, Layer, G, Min - FVector2D(2.f), FVector2D(Size + 4.f), FLinearColor(0.f, 0.f, 0.f, 0.6f));
-	if (const FSlateBrush* Picture = Icon(TEXT("campusmap")))
+
+	// EVERYTHING BELOW IS CLIPPED TO THE SQUARE. A minimap that follows the player draws the picture
+	// several times wider than the widget, and the safe circle routinely starts off the window; with no
+	// clip the map would spill across the whole HUD.
+	Out.PushClip(FSlateClippingZone(G.ToPaintGeometry(FVector2f(Size, Size), FSlateLayoutTransform(FVector2f(Min)))));
+
+	if (const FSlateBrush* Picture = MapPicture(Level))
 	{
-		DrawImage(Out, Layer + 1, G, Picture, Min + FVector2D(Size * 0.5f), FVector2D(Size), FLinearColor::White);
+		// The picture covers the WHOLE play square, so it is laid out at Size / SpanUV and slid under the
+		// clip by the window's corner. At SpanUV 1 (the full map) that is exactly the old draw.
+		const float Wide = Size / FMath::Max(float(View.SpanUV), UE_SMALL_NUMBER);
+		const FVector2D Corner = Min - View.MinUV * double(Wide);
+		DrawImage(Out, Layer + 1, G, Picture, Corner + FVector2D(Wide * 0.5f), FVector2D(Wide), FLinearColor::White);
 	}
 	else
 	{
+		// NEVER ANOTHER LEVEL'S PICTURE, and never a missing one faked. T_Icon_campusmap is a photo of
+		// the 227 m college square; painted behind Varsity Valley's 800 m square it put every landmark
+		// and every circle in the wrong place, which is how a player standing 200 m outside the zone
+		// read as safely inside. A flat plate is the honest answer.
 		DrawRect(Out, Layer + 1, G, Min, FVector2D(Size), TouchStyle::Minimap);
 	}
-	auto At = [&Min, Size](const FVector& World)
+	auto At = [&Min, Size, Level, &View](const FVector& Where)
 	{
-		const FVector2D UV = CampusMapArea::ToUV(World);
-		return Min + FVector2D(FMath::Clamp(UV.X, 0.0, 1.0), FMath::Clamp(UV.Y, 0.0, 1.0)) * Size;
+		const FVector2D Spot = View.Of(Level, Where);
+		return Min + FVector2D(FMath::Clamp(Spot.X, 0.0, 1.0), FMath::Clamp(Spot.Y, 0.0, 1.0)) * Size;
 	};
 	const float Scale = bBig ? Size / 640.f : 1.f;
+	// The circles, under everything else: the current one blue (the colour of the wall standing on it
+	// in the world) and the next one white, on the big map exactly as on the minimap.
+	DrawZoneCircles(Out, Layer + 2, G, Min, Size, View);
 	if (bBig)
 	{
 		// grid like the real games: columns A-J, rows 1-10, and the place names
@@ -1682,71 +1835,90 @@ void SCampusTouchControls::DrawMap(FSlateWindowElementList& Out, int32 Layer, co
 				DrawText(Out, Layer + 3, G, FString::FromInt(K + 1), FVector2D(Min.X + Size / 40.f, Min.Y + Size * (K + 0.5f) / 10.f), GridFont, FLinearColor::White);
 			}
 		}
-		for (const CampusMapArea::FPlace& Place : CampusMapArea::Places)
+		for (const CampusMapArea::FPlace& Place : CampusMapArea::PlacesFor(Level))
 		{
-			DrawText(Out, Layer + 3, G, Place.Name, At(FVector(Place.X + 15710.f, Place.Y + 8222.6f, 0.f)), FMath::RoundToInt(Size / 42.f), FLinearColor::White);
+			DrawText(Out, Layer + 3, G, Place.Name, At(FVector(Place.X, Place.Y, 0.f)), FMath::RoundToInt(Size / 42.f), FLinearColor::White);
 		}
-		DrawText(Out, Layer + 3, G, TEXT("tap anywhere to close"), FVector2D(Min.X + Size * 0.5f, Min.Y + Size + 2.f * U), FMath::RoundToInt(U * 1.2f), FLinearColor(1.f, 1.f, 1.f, 0.7f));
 	}
 
 	// The plane's route, under the player arrows: the line is background, the arrows are you.
-	DrawFlightRoute(Out, Layer + 3, G, Min, Size, bBig, Scale);
+	DrawFlightRoute(Out, Layer + 3, G, Min, Size, bBig, Scale, View);
 
-	// arrows: you (yellow, bigger) and your teammates (ROOM: the team colour. BR: one friendly green,
-	// because the only other side in a battle session is "everyone else"); enemies never show
-	auto Arrow = [&](const FVector2D& C, float YawDeg, const FLinearColor& Color, float Len)
+	// Markers: you (a yellow arrow facing the view) and your squad (BR: one friendly green, because the
+	// only other side in a battle session is "everyone else". ROOM: the team colour); enemies never
+	// show. Lift raises a marker above the others - yours is always the one on top.
+	auto Arrow = [&](const FVector2D& C, float YawDeg, const FLinearColor& Color, float Len, int32 Lift)
 	{
 		const float R = FMath::DegreesToRadians(YawDeg);
-		const FVector2D Dir(FMath::Cos(R), FMath::Sin(R)); // +X right, +Y down on the picture
+		// +X right and +Y down on the picture, which is CampusBRMap::ToUV exactly: u grows with world +X
+		// and v grows with world +Y. A world yaw is measured from +X towards +Y, so cos/sin lands on the
+		// map with no axis swap and no sign flip - and the valley picture is rendered on those same axes.
+		const FVector2D Dir(FMath::Cos(R), FMath::Sin(R));
 		const FVector2D Side(-Dir.Y, Dir.X);
 		const FVector2D Nose = C + Dir * Len;
 		const FVector2D BackL = C - Dir * Len * 0.6f + Side * Len * 0.7f;
 		const FVector2D BackR = C - Dir * Len * 0.6f - Side * Len * 0.7f;
-		DrawCircle(Out, Layer + 4, G, C, Len * 0.45f, Color);
-		DrawPolyline(Out, Layer + 5, G, { FVector2f(BackL), FVector2f(Nose), FVector2f(BackR), FVector2f(C - Dir * Len * 0.25f), FVector2f(BackL) }, Color, FMath::Max(2.f, Len * 0.25f));
+		DrawCircle(Out, Layer + 4 + Lift, G, C, Len * 0.45f, Color);
+		DrawPolyline(Out, Layer + 5 + Lift, G, { FVector2f(BackL), FVector2f(Nose), FVector2f(BackR), FVector2f(C - Dir * Len * 0.25f), FVector2f(BackL) }, Color, FMath::Max(2.f, Len * 0.25f));
 	};
-	const APlayerController* PC = Controller.Get();
-	const UWorld* World = PC ? PC->GetWorld() : nullptr;
-	const ACampusGameState* State = World ? World->GetGameState<ACampusGameState>() : nullptr;
-	const ACampusPlayerState* Mine = PC ? PC->GetPlayerState<ACampusPlayerState>() : nullptr;
-	if (!State || !Mine)
+
+	// YOU, FIRST AND UNCONDITIONALLY. This used to be the LAST thing in the function, behind an
+	// `if (!State || !Mine) return;` that exists only for the squadmate loop below - so for as long as
+	// either the game state or the local player state had not replicated (a client's first seconds in
+	// a match, and any frame the two disagree) the player's own arrow was not drawn AT ALL, on either
+	// map. Your own marker depends on nothing but your own pawn, so it is drawn before anything can
+	// return, and it is drawn whether or not you still have a pawn (LocalMapMarker falls back to the
+	// spectated / drop camera).
+	if (bHaveEye)
 	{
-		return;
+		Arrow(At(Eye), EyeYaw, FLinearColor(FColor(0xFF, 0xD2, 0x1F)), 8.f * Scale, 3);
 	}
-	const bool bBattleRoyale = CampusBR::IsBattleRoyale(World);
-	for (const APlayerState* Player : State->PlayerArray)
+
+	const ACampusGameState* State = Level ? Level->GetGameState<ACampusGameState>() : nullptr;
+	const ACampusPlayerState* Mine = Viewer ? Viewer->GetPlayerState<ACampusPlayerState>() : nullptr;
+	if (State && Mine)
 	{
-		const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
-		const APawn* Pawn = Player ? Player->GetPawn() : nullptr;
-		if (!Campus || !Pawn || Campus == Mine)
+		const bool bBattleRoyale = CampusBR::IsBattleRoyale(Level);
+		for (const APlayerState* Player : State->PlayerArray)
 		{
-			continue;
-		}
-		// TEAMMATES ONLY. In BR that is the squad and nothing else: a solo player has no squadmates and
-		// so has an empty map, which is exactly right.
-		const bool bMate = bBattleRoyale ? CampusBR::AreSquadmates(Campus, Mine) : Campus->Team == Mine->Team;
-		if (!bMate)
-		{
-			continue;
-		}
-		const FLinearColor MateColor = bBattleRoyale ? TouchStyle::Mate
-			: (Campus->Team == ECampusTeam::Red ? TouchStyle::Red : TouchStyle::Blue);
-		const FVector2D C = At(Pawn->GetActorLocation());
-		Arrow(C, Pawn->GetActorRotation().Yaw, MateColor, 6.f * Scale);
-		if (bBig)
-		{
-			DrawText(Out, Layer + 6, G, Campus->GetPlayerName(), C - FVector2D(0.f, 16.f * Scale),
-				FMath::RoundToInt(Size / 55.f), bBattleRoyale ? TouchStyle::Mate : FLinearColor::White);
+			const ACampusPlayerState* Campus = Cast<ACampusPlayerState>(Player);
+			// The pawn is replicated onto the player state, so a squadmate the server has not made relevant
+			// to this client yet simply has no dot this frame rather than a dot at the world origin.
+			const APawn* Pawn = Player ? Player->GetPawn() : nullptr;
+			if (!Campus || !Pawn || Campus == Mine)
+			{
+				continue;
+			}
+			// TEAMMATES ONLY. In BR that is the squad and nothing else: a solo player has no squadmates and
+			// so has an empty map, which is exactly right.
+			const bool bMate = bBattleRoyale ? CampusBR::AreSquadmates(Campus, Mine) : Campus->Team == Mine->Team;
+			if (!bMate)
+			{
+				continue;
+			}
+			const FLinearColor MateColor = bBattleRoyale ? TouchStyle::Mate
+				: (Campus->Team == ECampusTeam::Red ? TouchStyle::Red : TouchStyle::Blue);
+			const FVector2D C = At(Pawn->GetActorLocation());
+			Arrow(C, Pawn->GetActorRotation().Yaw, MateColor, 6.f * Scale, 0);
+			if (bBig)
+			{
+				DrawText(Out, Layer + 6, G, Campus->GetPlayerName(), C - FVector2D(0.f, 16.f * Scale),
+					FMath::RoundToInt(Size / 55.f), bBattleRoyale ? TouchStyle::Mate : FLinearColor::White);
+			}
 		}
 	}
-	if (const APawn* Me = PC->GetPawn())
+	Out.PopClip();
+
+	// Outside the clip, because it sits BELOW the square rather than on it.
+	if (bBig)
 	{
-		Arrow(At(Me->GetActorLocation()), PC->GetControlRotation().Yaw, FLinearColor(FColor(0xFF, 0xD2, 0x1F)), 8.f * Scale);
+		DrawText(Out, Layer + 3, G, TEXT("tap anywhere to close"), FVector2D(Min.X + Size * 0.5f, Min.Y + Size + 2.f * U),
+			FMath::RoundToInt(U * 1.2f), FLinearColor(1.f, 1.f, 1.f, 0.7f));
 	}
 }
 
 void SCampusTouchControls::DrawFlightRoute(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size,
-	bool bBig, float Scale) const
+	bool bBig, float Scale, const FMapView& View) const
 {
 	const APlayerController* PC = Controller.Get();
 	const UWorld* World = PC ? PC->GetWorld() : nullptr;
@@ -1757,8 +1929,11 @@ void SCampusTouchControls::DrawFlightRoute(FSlateWindowElementList& Out, int32 L
 	{
 		return; // a room match, or the plane has not been handed a line yet
 	}
-	FVector2D Head = CampusMapArea::ToUV(Plane->GetRouteStart());
-	FVector2D Tail = CampusMapArea::ToUV(Plane->GetRouteFinish());
+	// The window, not the raw square: on a following minimap the visible part of the line is the part
+	// that crosses the window, and clipping it there is what keeps the START / END markers on the edges
+	// the route actually enters and leaves the DRAWN map by.
+	FVector2D Head = View.Of(World, Plane->GetRouteStart());
+	FVector2D Tail = View.Of(World, Plane->GetRouteFinish());
 	if (!CampusMapArea::ClipToPicture(Head, Tail))
 	{
 		return;
@@ -1799,7 +1974,7 @@ void SCampusTouchControls::DrawFlightRoute(FSlateWindowElementList& Out, int32 L
 
 	// The aircraft itself. Off the picture it is not drawn at all: an icon pinned to the border
 	// would read as a plane parked on the map edge, which is exactly what it is not doing.
-	const FVector2D Now = CampusMapArea::ToUV(Plane->GetRouteLocation());
+	const FVector2D Now = View.Of(World, Plane->GetRouteLocation());
 	if (Now.X < 0.0 || Now.Y < 0.0 || Now.X > 1.0 || Now.Y > 1.0)
 	{
 		return;
@@ -2113,29 +2288,64 @@ void SCampusTouchControls::DrawBattleRoyaleHud(FSlateWindowElementList& Out, int
 	DrawText(Out, Layer + 2, G, ZoneLine, FVector2D(L.W * 0.5f, 32.f + U * 4.4f), Small,
 		Zone->IsShrinking() ? TouchStyle::Red : FLinearColor::White);
 
-	// Outside the circle: the one warning that has to be impossible to miss.
+	// OUTSIDE THE CIRCLE - and nothing else makes this appear. It is measured against the CURRENT
+	// circle (ACampusBRZone::MetresOutside, 2D, the same call the host burns off), never against the
+	// next one: a player standing safely inside a circle that is about to close is not outside
+	// anything, and telling them they were is half of what the bug report described.
+	//
+	// Nor while they are still being deployed: the plane starts its run from outside the map square,
+	// so in the aircraft and under the chute everyone is "outside" a circle that cannot touch them.
 	const ACampusCharacter* Me = GetCharacter();
-	const float Outside = Me ? Zone->MetresOutside(Me->GetActorLocation()) : 0.f;
+	const bool bDeploying = Me && ACampusBRPlane::IsDeploying(Me);
+	const float Outside = Me && !bDeploying ? Zone->MetresOutside(Me->GetActorLocation()) : 0.f;
 	if (Outside > 0.f)
 	{
-		DrawText(Out, Layer + 2, G, FString::Printf(TEXT("OUTSIDE THE PLAY AREA  \u00b7  %d m  \u00b7  MOVE"), FMath::RoundToInt(Outside)),
-			FVector2D(L.W * 0.5f, L.H * 0.26f), Big, TouchStyle::Red);
+		// The blue edge tint, straight off the three.js game: the screen's border goes the colour of
+		// the wall you are standing on the wrong side of, and only then.
+		// Fmod first: FPlatformTime::Seconds() is machine uptime, and a float of six digits has no
+		// resolution left for a 4 rad/s pulse - the tint would simply stop breathing after an hour.
+		const float Pulse = 0.55f + 0.45f * FMath::Sin(float(FMath::Fmod(FPlatformTime::Seconds(), 1000.0)) * 4.f);
+		const FLinearColor Tint = TouchStyle::ZoneBlue.CopyWithNewOpacity(0.10f + 0.16f * Pulse);
+		const float BandX = L.W * 0.14f;
+		const float BandY = L.H * 0.16f;
+		DrawRect(Out, Layer + 1, G, FVector2D(0.f, 0.f), FVector2D(L.W, BandY), Tint);
+		DrawRect(Out, Layer + 1, G, FVector2D(0.f, L.H - BandY), FVector2D(L.W, BandY), Tint);
+		DrawRect(Out, Layer + 1, G, FVector2D(0.f, BandY), FVector2D(BandX, L.H - BandY * 2.f), Tint);
+		DrawRect(Out, Layer + 1, G, FVector2D(L.W - BandX, BandY), FVector2D(BandX, L.H - BandY * 2.f), Tint);
+
+		DrawText(Out, Layer + 2, G, FString::Printf(TEXT("MOVE TO SAFE ZONE  \u00b7  %d m"), FMath::RoundToInt(Outside)),
+			FVector2D(L.W * 0.5f, L.H * 0.26f), Big, TouchStyle::ZoneBlue);
 	}
 
-	// The circle on the minimap: where it is now, and (dashed-bright) where it is closing to.
-	if (!bShowMinimap || L.MapSize <= 0.f)
+	// THE CIRCLES ARE NOT DRAWN HERE any more. DrawMap draws them, which means the minimap and the
+	// full-screen map get the same two rings from the same code and under the same player arrows -
+	// drawing them a second time from this overlay only put a brighter ring on top of the first.
+}
+
+void SCampusTouchControls::DrawZoneCircles(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G,
+	const FVector2D& Min, float Size, const FMapView& View) const
+{
+	const APlayerController* PC = Controller.Get();
+	const UWorld* World = PC ? PC->GetWorld() : nullptr;
+	const ACampusBRZone* Zone = World ? ACampusBRZone::Get(World) : nullptr;
+	if (!Zone || Zone->GetPhase() < 0 || Size <= 0.f)
 	{
-		return;
+		return; // a room match, or the schedule has not opened yet
 	}
-	auto ToMap = [&L](const FVector2D& Flat)
+	auto ToMap = [&Min, Size, World, &View](const FVector2D& Flat)
 	{
-		const FVector2D UV = CampusBRMap::ToUV(FVector(Flat.X, Flat.Y, 0.f));
-		return L.MapMin + UV * L.MapSize;
+		return Min + View.Of(World, FVector(Flat.X, Flat.Y, 0.f)) * Size;
 	};
-	const float PerCm = L.MapSize / CampusBRMap::Span;
-	DrawRing(Out, Layer + 6, G, ToMap(Zone->GetCenter()), Zone->GetRadius() * PerCm, FLinearColor(1.f, 1.f, 1.f, 0.85f));
-	if (!Zone->IsShrinking())
+	// Pixels per world cm ON THIS MAP. The window has to be in here too: the centre and the radius must
+	// be scaled by the same number or a zoomed minimap would draw a correctly placed circle at the
+	// wrong size, which is a worse lie than no circle at all.
+	const float PerCm = Size / FMath::Max(float(double(CampusBRMap::Span(World)) * View.SpanUV), 1.f);
+	// CURRENT CIRCLE BLUE, NEXT CIRCLE WHITE - the three.js reading, and the current one matches the
+	// blue wall standing on it in the world, so the map and the world say the same thing.
+	DrawRing(Out, Layer, G, ToMap(Zone->GetCenter()), Zone->GetRadius() * PerCm, TouchStyle::ZoneBlue);
+	if (Zone->GetNextRadius() > 0.f && Zone->GetNextRadius() < Zone->GetRadius() - 1.f)
 	{
-		DrawRing(Out, Layer + 6, G, ToMap(Zone->GetNextCenter()), Zone->GetNextRadius() * PerCm, TouchStyle::Accent);
+		DrawRing(Out, Layer, G, ToMap(Zone->GetNextCenter()), Zone->GetNextRadius() * PerCm,
+			FLinearColor(1.f, 1.f, 1.f, 0.9f));
 	}
 }

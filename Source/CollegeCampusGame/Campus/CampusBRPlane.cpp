@@ -845,8 +845,8 @@ void ACampusBRPlane::Launch()
 	{
 		return;
 	}
-	const FVector2D Middle = CampusBRMap::Center();
-	const float Half = CampusBRMap::HalfSpan();
+	const FVector2D Middle = CampusBRMap::Center(GetWorld());
+	const float Half = CampusBRMap::HalfSpan(GetWorld());
 	const float Angle = FMath::FRandRange(0.f, 2.f * PI);
 	const FVector2D Direction(FMath::Cos(Angle), FMath::Sin(Angle));
 	const FVector2D Side(-Direction.Y, Direction.X);
@@ -890,8 +890,8 @@ FQuat ACampusBRPlane::Heading() const
 bool ACampusBRPlane::IsOverMap() const
 {
 	const FVector Where = FlightLocation();
-	const FVector2D Middle = CampusBRMap::Center();
-	const float Half = CampusBRMap::HalfSpan();
+	const FVector2D Middle = CampusBRMap::Center(GetWorld());
+	const float Half = CampusBRMap::HalfSpan(GetWorld());
 	return FMath::Abs(Where.X - Middle.X) <= Half && FMath::Abs(Where.Y - Middle.Y) <= Half;
 }
 
@@ -1035,12 +1035,16 @@ ACampusBRWaitingArea::ACampusBRWaitingArea()
 	Slab->bReceivesDecals = false;
 }
 
-FVector ACampusBRWaitingArea::Place()
+FVector ACampusBRWaitingArea::Place(const UWorld* World)
 {
-	const FVector2D Middle = CampusBRMap::Center();
-	const float Half = CampusBRMap::HalfSpan();
+	const FVector2D Middle = CampusBRMap::Center(World);
+	const float Half = CampusBRMap::HalfSpan(World);
 	// A corner of the map square, 40 m up: out of every sightline, and clearly "not the match yet".
-	return FVector(Middle.X - Half * 0.82f, Middle.Y - Half * 0.82f, 4000.f);
+	// 0.62 and not the 0.82 it was, so the slab sits INSIDE the first circle (0.62 * sqrt(2) = 0.88,
+	// under CampusBRZoneTuning::FirstRadiusShare's 0.95): a corner at 0.82 is 1.16 half-spans from the
+	// middle, i.e. outside the opening circle, and anyone still standing on it when the schedule opened
+	// was outside the play area before the match had begun.
+	return FVector(Middle.X - Half * 0.62f, Middle.Y - Half * 0.62f, 4000.f);
 }
 
 int32 ACampusBRWaitingArea::SlotCount()
@@ -1064,7 +1068,7 @@ FTransform ACampusBRWaitingArea::SlotFor(int32 Index) const
 		Base.Y + (Row - (CampusBRWait::Rows - 1) * 0.5f) * CampusBRWait::Spacing
 			+ Scatter.FRandRange(-CampusBRWait::Jitter, CampusBRWait::Jitter),
 		Base.Z + 120.f);
-	const FVector2D Middle = CampusBRMap::Center();
+	const FVector2D Middle = CampusBRMap::Center(GetWorld());
 	const FRotator Facing = FRotationMatrix::MakeFromX(FVector(Middle.X, Middle.Y, Base.Z) - Where).Rotator();
 	return FTransform(FRotator(0.f, Facing.Yaw, 0.f), Where);
 }

@@ -14,6 +14,7 @@ class ACampusCharacter;
 class ACampusGameState;
 class ACampusPlayerState;
 class UTexture2D;
+class UWorld;
 class APlayerController;
 
 class SCampusTouchControls : public SLeafWidget
@@ -170,14 +171,51 @@ private:
 	const FSlateBrush* Icon(FName Name) const;
 
 	// ---- maps (three.js src/game/maps.js) and the scoreboard
+
+	/** HOW MUCH OF THE PLAY SQUARE A MAP IS SHOWING, as a window in CampusBRMap UV.
+	 *
+	 *  The full-screen map shows all of it (MinUV 0, SpanUV 1) and so did the minimap, which is why the
+	 *  minimap looked frozen: 800 m of Varsity Valley squeezed into ~330 px is 0.4 px per metre, so a
+	 *  sprinting player's dot crawled under two pixels a second and read as a stuck marker. The minimap
+	 *  now shows a small window that FOLLOWS the player, and every single thing drawn on a map - the
+	 *  picture, the safe circles, the flight line, the arrows - goes through Of(), so the two maps can
+	 *  never disagree about where a world point lands. */
+	struct FMapView
+	{
+		/** Top-left of the window, in CampusBRMap UV. */
+		FVector2D MinUV = FVector2D::ZeroVector;
+		/** Width of the window, as a share of the play square. 1 = the whole map. */
+		double SpanUV = 1.0;
+		/** World point -> 0..1 across the DRAWN map. Outside 0..1 is off the window. */
+		FVector2D Of(const UWorld* World, const FVector& Where) const;
+	};
+
+	/** The window a map widget should draw: all of the square for the full map (and for the small
+	 *  college room map), a square that follows Eye for the minimap on the big BR map. */
+	FMapView MapWindow(const UWorld* World, const FVector& Eye, bool bBig) const;
+	/** The picture of THIS level, or null where there is none - the valley's top-down plan (a loose PNG
+	 *  under Content/CampusUI/MapArt) or the college room's cooked T_Icon_campusmap. Never one level's
+	 *  picture under another level's coordinates. */
+	const FSlateBrush* MapPicture(const UWorld* World) const;
+	/** WHERE THE LOCAL PLAYER IS AND WHICH WAY THEY ARE LOOKING, this frame, for the map marker: the
+	 *  pawn when there is one (on foot, driving, in the plane, under the chute - all of those keep the
+	 *  pawn) and otherwise whatever the camera is looking through, which is the spectated squadmate
+	 *  after a knockdown. False only when there is nothing at all to mark. */
+	bool LocalMapMarker(FVector& OutWhere, float& OutYawDegrees) const;
+
 	/** The campus picture with you (yellow arrow) and your teammates; bBig = full-screen map with grid + names. */
 	void DrawMap(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size, bool bBig, float U) const;
+	/** BATTLE ROYALE: the safe circle on a map square, CURRENT BLUE and NEXT WHITE. One function for
+	 *  the minimap and the big map, so the two can never drift apart; draws nothing outside a battle
+	 *  session or before the schedule opens. */
+	void DrawZoneCircles(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size,
+		const FMapView& View) const;
 	/** BATTLE ROYALE: the plane's flight path across the picture, PUBG / Free Fire style - the line,
 	 *  a START and an END marker, chevrons along it for the direction, and the aircraft's own icon
 	 *  where it is right now. Drawn on BOTH maps because DrawMap draws both; dims once the plane has
 	 *  flown the line out, and draws nothing at all outside a battle session. */
 	void DrawFlightRoute(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2D& Min, float Size,
-		bool bBig, float Scale) const;
+		bool bBig, float Scale, const FMapView& View) const;
 	/** Tap the timer. Picks the board that belongs to the game type and draws nothing else. */
 	void DrawScoreboard(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLayout& L) const;
 	/** ROOM: both teams side by side, kills / deaths / damage dealt / taken for this room's rounds. */
