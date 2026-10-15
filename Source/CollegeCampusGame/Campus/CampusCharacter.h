@@ -156,8 +156,15 @@ public:
 	void NextWeapon() { SwitchWeapon(CurrentSlot == 0 ? 1 : 0); }
 	/** Server: put this gun in a slot. Slot < 0 fills an empty slot, else replaces the one in hand. */
 	void GiveWeapon(FName WeaponId, int32 Slot = -1);
-	/** Owner: equip whatever gun the player's backend loadout says is equipped (/v1/me -> EquippedGun). */
+	/** Owner: equip whatever gun AND OUTFIT the player's backend loadout says is equipped
+	 *  (/v1/me -> EquippedGun, /v1/me/cosmetics -> EquippedOutfit). */
 	void ApplyBackendLoadout();
+
+	// ---- cosmetics (CampusCosmetics.h). The id replicates to everyone, so a squad in a match sees
+	// what each other is wearing; the look itself is never sent - every machine reads the same table.
+	FName GetOutfitId() const { return OutfitId; }
+	/** Dresses this body in OutfitId. Local; called from OnRep and from BeginPlay. */
+	void ApplyOutfit();
 
 	// ---- battle-royale body gear
 	float GetArmor() const { return Armor; }
@@ -309,6 +316,16 @@ private:
 
 	UFUNCTION(Server, Reliable)
 	void ServerTakePickup(ACampusPickup* Pickup);
+
+	/** The owner's equipped outfit. VALIDATED against CampusCosmetics, which is all a host can do:
+	 *  the same INTERIM TRUST GAP as ServerSetLoadout above - the host cannot yet check that this
+	 *  account owns the outfit, only that the id is one this build knows. A cosmetic carries no
+	 *  gameplay effect whatsoever, so the worst a liar gets is a shirt they did not pay for. */
+	UFUNCTION(Server, Reliable)
+	void ServerSetOutfit(FName InOutfitId);
+
+	UFUNCTION()
+	void OnRep_Outfit();
 
 	UFUNCTION()
 	void OnRep_Weapons();
@@ -725,6 +742,12 @@ private:
 
 	/** The current gun's row with its store mods already folded in (ApplyWeapon rebuilds it). */
 	FCampusWeaponDef CurrentDef;
+
+	/** COSMETIC OUTFIT: the catalogue id, replicated to everyone (the owner included - their own
+	 *  phone draws the same body as every other). An unknown id is the free starter, so a build that
+	 *  has not heard of a new outfit draws a dressed player rather than nothing. */
+	UPROPERTY(ReplicatedUsing=OnRep_Outfit)
+	FName OutfitId = TEXT("outfit_starter");
 
 	/** Vest points left; absorbs ArmorAbsorbShare of every hit until they are gone. */
 	UPROPERTY(Replicated)

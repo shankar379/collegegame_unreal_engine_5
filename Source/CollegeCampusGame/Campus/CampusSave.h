@@ -50,8 +50,22 @@ public:
 	UPROPERTY()
 	TArray<FName> OwnedItems;
 
+	/** COSMETICS: the outfit id from CampusCosmetics. Written the moment the wardrobe equips one, so
+	 *  the lobby figure and the next match are right whether the PUT lands or not; the server's answer
+	 *  on load overwrites it (GET /me/cosmetics is the truth). An id this build does not know - the
+	 *  old "Default" every existing save on a phone still holds - reads as the starter outfit. */
 	UPROPERTY()
-	FName EquippedOutfit = TEXT("Default");
+	FName EquippedOutfit = TEXT("outfit_starter");
+
+	/** The three wardrobe presets, by outfit id. NAME_None = that slot has never been saved. Sized on
+	 *  read, not here: an old save file has none and must still load. */
+	UPROPERTY()
+	TArray<FName> OutfitPresets;
+
+	/** LOBBY DECORATION: anchor id (CampusCosmetics::FAnchor::Id) -> decor item id. An anchor that is
+	 *  not in the map is bare, which is how seven of the eight start. */
+	UPROPERTY()
+	TMap<FName, FName> LobbyDecor;
 
 	UPROPERTY()
 	FName EquippedGun = TEXT("Rifle");

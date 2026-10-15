@@ -66,7 +66,7 @@ namespace
 	}
 
 	/** The left-hand menu. Every tab lands on a screen that exists. */
-	enum class ELobbyTab : uint8 { Store, Missions, Character, Vault, Weapons, Events };
+	enum class ELobbyTab : uint8 { Store, Missions, Character, Wardrobe, Vault, Weapons, Events };
 	struct FTabDef
 	{
 		ELobbyTab Tab;
@@ -77,6 +77,10 @@ namespace
 		{ ELobbyTab::Store,     TEXT("STORE"),     CampusAngular::EGlyph::Coin },
 		{ ELobbyTab::Missions,  TEXT("MISSIONS"),  CampusAngular::EGlyph::Chevron },
 		{ ELobbyTab::Character, TEXT("CHARACTER"), CampusAngular::EGlyph::Friends },
+		// Directly under CHARACTER, because they are the same subject: CHARACTER is who you are,
+		// WARDROBE is what you are wearing. The lobby decor sheet hangs off the wardrobe rather than
+		// taking a seventh row of its own.
+		{ ELobbyTab::Wardrobe,  TEXT("WARDROBE"),  CampusAngular::EGlyph::Trophy },
 		{ ELobbyTab::Vault,     TEXT("VAULT"),     CampusAngular::EGlyph::Gem },
 		{ ELobbyTab::Weapons,   TEXT("WEAPONS"),   CampusAngular::EGlyph::Rank },
 		{ ELobbyTab::Events,    TEXT("EVENTS"),    CampusAngular::EGlyph::Crown },
@@ -682,6 +686,14 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 		bStorePricesQueried = false;
 		StoreQueryPlayPrices();
 	}
+	if (bEntering && Screen == EScreen::Lobby)
+	{
+		// GET /me/cosmetics, once per app run (RefreshCosmetics is latched). On the lobby rather than
+		// on the wardrobe, because the LINE-UP and the eight decor anchors are what it dresses - the
+		// closet is only where it is edited. Covers the resumed-session path that never calls
+		// AfterSignIn, and costs nothing on the way back from a match.
+		RefreshCosmetics();
+	}
 
 	TSharedRef<SWidget> Body = SNullWidget::NullWidget;
 	switch (Screen)
@@ -704,6 +716,8 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	case EScreen::AdultConfirm: Body = BuildAdultConfirm(); break;
 	case EScreen::CollegePick: Body = BuildCollegePick(); break;
 	case EScreen::MapSelect: Body = BuildMapSelect(); break;
+	case EScreen::Wardrobe: Body = BuildWardrobe(); break;   // CampusWardrobeUI.cpp
+	case EScreen::Decor: Body = BuildDecorScreen(); break;   // CampusWardrobeUI.cpp
 	case EScreen::Matchmaking: Body = BuildMatchmaking(); break;
 	case EScreen::Friends: Body = BuildFriends(); break;
 	case EScreen::FriendPick: Body = BuildFriendPick(); break;
@@ -723,8 +737,11 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 			&& Screen != EScreen::Nickname && Screen != EScreen::AdultConfirm;
 		Live->SetNoticesVisible(bSignedInScreen);
 	}
-	// Leaving the profile page gives the 3D scene back to the line-up.
-	if (Screen != EScreen::Profile && Controller.IsValid())
+	// Leaving the profile page gives the 3D scene back to the line-up. THE WARDROBE IS THE SECOND
+	// screen that owns the figure: it stands it in the same place with the same camera, so it belongs
+	// on this exception with Profile. The DECOR sheet deliberately does NOT - decor is judged against
+	// the whole room, so that screen wants the full line-up and the podium camera back.
+	if (Screen != EScreen::Profile && Screen != EScreen::Wardrobe && Controller.IsValid())
 	{
 		Controller->FocusProfile(false);
 	}
@@ -1499,6 +1516,11 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMenuColumn()
 		case ELobbyTab::Store:     Action = OpenStore(EStoreTab::Packs); break;   // STORE lands on DIAMONDS; OFFERS can be empty
 		case ELobbyTab::Weapons:   Action = OpenStore(EStoreTab::Guns); break;
 		case ELobbyTab::Character: Action = OpenScreen(EScreen::Account); break;
+		// Not OpenScreen: the closet asks for the owned list on the way in (once per app run), and
+		// that is exactly the kind of round trip Show() exists to keep out of a Build function.
+		case ELobbyTab::Wardrobe:
+			Action = FOnClicked::CreateLambda([this]() { OpenWardrobe(); return FReply::Handled(); });
+			break;
 		case ELobbyTab::Vault:     Action = OpenScreen(EScreen::Daily); bHighlighted = bDailyReady; break;
 		case ELobbyTab::Events:    Action = OpenScreen(EScreen::Event); break;
 		case ELobbyTab::Missions:

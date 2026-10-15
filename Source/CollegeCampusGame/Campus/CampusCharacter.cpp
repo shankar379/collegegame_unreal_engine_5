@@ -10,7 +10,11 @@
 #include "Campus/CampusBRPlane.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusBot.h"
+#include "Campus/CampusCosmetics.h"
 #include "Campus/CampusDoor.h"
+#include "Campus/CampusGameInstance.h"
+#include "Campus/CampusOutfit.h"
+#include "Campus/CampusSave.h"
 #include "Campus/CampusGameMode.h"
 #include "Campus/CampusLoot.h"
 #include "Campus/CampusWeapons.h"
@@ -195,6 +199,9 @@ void ACampusCharacter::BeginPlay()
 		GiveWeapon(CampusWeapons::Starter().Id, 0);
 	}
 	ApplyWeapon();
+	// Whatever OutfitId holds right now - the default on the host, or a value that replicated in
+	// before this ran on a client. Idempotent, so the OnRep that may follow costs nothing.
+	ApplyOutfit();
 	if (IsLocallyControlled())
 	{
 		ApplyBackendLoadout();
@@ -220,6 +227,8 @@ void ACampusCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	// owner's own HUD paints both slots from these two values.
 	DOREPLIFETIME(ACampusCharacter, WeaponSlots);
 	DOREPLIFETIME(ACampusCharacter, CurrentSlot);
+	// NOT SkipOwner: the owner's own body is drawn in third person, so their phone needs the id too.
+	DOREPLIFETIME(ACampusCharacter, OutfitId);
 	DOREPLIFETIME(ACampusCharacter, Armor);
 	DOREPLIFETIME(ACampusCharacter, bHelmet);
 }
@@ -2687,12 +2696,59 @@ void ACampusCharacter::ServerSwitchWeapon_Implementation(uint8 Slot)
 	MulticastUpperBody(false);
 }
 
+void ACampusCharacter::ApplyOutfit()
+{
+	CampusOutfit::Apply(GetMesh(), OutfitId);
+}
+
+void ACampusCharacter::OnRep_Outfit()
+{
+	ApplyOutfit();
+}
+
+void ACampusCharacter::ServerSetOutfit_Implementation(FName InOutfitId)
+{
+	// The id has to be one this build knows, or the body would fall back to the starter on every
+	// machine anyway and the replicated value would be a lie about what everyone can see.
+	if (CampusCosmetics::FindOutfit(InOutfitId) == INDEX_NONE)
+	{
+		return;
+	}
+	OutfitId = InOutfitId;
+	// The host draws this body too, and a replicated property does not notify the machine that set it.
+	ApplyOutfit();
+}
+
 void ACampusCharacter::ApplyBackendLoadout()
 {
-	// The phone reads its own profile (already cached by the lobby) and asks the host for that gun. The host
-	// validates the id against the gun table and clamps the level.
 	const UGameInstance* GameInstance = GetGameInstance();
 	const UCampusBackend* Backend = GameInstance ? GameInstance->GetSubsystem<UCampusBackend>() : nullptr;
+
+	// ---- THE OUTFIT FIRST, and before any of the gun's early returns: a player with no gun in their
+	// backend loadout still has a body, and that body is what the rest of the squad looks at.
+	// THE SAVE IS THE SOURCE, as it is for the lobby figure: UCampusBackend::LoadCosmetics mirrors the
+	// server's answer into it, so an offline match - or one joined before GET /me/cosmetics landed -
+	// still shows the outfit the player actually equipped, and there is only one place to read.
+	// Not Cast<> off the const GameInstance above: UCampusGameInstance::GetProfile() is non-const
+	// (it creates the save on first ask), so the typed getter is what can actually be called.
+	UCampusGameInstance* Campus = GetGameInstance<UCampusGameInstance>();
+	const UCampusSave* Profile = Campus ? Campus->GetProfile() : nullptr;
+	const FName WantedOutfit = Profile ? Profile->EquippedOutfit : NAME_None;
+	if (CampusCosmetics::FindOutfit(WantedOutfit) != INDEX_NONE && WantedOutfit != OutfitId)
+	{
+		if (HasAuthority())
+		{
+			ServerSetOutfit_Implementation(WantedOutfit);
+		}
+		else
+		{
+			ServerSetOutfit(WantedOutfit);
+		}
+	}
+
+	// ---- then the gun.
+	// The phone reads its own profile (already cached by the lobby) and asks the host for that gun. The host
+	// validates the id against the gun table and clamps the level.
 	if (!Backend || Backend->EquippedGun.IsEmpty())
 	{
 		return;

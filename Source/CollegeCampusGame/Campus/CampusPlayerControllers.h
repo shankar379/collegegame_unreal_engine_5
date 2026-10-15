@@ -44,6 +44,13 @@ public:
 	 *  3D path to keep in step. Call with false to put the line-up and the podium camera back. */
 	void FocusProfile(bool bOn);
 
+	/** COSMETICS. Puts the saved / server outfit on the player's OWN figure (slot 0 - the one figure
+	 *  whose outfit this phone knows; teammates keep the default body until the API carries theirs),
+	 *  and re-dresses the eight lobby anchors from the saved decor. Both are called on lobby entry and
+	 *  again whenever the wardrobe or the decor sheet changes something, so the change is instant. */
+	void ApplyLobbyOutfit();
+	void RefreshLobbyDecor();
+
 	UCampusBackend* GetBackend() const;
 
 	/** Internet play (EOS P2P). Null-safe: when it is not configured the room stays on the LAN. */
@@ -115,6 +122,10 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<ACameraActor> ProfileCamera;
 	bool bProfileFocus = false;
+
+	/** The eight decor anchors. Spawned once, after the floor height is known, and rebuilt in place. */
+	UPROPERTY(Transient)
+	TObjectPtr<class ACampusLobbyDecor> DecorSet;
 
 	TSharedPtr<SCampusLobbyWidget> Widget;
 	FDelegateHandle PartyChangedHandle;

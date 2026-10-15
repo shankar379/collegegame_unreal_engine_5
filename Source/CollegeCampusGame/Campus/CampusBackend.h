@@ -35,6 +35,27 @@ struct FCampusGun
 	int32 Magazine = 0;
 };
 
+/**
+ * One owned cosmetic, from GET /v1/me/cosmetics `owned[]`. Deliberately a THIN row: everything that
+ * decides how the thing looks lives in CampusCosmetics.h, keyed by Id, so the server never has to
+ * ship art, colours or anchor rules and a new row there needs no API change. Name and Rarity are
+ * kept only so an item this build's catalogue has not heard of can still be listed honestly.
+ *
+ * NOT READ, DELIBERATELY: the response's `art` (a placeholder path by the API's own account), and the
+ * top-level `slots[]` / `anchors[]` lists. The client catalogue is the authority on every one of
+ * those, and mirroring them here would be a second copy that can only ever drift.
+ */
+struct FCampusCosmetic
+{
+	FString Id;
+	FString Name;
+	/** "outfit" | "decor". */
+	FString Kind;
+	/** Which equipment slot it fills ("outfit"); decor items carry none. */
+	FString Slot;
+	FString Rarity;
+};
+
 /** A pack or offer bought with money. */
 struct FCampusOffer
 {
@@ -289,6 +310,25 @@ public:
 	void UpgradeGun(const FString& Id, FDone Done);
 	void SellGun(const FString& Id, FDone Done);
 	void EquipGun(const FString& Id, FDone Done);
+
+	// ---- cosmetics (wardrobe + lobby decoration). THE SERVER IS TRUTH ON LOAD and the device is
+	//      truth until then: every screen writes UCampusSave first so the lobby is right offline, then
+	//      sends the same choice up. The catalogue (CampusCosmetics.h) decides what anything looks
+	//      like; these calls only move ids.
+	/** GET /me/cosmetics -> {equipped:{slot:id}, presets:{"1":{slot:id},..}, decor:{anchor:id}, owned:[..]}.
+	 *  On success the response is mirrored into the save, so the next launch paints before the network
+	 *  answers. A failure is not fatal: the player keeps the starter outfit and whatever the save holds. */
+	void LoadCosmetics(FDone Done);
+	/** PUT /me/cosmetics {equipped:{outfit:id}}. Idempotent - a double tap is one equip. */
+	void SaveCosmetics(const FString& OutfitId, FDone Done);
+	/** PUT /me/cosmetics/presets/:idx {slots:{outfit:id}}. Index is 0-based here, 1-based on the wire. */
+	void SavePreset(int32 Index, const FString& OutfitId, FDone Done);
+	/** PUT /me/lobby {decor:{anchor:id|null}}. EVERY anchor is sent, the bare ones as null, so the
+	 *  server's picture of the room is the whole room and never a half-applied patch. */
+	void SaveLobbyDecor(const TMap<FString, FString>& Decor, FDone Done);
+	/** True when this cosmetic id is in the owned list, or is free (the starter outfit always is). */
+	bool OwnsCosmetic(const FString& Id) const;
+
 	/** Real money (Razorpay): opens the payment page, then reports once the server confirms the payment. */
 	void BuyWithMoney(const FString& ItemId, FDone Done);
 	/** Google Play paid: hands the purchase token to the server, which checks it with Google, credits the wallet
@@ -362,6 +402,15 @@ public:
 	TArray<FCampusOffer> Offers;
 	TArray<FCampusOffer> Packs;
 	FString EquippedGun;
+	/** COSMETICS, valid once bCosmeticsLoaded. Until then the wardrobe shows the free starter alone -
+	 *  an "owned" list the phone invented would offer a player something the server will refuse. */
+	TArray<FCampusCosmetic> OwnedCosmetics;
+	FString EquippedOutfit;
+	/** Three entries once loaded, each an outfit id or empty for a slot nobody has saved. */
+	TArray<FString> CosmeticPresets;
+	/** anchor id -> decor item id, for the anchors that carry one. */
+	TMap<FString, FString> LobbyDecor;
+	bool bCosmeticsLoaded = false;
 	bool bPaymentsEnabled = false;
 	/** The curated college list, loaded on demand by the profile screen. */
 	TArray<FCampusCollege> Colleges;

@@ -1,4 +1,4 @@
-﻿#include "Campus/CampusPlayerControllers.h"
+#include "Campus/CampusPlayerControllers.h"
 
 #include "Animation/SkeletalMeshActor.h"
 #include "Camera/CameraActor.h"
@@ -14,6 +14,7 @@
 #include "Campus/CampusMapArt.h"
 #include "Campus/CampusMatchState.h"
 #include "Campus/CampusNetSettings.h"
+#include "Campus/CampusOutfit.h"
 #include "Campus/CampusParty.h"
 #include "Campus/CampusSave.h"
 #include "Campus/CampusSocial.h"
@@ -44,6 +45,20 @@ namespace
 #else
 		return false;
 #endif
+	}
+
+	/**
+	 * WHICH OUTFIT THE LOBBY FIGURE WEARS. ONE SOURCE: the save. UCampusBackend::LoadCosmetics writes
+	 * the server's answer into it the moment GET /me/cosmetics lands, and the wardrobe writes it
+	 * before it sends anything - which is the whole of "offline works". Reading the backend here as
+	 * well would be a second opinion that can only ever disagree.
+	 *
+	 * Never has to be valid: CampusCosmetics::OutfitFor turns anything it does not recognise into the
+	 * free starter, so an empty save and a cosmetic sold after this APK shipped both come out dressed.
+	 */
+	FName OutfitForLobby(const UCampusSave* Profile)
+	{
+		return Profile ? Profile->EquippedOutfit : NAME_None;
 	}
 }
 
@@ -351,6 +366,14 @@ void ACampusLobbyPlayerController::RebuildSquad()
 		// only shows or hides the other three - it never shuffles the player sideways.
 		const int32 Slot = CampusLineUp::SlotForMember(Index);
 		Actor->SetActorHiddenInGame(false);
+		// MEMBER 0 IS ME, and mine is the only outfit this phone knows: the API's squad roster carries
+		// no cosmetics, so a teammate would only ever be dressed in a guess. Re-applied on every
+		// rebuild because a rebuild may have just spawned the actor; CampusOutfit::Apply re-uses the
+		// mesh and the material instance when nothing has actually changed.
+		if (Index == 0)
+		{
+			CampusOutfit::Apply(Actor->GetSkeletalMeshComponent(), OutfitForLobby(GetProfile()));
+		}
 		// Everyone keeps the yaw the player dragged to, plus their own slot's turn-in. Set BEFORE the
 		// placement, because the placement measures the figure where it is actually standing.
 		Actor->SetActorRotation(FRotator(0.f, CampusLineUp::MeshYawOffset + DisplayYaw + CampusLineUp::SlotFacingYaw(Slot), 0.f));
@@ -378,6 +401,10 @@ void ACampusLobbyPlayerController::BeginPlay()
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	// The decor set, now that the floor height every anchor is measured from is known.
+	DecorSet = GetWorld()->SpawnActor<ACampusLobbyDecor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
+	RefreshLobbyDecor();
 	PodiumCamera = GetWorld()->SpawnActor<ACameraActor>(FVector(380.f, 0.f, 135.f), FRotator(-6.f, 180.f, 0.f), Params);
 	if (PodiumCamera)
 	{
@@ -523,6 +550,29 @@ void ACampusLobbyPlayerController::FocusProfile(bool bOn)
 	}
 	// RebuildSquad puts every slot back where it belongs and re-hides the ones the squad size excludes.
 	RebuildSquad();
+}
+
+void ACampusLobbyPlayerController::ApplyLobbyOutfit()
+{
+	if (Squad.IsValidIndex(0) && Squad[0])
+	{
+		CampusOutfit::Apply(Squad[0]->GetSkeletalMeshComponent(), OutfitForLobby(GetProfile()));
+	}
+}
+
+void ACampusLobbyPlayerController::RefreshLobbyDecor()
+{
+	if (!DecorSet)
+	{
+		return;
+	}
+	// THE SAVE IS WHAT THE SCENE IS BUILT FROM, always. UCampusBackend::LoadCosmetics mirrors the
+	// server's room into it the moment the response lands, so there is exactly one source here and no
+	// chance of the two disagreeing about which anchor is bare - and the decor sheet, which writes the
+	// save before it sends anything, changes the scene under the player's finger.
+	const UCampusSave* Profile = GetProfile();
+	static const TMap<FName, FName> NoDecor;
+	DecorSet->Rebuild(Profile ? Profile->LobbyDecor : NoDecor, FloorPlaneZ);
 }
 
 UCampusBackend* ACampusLobbyPlayerController::GetBackend() const

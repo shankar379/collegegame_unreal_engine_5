@@ -254,6 +254,10 @@ private:
 	// (first time) Nickname -> Lobby. The lobby opens the Store, Rooms (quick / create / join by code), Account.
 	enum class EScreen : uint8 { Splash, Agreement, LoginChoice, EmailLogin, Register, Nickname, Lobby, Store, Rooms,
 		Account, Event, Daily, Settings, Missions, Streak, AdultConfirm, CollegePick, MapSelect,
+		/** COSMETICS (Campus/CampusWardrobeUI.cpp): the PUBG-style closet, and the lobby decor sheet
+		 *  reached from inside it. Wardrobe keeps the profile camera on the figure; Decor gives the
+		 *  scene back to the full line-up, because decor is judged against the whole room. */
+		Wardrobe, Decor,
 		/** BATTLE ROYALE queue overlay (Campus/CampusBRUI.cpp): MATCHING..., the timer, big CANCEL. */
 		Matchmaking,
 		// migration 012 / 013: the friends list, the invite picker opened from a "+ INVITE" plate, the
@@ -341,6 +345,35 @@ private:
 	void OpenMapSelect();
 	/** CONFIRM: writes the pending choice to the profile and goes back to the lobby. */
 	void ConfirmMapSelect();
+
+	// ---- wardrobe + lobby decoration (Campus/CampusWardrobeUI.cpp)
+	/** The closet: the figure on the left under the profile camera, a 3-column grid of OWNED outfits
+	 *  on the right, the three preset slots along the bottom. */
+	TSharedRef<SWidget> BuildWardrobe();
+	/** One outfit card: rarity frame, two colour swatches, name, and a tick when it is worn. */
+	TSharedRef<SWidget> BuildOutfitCard(int32 OutfitIndex);
+	/** The 1 / 2 / 3 preset row: tap to wear, SAVE to store what is being worn. */
+	TSharedRef<SWidget> BuildPresetRow();
+	/** The decor sheet: the eight anchors on the left, the owned props (and EMPTY) on the right. */
+	TSharedRef<SWidget> BuildDecorScreen();
+	/** One of the eight anchor chips along the top of the sheet. */
+	TSharedRef<SWidget> BuildDecorAnchorChip(int32 AnchorIndex);
+	/** One prop card. DecorIndex < 0 is the EMPTY card that clears the anchor. */
+	TSharedRef<SWidget> BuildDecorCard(int32 DecorIndex);
+	/** Opens the closet, asking the server for the owned list if it has not already. */
+	void OpenWardrobe();
+	/** X: writes the choice (save first, then PUT) and goes back to the lobby. */
+	void CloseWardrobe();
+	/** Equip previews INSTANTLY: the save and the lobby figure change on the tap, the PUT follows. */
+	void EquipOutfit(FName OutfitId);
+	void WearPreset(int32 Index);
+	void StorePreset(int32 Index);
+	/** Puts an item (or nothing, for NAME_None) on an anchor and rebuilds the scene at once. */
+	void SetDecorAt(int32 AnchorIndex, FName ItemId);
+	/** True when this cosmetic may be shown as wearable: owned, or free. */
+	bool OwnsCosmetic(FName Id) const;
+	/** GET /me/cosmetics, once per app run. Latched for the same reason bStorePricesQueried is. */
+	void RefreshCosmetics();
 
 	// ---- BATTLE ROYALE matchmaking (Campus/CampusBRUI.cpp). The queue itself lives in UCampusBRQueue.
 	/** True when the confirmed mode is Battle Royale, which is what makes START queue instead of
@@ -539,6 +572,17 @@ private:
 	bool bPendingBrNight = false;
 	/** Mode whose "?" rules sheet is open, or INDEX_NONE. */
 	int32 HelpMode = INDEX_NONE;
+
+	// ---- cosmetics state (Campus/CampusWardrobeUI.cpp)
+	/** GET /me/cosmetics has been asked for. LATCHED: a Build function must never start a round trip,
+	 *  and a failed read whose error path repaints would otherwise feed itself - the same trap
+	 *  bStorePricesQueried and bPresetsAsked exist for. */
+	bool bCosmeticsAsked = false;
+	/** A cosmetic PUT is in flight: every card and preset button disables, so a double tap cannot
+	 *  race two equips at the server. */
+	bool bCosmeticsBusy = false;
+	/** Which of the eight anchors the decor sheet is editing. */
+	int32 DecorAnchor = 0;
 	float SplashTime = 0.f;
 	int32 SplashTip = 0;
 	bool bSplashReady = false;
