@@ -76,7 +76,8 @@ Roles: **O** owner, **M** moderator, **C** content editor.
 | Seasons & Leaderboards | Create periods, close/compute/settle, rebuild boards, global and per-college | O |
 | Announcements | News, in-lobby notice, maintenance window, minimum app version | O C |
 | Push | Compose a campaign, pick an audience, send or schedule, see delivery counts | O |
-| Analytics | DAU/WAU, matches, revenue (Play + Razorpay), D1/D7/D30 retention, top items, crashes | O M C |
+| Revenue (phase B) | Gross revenue by day/week/month, Play Store vs Razorpay, refunds and chargebacks, top items, paying players. Shows what players paid; Play Console shows the payout after Google's fee and tax | O |
+| Analytics | DAU/WAU, matches, D1/D7/D30 retention, crashes | O M C |
 | Admins & Audit | Create admins, set roles, reset passwords, read the audit log (read-only) | O |
 
 ## Database
@@ -174,8 +175,8 @@ Solo developer + AI, starting Monday 2026-10-19 (engineering days).
 | Phase | Dates | Days | Ships | Depends on |
 | --- | --- | --- | --- | --- |
 | A Foundation | Oct 19 - Nov 3 | 12 | Admin accounts, roles, sessions, TOTP, audit; console shell; live config + `GET /v1/live-config`; maintenance, minimum version, announcements; player search and sanctions; game reads live config | nothing |
-| B Live ops and economy | Nov 4 - Nov 23 | 14 | Image uploads + `GET /v1/content/:key`; store editor; Diamond grants/refunds with approvals; live events with rewards; modes/maps/BR schedule from the database; moderation queue; remote art in game | A |
-| C Insight and reach | Nov 24 - Dec 11 | 14 | Analytics; live sessions/rooms/queues; anti-cheat review; push campaigns; seasons and college boards. In parallel: AWS Mumbai move | A, B |
+| B Live ops and economy | Nov 4 - Nov 23 | 14 | Image uploads + `GET /v1/content/:key`; store editor; Diamond grants/refunds with approvals; live events with rewards; modes/maps/BR schedule from the database; moderation queue; remote art in game; **Revenue screen** (moved up from C on owner request: daily/weekly/monthly gross from `orders`, Play Store vs Razorpay split, refunds and chargebacks, top items, paying players; read live from `orders` + `wallet_ledger`, no rollup table needed yet) | A |
+| C Insight and reach | Nov 24 - Dec 11 | 14 | Analytics (DAU, retention, matches, crashes; revenue moves onto `daily_metrics` rollups); live sessions/rooms/queues; anti-cheat review; push campaigns; seasons and college boards. In parallel: AWS Mumbai move | A, B |
 | D Content patching | Dec 14 - Jan 9 | 15 + 5 buffer | One APK adds chunk downloading; then new models, textures and map art download without an APK, with rollback | C |
 
 Milestones: M1 Oct 23 admin login + audit · M2 Nov 3 maintenance + notices · M3 Nov 12 first remote image in game · M4 Nov 23 store editable end to end · M5 Dec 4 analytics dashboard · M6 Dec 11 AWS Mumbai cutover · M7 Jan 9 first content chunk on a phone.
