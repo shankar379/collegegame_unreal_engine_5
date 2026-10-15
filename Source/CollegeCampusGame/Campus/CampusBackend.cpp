@@ -1253,14 +1253,14 @@ void UCampusBackend::LoadCosmetics(FDone Done)
 
 		if (const TSharedPtr<FJsonObject> Decor = Obj(Json, TEXT("decor")); Decor.IsValid())
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Decor->Values)
+			for (const auto& Pair : Decor->Values)
 			{
 				FString Item;
 				// A null (or anything that is not a string) is how the server says "this anchor is
 				// bare", which is the same thing as the key being absent.
 				if (Pair.Value.IsValid() && Pair.Value->TryGetString(Item) && !Item.IsEmpty())
 				{
-					LobbyDecor.Add(Pair.Key, Item);
+					LobbyDecor.Add(FString(*Pair.Key), Item);
 				}
 			}
 		}
