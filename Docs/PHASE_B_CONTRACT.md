@@ -74,7 +74,7 @@ Times in IST (`Asia/Kolkata`). Paid = `orders.status='paid'`; refunded = `status
 ### Image uploads (owner, content_editor)
 
 - Migration `026_content_assets`: `content_assets(key text pk, s3_key text, sha256 bytea, bytes int, width int, height int, content_type text, version int, active bool, uploaded_by uuid, created_at, updated_at)` **plus** `catalog_items` columns `image_key text, sale_price_diamonds int, sale_ends_at timestamptz, visible_from timestamptz, visible_until timestamptz, tags text[] default '{}'`.
-- Keys: `^[a-z0-9_]+(/[a-z0-9_]+)*$`, e.g. `store/gun_m4a1`, `event/diwali_banner`, `map/varsity_valley`, `news/patch_1`.
+- Keys: `^[a-z0-9_]+(/[a-z0-9_]+)*$`, e.g. `store/gun_m4a1`, `event/diwali_banner`, `map/classic`, `map/campusmap`, `map/varsityvalley` (game client ids, lowercase: this exact spelling), `news/patch_1`.
 - `POST /v1/admin/content?key=<key>` raw body `image/png` or `image/jpeg`, max 2 MB, max 2048x2048; decoded and re-encoded server-side (reuse `api/src/lib/avatar.js` approach); new upload of an existing key bumps `version`.
 - `GET /v1/admin/content` list; `DELETE /v1/admin/content/:key` retires (active=false).
 - Game-facing `GET /v1/content/:key?v=<version>` → bytes, strong ETag, `Cache-Control: public, max-age=31536000, immutable`.

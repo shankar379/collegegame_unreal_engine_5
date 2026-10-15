@@ -591,8 +591,14 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildShowcaseTab()
 						{
 							// Tapping the equipped title clears it, which is how a player takes a
 							// title OFF without hunting for a separate control.
-							Live->EquipTitle(bEquipped ? FString() : ItemId, [this](bool bOk, const FString& Error)
+								// Weak, for the reason spelled out in EnsureAvatarPresets further down this file.
+							TWeakPtr<SWidget> Weak = AsWeak();
+							Live->EquipTitle(bEquipped ? FString() : ItemId, [this, Weak](bool bOk, const FString& Error)
 							{
+								if (!Weak.IsValid())
+								{
+									return;
+								}
 								if (!bOk)
 								{
 									Toast(Error);
@@ -823,8 +829,14 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildHistoryTab()
 						}
 						bHistoryLoading = true;
 						Refresh();
-						Live->LoadHistory(Who, Before, [this](bool bOk, const FString& Error, const FCampusProfile& Page2)
+						TWeakPtr<SWidget> Weak = AsWeak();
+						Live->LoadHistory(Who, Before,
+							[this, Weak](bool bOk, const FString& Error, const FCampusProfile& Page2)
 						{
+							if (!Weak.IsValid())
+							{
+								return;
+							}
 							bHistoryLoading = false;
 							if (bOk && ProfileData.IsValid())
 							{
@@ -861,13 +873,9 @@ void SCampusLobbyWidget::CloseProfile()
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildProfile()
 {
-	// The camera moves and the rest of the line-up hides, so the figure stands at about 25 % across
-	// the screen with the panel beside it. Nothing in the lobby's own geometry is touched.
-	if (Controller.IsValid())
-	{
-		Controller->FocusProfile(true);
-	}
-
+	// THE CAMERA MOVE LIVES IN Show(), NOT HERE. It stands the figure at about 25 % across the screen
+	// with the panel beside it, and it is a SCENE CHANGE - while this function runs on every repaint,
+	// and this page repaints on every tab tap, every like and every reply. Same cut as the wardrobe's.
 	const bool bMine = !ProfileData.IsValid() || ProfileData->bMine;
 
 	TSharedRef<SHorizontalBox> ProfileTabs = SNew(SHorizontalBox);
@@ -961,8 +969,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildProfile()
 						// the reason (one like per player per day).
 						OptimisticLikes.Add(Who);
 						Refresh();
-						Live->LikePlayer(Who, [this, Who, Name](bool bOk, const FString& Error)
+						TWeakPtr<SWidget> Weak = AsWeak();
+						Live->LikePlayer(Who, [this, Weak, Who, Name](bool bOk, const FString& Error)
 						{
+							if (!Weak.IsValid())
+							{
+								return;
+							}
 							if (!bOk)
 							{
 								OptimisticLikes.Remove(Who);
@@ -988,8 +1001,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildProfile()
 					{
 						if (UCampusSocial* Live = Social())
 						{
-							Live->BlockPlayer(Who, [this](bool bOk, const FString& Error)
+							TWeakPtr<SWidget> Weak = AsWeak();
+							Live->BlockPlayer(Who, [this, Weak](bool bOk, const FString& Error)
 							{
+								if (!Weak.IsValid())
+								{
+									return;
+								}
 								if (!bOk)
 								{
 									Toast(Error);
@@ -1000,6 +1018,12 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildProfile()
 					});
 				return FReply::Handled();
 			}), EButton::Ghost, 17, FVector2D(150.f, 52.f))
+		];
+		// REPORT, beside BLOCK and deliberately not folded into it: a block is MY OWN list, a report
+		// is the moderation queue, and a player who wants one often does not want the other.
+		Actions->AddSlot().AutoWidth().Padding(0.f, 0.f, 10.f, 0.f)
+		[
+			BuildReportButton(Who, Name, FString(), 52.f)
 		];
 	}
 	else if (ProfileData.IsValid())

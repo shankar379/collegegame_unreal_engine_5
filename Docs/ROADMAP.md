@@ -17,10 +17,10 @@ Started 2026-10-15. Items are ticked as they are finished, verified and pushed. 
 - [x] Revenue screen: Play Store vs Razorpay, refunds, top items (`103f0fd`)
 - [x] Store and economy editor: prices, sales, bundles (`103f0fd`)
 - [x] Diamond grants and refunds, second owner's approval above a limit (`103f0fd`)
-- [ ] Image uploads + game shows remote banners and store art without a new APK — backend + console done (`103f0fd`); game side next
-- [ ] Live events with rewards — backend + console done (`103f0fd`); game banner/claim next
-- [ ] Modes, maps and BR schedule from the admin panel — backend + console done (`103f0fd`); game reads blob next
-- [ ] Moderation queue for player reports — backend + console done (`103f0fd`); in-game report button next
+- [x] Image uploads + game shows remote banners and store art without a new APK (backend `103f0fd`, game next commit)
+- [x] Live events with rewards (backend `103f0fd`, game next commit)
+- [x] Modes, maps and BR schedule from the admin panel (backend `103f0fd`, game next commit)
+- [x] Moderation queue for player reports (backend `103f0fd`, game next commit)
 - [ ] Push notifications for invites (optional) **(you: decide; create a Firebase project)**
 
 ## 3. Admin phase C

@@ -19,6 +19,7 @@
 #include "Campus/CampusBackend.h"
 
 #include "Campus/CampusBackendInternal.h"
+#include "Campus/CampusRemoteImage.h"
 #include "Campus/CampusSave.h"
 #include "HttpModule.h"
 #include "Interfaces/IHttpResponse.h"
@@ -122,9 +123,20 @@ void UCampusBackend::ReadLiveConfig(TSharedPtr<FJsonObject> Json, bool bFromCach
 			Row.EndsAt = Stamp(Item, TEXT("ends_at"));
 		}
 	}
-	// Every other published key is ignored on purpose: this build can only act on ids it already
+	// THE PHASE B KEYS. Three published objects this build now reads, each in its own file and each
+	// able to do strictly less than the APK already can: `content` can only point at a picture for a
+	// key, `events` can only describe a window and its rewards, `modes` can only hide or reorder ids
+	// CampusCatalog already has. An absent key leaves its struct empty and the compiled-in values
+	// standing - which is also what an older server, with none of them published, looks like.
+	ReadContentKey(Obj(Json, TEXT("content")), Out.Content);
+	ReadEventsKey(Obj(Json, TEXT("events")), Out.Events);
+	ReadModesKey(Obj(Json, TEXT("modes")), Out.Modes);
+	// Every OTHER published key is still ignored on purpose: this build can only act on ids it already
 	// knows, and a key it invents a meaning for is a second source of truth waiting to drift.
 	LiveConfig = MoveTemp(Out);
+	// A RE-UPLOAD IS A NEW VERSION, so the decoded bytes of the old one can never be wanted again.
+	// Dropped here rather than on a timer: this is the one moment the published version can move.
+	CampusRemoteImage::ForgetStale();
 	if (!bFromCache && LiveConfig.MinClientBuild <= ClientBuild())
 	{
 		// A LIVE BLOB WHOSE FLOOR THIS BUILD MEETS IS THE SERVER SAYING THIS BUILD IS FINE, which is

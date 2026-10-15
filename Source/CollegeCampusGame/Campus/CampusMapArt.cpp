@@ -1,12 +1,10 @@
 ﻿#include "Campus/CampusMapArt.h"
 
+#include "Campus/CampusRemoteImage.h"
 #include "Engine/Texture2D.h"
 #include "Framework/Application/SlateApplication.h"
-#include "IImageWrapper.h"
-#include "IImageWrapperModule.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "Modules/ModuleManager.h"
 #include "Rendering/DrawElements.h"
 #include "Rendering/SlateRenderer.h"
 #include "Styling/CoreStyle.h"
@@ -214,41 +212,10 @@ namespace CampusMapArt
 			{
 				return nullptr;
 			}
-			IImageWrapperModule& Module = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
-			const TSharedPtr<IImageWrapper> Png = Module.CreateImageWrapper(EImageFormat::PNG);
-			if (!Png.IsValid() || !Png->SetCompressed(Bytes.GetData(), Bytes.Num()))
-			{
-				return nullptr;
-			}
-			TArray64<uint8> Raw;
-			if (!Png->GetRaw(ERGBFormat::BGRA, 8, Raw))
-			{
-				return nullptr;
-			}
-			const int32 Width = Png->GetWidth();
-			const int32 Height = Png->GetHeight();
-			if (Width <= 0 || Height <= 0 || Raw.Num() < int64(Width) * Height * 4)
-			{
-				return nullptr;
-			}
-			UTexture2D* Texture = UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8);
-			if (!Texture)
-			{
-				return nullptr;
-			}
-			Texture->SRGB = true;
-			Texture->NeverStream = true;
-			Texture->LODGroup = TEXTUREGROUP_UI;
-			Texture->Filter = TF_Bilinear;
-			Texture->AddressX = TA_Clamp;
-			Texture->AddressY = TA_Clamp;
-			FTexture2DMipMap& Mip = Texture->GetPlatformData()->Mips[0];
-			void* Pixels = Mip.BulkData.Lock(LOCK_READ_WRITE);
-			FMemory::Memcpy(Pixels, Raw.GetData(), int64(Width) * Height * 4);
-			Mip.BulkData.Unlock();
-			Texture->UpdateResource();
-			Texture->AddToRoot();
-			return Texture;
+			// ONE DECODER FOR THE WHOLE GAME (Campus/CampusRemoteImage.h): a packaged banner, an
+			// avatar and the console's uploaded art are the same problem - image bytes in, a rooted
+			// transient UI texture out - and this file used to carry its own copy of the answer.
+			return CampusRemoteImage::DecodeTexture(Bytes.GetData(), Bytes.Num());
 		}
 	}
 
@@ -317,6 +284,7 @@ void SCampusArtPlate::Construct(const FArguments& InArgs)
 {
 	Shape = InArgs._Shape;
 	Art = InArgs._Art;
+	RemoteKey = InArgs._RemoteKey;
 	Tint = InArgs._Tint;
 	Border = InArgs._Border;
 	BorderWidth = InArgs._BorderWidth;
@@ -370,8 +338,17 @@ int32 SCampusArtPlate::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 		Face.A = Tint.Get(FLinearColor::White).A;
 	}
 
+	// THE CONSOLE'S PICTURE FIRST, when there is one and it has landed. Get() is what starts the ONE
+	// fetch for this key, and it refuses outright for a key the published blob does not name - so a
+	// card with no remote art costs a TMap lookup and nothing else.
+	const CampusRemoteImage::FImage* Remote = RemoteKey.IsEmpty() ? nullptr : &CampusRemoteImage::Get(RemoteKey);
 	const CampusMapArt::FArt& Picture = CampusMapArt::Get(Art);
-	if (Picture.IsValid())
+	if (Remote && Remote->IsReady())
+	{
+		CampusAngular::DrawShapedImage(OutDrawElements, LayerId, AllottedGeometry, Zero, Size, Shape,
+			Remote->Handle, Remote->Size, Face, FocusY);
+	}
+	else if (Picture.IsValid())
 	{
 		CampusAngular::DrawShapedImage(OutDrawElements, LayerId, AllottedGeometry, Zero, Size, Shape,
 			Picture.Handle, Picture.Size, Face, FocusY);

@@ -716,6 +716,20 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 		// resume - the tunnel is metered at 20,000 requests a month.
 		RefreshLiveConfig();
 	}
+	if (bEntering && Screen == EScreen::Event)
+	{
+		// ONE progress read per visit to the sheet (GET /v1/events/:id/progress), started here and
+		// never from BuildEvent: a Build function runs on every repaint, and its own reply repaints.
+		OpenEventSheet();
+	}
+	if (bEntering && Screen == EScreen::Profile && Controller.IsValid())
+	{
+		// THE CAMERA MOVES TO THE FIGURE on the way IN, exactly like the wardrobe below - and for the
+		// same reason it was moved out of BuildWardrobe: the profile page repaints on every tab tap,
+		// every like and every reply, and from inside BuildProfile this was a scene change dozens of
+		// times over for one visit. The matching FocusProfile(false) is the exception list further down.
+		Controller->FocusProfile(true);
+	}
 	if (bEntering && Screen == EScreen::Wardrobe && Controller.IsValid())
 	{
 		// THE CAMERA MOVES TO THE FIGURE, and the rest of the line-up hides: the SAME call the profile
@@ -900,7 +914,11 @@ void SCampusLobbyWidget::AfterSignIn()
 	if (UCampusGameInstance* Instance = Controller.IsValid() ? Controller->GetCampusInstance() : nullptr)
 	{
 		Instance->bSignedIn = true;
-		const bool bShowEvent = !Instance->bEventSeen;
+		// ONCE PER APP RUN, AND ONLY WHEN THERE IS SOMETHING TO SHOW. The sheet used to be a hard-coded
+		// card that was always worth opening; it is the console's live event now, and opening a "NO
+		// EVENT RUNNING" sheet in a player's face on sign-in is worse than not opening it at all. The
+		// blob is read from the save in UCampusBackend::Initialize, so this is true on the first frame.
+		const bool bShowEvent = !Instance->bEventSeen && Api && Api->LiveEvent() != nullptr;
 		Instance->bEventSeen = true;
 		Show(bShowEvent ? EScreen::Event : EScreen::Lobby);
 		return;

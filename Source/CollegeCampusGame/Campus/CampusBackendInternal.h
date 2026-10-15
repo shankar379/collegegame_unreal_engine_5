@@ -10,6 +10,10 @@
 //                                 the 18+ tick, the college list, GET /me and PATCH /me
 //   CampusBackendEngagement.cpp   streak, missions, weekend board, and the claims for all three
 //   CampusBackendLiveConfig.cpp   maintenance, minimum build, announcements
+//   CampusBackendContent.cpp      blob key `content`: which version of each uploaded picture is live
+//   CampusBackendEvents.cpp       blob key `events`, plus /events/:id/progress and /claim
+//   CampusBackendModes.cpp        blob key `modes`: which modes and maps are on, and the BR schedule
+//   CampusBackendReports.cpp      POST /players/:id/report, the one moderation call the game makes
 //   CampusBackendStore.cpp        the gun store and the Play Console product map
 //   CampusBackendCosmetics.cpp    the wardrobe's outfits and the lobby's eight decor anchors
 //   CampusBackendPayments.cpp     Razorpay and Google Play, the pending order and its polling

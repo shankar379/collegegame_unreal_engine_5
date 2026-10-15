@@ -21,6 +21,9 @@ struct FCampusGun
 	FString Description;
 	FString Badge;
 	TArray<FString> Perks;
+	/** `image_key`: a `content` key for the tile picture the console uploaded. Empty on a server (or
+	 *  an item) with no art published, and the drawn silhouette is then what the tile shows. */
+	FString ImageKey;
 	int32 PriceDiamonds = 0;   // 0 = not sold for Diamonds
 	float PriceInr = 0.f;      // 0 = not sold for money
 	bool bOwned = false;
@@ -64,6 +67,8 @@ struct FCampusOffer
 	FString Description;
 	FString Badge;
 	TArray<FString> Perks;
+	/** `image_key`, as on FCampusGun: the console's own picture for this pack or bundle. */
+	FString ImageKey;
 	float PriceInr = 0.f;
 };
 
@@ -271,6 +276,154 @@ struct FCampusAnnouncement
 	}
 };
 
+// ---- the PHASE B published keys. Three more blobs ride in the same answer, and each one can only
+//      point at, enable, order or schedule something this build already knows how to draw.
+
+/** Blob key `content`: which version of each uploaded picture is current. The bytes live at
+ *  <base_url>/<key>?v=<version> and are immutable, so a version IS a cache key - see
+ *  Campus/CampusRemoteImage.h, which is the only reader. */
+struct FCampusContentIndex
+{
+	bool bLoaded = false;
+	/** "/v1/content" as published; origin-relative, resolved by CampusRemoteImage::ResolveUrl. */
+	FString BaseUrl;
+	TMap<FString, int32> Versions;
+};
+
+/** One row of an event's `rewards[]`. The CONDITION is counted by the server; the client only draws
+ *  the progress GET /v1/events/:id/progress hands back, and never decides eligibility itself. */
+struct FCampusEventReward
+{
+	/** diamonds | room_cards | item */
+	FString Kind;
+	/** Set only when Kind is "item". */
+	FString ItemId;
+	int32 Amount = 0;
+	/** A MAP wire name (classic | campus | real) narrowing the count, or empty for any rated match.
+	 *  `rooms.map` is the only per-match discriminator the schema records (routes/adminevents.js). */
+	FString Mode;
+	int32 Matches = 0;
+
+	/** "50 DIAMONDS" / "1 ROOM CARD" / an item id, already uppercase for the display face. */
+	FString Describe() const;
+};
+
+/** One row of blob key `events`. Every entry carries its own window, because the blob is cached: the
+ *  CLIENT decides "running now" versus "starts Friday" from its own clock. */
+struct FCampusEvent
+{
+	int32 Id = 0;
+	FString Label;
+	/** scheduled | live, as the console last published it. The WINDOW is what the client trusts. */
+	FString State;
+	FDateTime StartsAt = FDateTime();
+	FDateTime EndsAt = FDateTime();
+	/** A `content` key for the banner, empty when the event ships without art. */
+	FString BannerKey;
+	/** 1.0 when the console published no multiplier, which is why neither field is optional here. */
+	float XpMultiplier = 1.f;
+	float PointsMultiplier = 1.f;
+	TArray<FCampusEventReward> Rewards;
+
+	bool IsLiveAt(const FDateTime& Now) const { return StartsAt <= Now && EndsAt > Now; }
+	bool HasMultiplier() const { return XpMultiplier != 1.f || PointsMultiplier != 1.f; }
+};
+
+struct FCampusEvents
+{
+	bool bLoaded = false;
+	/** How far ahead the console asks the game to show an upcoming event. Advice, not a filter. */
+	int32 HorizonDays = 7;
+	TArray<FCampusEvent> Events;
+};
+
+/** GET /v1/events/:id/progress, one row per reward. `claimable` is the SERVER's answer, so the
+ *  button is never enabled for a claim the API would refuse. */
+struct FCampusEventRewardProgress
+{
+	int32 Index = 0;
+	FString Kind;
+	FString ItemId;
+	int32 Amount = 0;
+	FString Mode;
+	int32 Progress = 0;
+	int32 Target = 0;
+	bool bClaimed = false;
+	bool bClaimable = false;
+
+	float Fraction() const { return Target > 0 ? FMath::Clamp(float(Progress) / float(Target), 0.f, 1.f) : 1.f; }
+	FString Describe() const;
+};
+
+struct FCampusEventProgress
+{
+	bool bValid = false;
+	int32 EventId = 0;
+	FString Label;
+	FString State;
+	FString BannerKey;
+	FDateTime EndsAt = FDateTime();
+	TArray<FCampusEventRewardProgress> Rewards;
+};
+
+/** One row of blob key `modes`. Ids are the ones CampusCatalog already knows; anything else is
+ *  ignored, because this build can only offer a mode it has code for. */
+struct FCampusModeRow
+{
+	FString Id;
+	bool bEnabled = true;
+	int32 Sort = 0;
+	TArray<int32> TeamSizes;
+	/** MAP WIRE NAMES (classic | campus | real), not client ids. */
+	TArray<FString> MapIds;
+	int32 MaxPlayers = 0;
+};
+
+/** One row of `modes.maps[]`. `client_id` is the bridge to CampusCatalog::FMapEntry::Id. */
+struct FCampusMapRow
+{
+	/** The wire name: classic | campus | real. */
+	FString Id;
+	/** Classic | CampusMap | VarsityValley - what this build calls the same map. */
+	FString ClientId;
+	FString Name;
+	bool bEnabled = true;
+	int32 Sort = 0;
+	int32 MaxPlayers = 0;
+};
+
+/** One row of `modes.br_schedule[]`: an IST WALL-CLOCK rule with no date, which is why the times are
+ *  carried as "HH:MM" and evaluated on the device rather than stored as an instant. */
+struct FCampusBrWindow
+{
+	/** ISO weekday numbers, 1 = Monday. A window that wraps past midnight names the day it STARTS. */
+	TArray<int32> Days;
+	FString StartIst;
+	FString EndIst;
+	/** day | night | auto - the lighting the server will hand out; the card's chip is a preference. */
+	FString TimeOfDay;
+	bool bEnabled = false;
+	FString Note;
+
+	/** Minutes since midnight for StartIst / EndIst, or INDEX_NONE when the string is unreadable. */
+	int32 StartMinutes() const;
+	int32 EndMinutes() const;
+	/** True when IstNow falls inside this window, midnight wrap included. */
+	bool IsOpenAt(const FDateTime& IstNow) const;
+	/** "FRI-SUN 21:00-23:30", for the card that has to say when. */
+	FString Describe() const;
+};
+
+struct FCampusModes
+{
+	bool bLoaded = false;
+	/** "Asia/Kolkata". Carried so the card can say IST rather than assuming it. */
+	FString Tz;
+	TArray<FCampusModeRow> Modes;
+	TArray<FCampusMapRow> Maps;
+	TArray<FCampusBrWindow> BrSchedule;
+};
+
 /** The published blob, as this build reads it. Unknown keys are left alone, deliberately. */
 struct FCampusLiveConfig
 {
@@ -292,6 +445,12 @@ struct FCampusLiveConfig
 	/** Where the update lives, when the console has published one (`update_url` / `store_url`). */
 	FString UpdateUrl;
 	TArray<FCampusAnnouncement> Announcements;
+	/** PHASE B's three keys, read as part of the blob so they are replaced atomically with it. Each
+	 *  stays empty until the console publishes it, and the compiled-in values are the fallback
+	 *  throughout: an absent `modes` key means CampusCatalog decides, exactly as it did before. */
+	FCampusContentIndex Content;
+	FCampusEvents Events;
+	FCampusModes Modes;
 };
 
 UCLASS()
@@ -397,6 +556,58 @@ public:
 	TArray<FCampusAnnouncement> ActiveAnnouncements() const;
 	/** X on a card: remembered in the save, so it never comes back on this phone. */
 	void DismissAnnouncement(const FString& Id);
+
+	// ---- content (blob key `content`, Campus/CampusBackendContent.cpp). The console's uploaded art:
+	//      the only reader is Campus/CampusRemoteImage.h, which never fetches a key this does not name.
+	const FCampusContentIndex& GetContent() const { return LiveConfig.Content; }
+	/** The published version of a content key, or 0 when the blob does not name it. */
+	int32 ContentVersionOf(const FString& Key) const;
+	/** The absolute URL for <key> at its published version, or empty when there is no such key. */
+	FString ContentUrlFor(const FString& Key) const;
+
+	// ---- live events (blob key `events` + the two player routes, Campus/CampusBackendEvents.cpp)
+	const FCampusEvents& GetEvents() const { return LiveConfig.Events; }
+	/** The event running RIGHT NOW by the server clock, or null. The first one when several overlap:
+	 *  the blob is ordered by starts_at, so that is the one that has been running longest. */
+	const FCampusEvent* LiveEvent() const;
+	/** What the lobby may show: the live event first, then anything starting inside the published
+	 *  horizon. Filtered on the CLIENT, because the blob is cached and cannot depend on now(). */
+	TArray<FCampusEvent> VisibleEvents() const;
+	const FCampusEvent* FindEvent(int32 EventId) const;
+	using FEventProgressDone = TFunction<void(bool bOk, const FString& Error, const FCampusEventProgress& Progress)>;
+	/** GET /v1/events/:id/progress: the window, the rewards, and this player's progress against each. */
+	void LoadEventProgress(int32 EventId, FEventProgressDone Done);
+	/** POST /v1/events/:id/claim {reward_index} with an Idempotency-Key. The new wallet comes back on
+	 *  the response and is read from it, never added up here. */
+	void ClaimEventReward(int32 EventId, int32 RewardIndex, FDone Done);
+
+	// ---- modes, maps and the battle-royale schedule (blob key `modes`,
+	//      Campus/CampusBackendModes.cpp). THE BLOB MAY ONLY TAKE AWAY OR REORDER what this build
+	//      already has: an id it does not know is ignored, and a key it never published is CampusCatalog.
+	const FCampusModes& GetModes() const { return LiveConfig.Modes; }
+	/** False only when the blob names this mode AND says it is off. No blob = the compiled answer. */
+	bool IsModeEnabled(const FString& ModeId) const;
+	/** The same, by the CLIENT map id (Classic / CampusMap / VarsityValley). */
+	bool IsMapEnabled(const FString& ClientMapId) const;
+	/** The console's running order, or INDEX_NONE when the blob says nothing about this id. */
+	int32 ModeSortOf(const FString& ModeId) const;
+	int32 MapSortOf(const FString& ClientMapId) const;
+	/** True when a battle-royale window is open at this instant, and true when no schedule has been
+	 *  published at all: an empty schedule is "no restriction", never "closed for ever". */
+	bool IsBattleRoyaleOpenNow() const;
+	/** "FRI-SUN 21:00-23:30 IST", or empty when nothing is scheduled. For the card that says when. */
+	FString BattleRoyaleWindowText() const;
+
+	// ---- moderation (Campus/CampusBackendReports.cpp)
+	/** The report's outcome. bOk = THE REPORT IS ON THE SERVER, which includes the 409: a row that is
+	 *  already there is the same fact from the player's side and must never read as a failure they
+	 *  caused. bAlreadySent says which of the two it was, so the words can differ. Message is always
+	 *  the one sentence to show - on success it is empty and the caller writes its own. */
+	using FReportDone = TFunction<void(bool bOk, bool bAlreadySent, const FString& Message)>;
+	/** POST /v1/players/:id/report with an Idempotency-Key. Reason is one of cheating | abuse | name |
+	 *  afk | other, which is the whole vocabulary a moderator can act on. RoomCode is the match it
+	 *  happened in, empty from a friends list. */
+	void ReportPlayer(const FString& TargetId, const FString& Reason, const FString& RoomCode, FReportDone Done);
 
 	// ---- store
 	void LoadStore(FDone Done);
@@ -550,6 +761,13 @@ private:
 	/** Applies a live-config body. bFromCache drops `maintenance.on` and marks the minimum build as
 	 *  not-live: only a live answer may lock the game or gate it on a version. */
 	void ReadLiveConfig(TSharedPtr<FJsonObject> Json, bool bFromCache);
+	/** The three PHASE B keys. Pure readers of one published object each, so an absent or malformed
+	 *  key simply leaves its struct empty and the compiled-in fallback standing. */
+	static void ReadContentKey(const TSharedPtr<FJsonObject>& Key, FCampusContentIndex& Out);
+	static void ReadEventsKey(const TSharedPtr<FJsonObject>& Key, FCampusEvents& Out);
+	static void ReadModesKey(const TSharedPtr<FJsonObject>& Key, FCampusModes& Out);
+	/** Now in IST wall-clock terms, which is the only frame a br_schedule row means anything in. */
+	FDateTime IstNow() const;
 	/** Re-reads the blob held in the save. Returns false when there is nothing there to read, or it
 	 *  does not parse. bFromCache is forwarded verbatim: FALSE is correct on a 304, where the server
 	 *  has just told us these exact bytes ARE the current revision. */

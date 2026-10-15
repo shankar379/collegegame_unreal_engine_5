@@ -8,10 +8,16 @@
 //
 // Reached from the plate above START in the lobby, and it writes back to that plate. Nothing here
 // is decided twice: the rows come from CampusCatalog and the pictures from CampusMapArt.
+//
+// WHAT THE ADMIN CONSOLE MAY CHANGE ABOUT THIS SCREEN (PHASE_B_CONTRACT B3): which modes and maps
+// are offered and in what order (`modes`), the banner pictures (`content`, keyed `map/<client id>`),
+// and when battle royale is open (`br_schedule`, IST). It may only ever HIDE or REORDER what this
+// APK already has - the compiled catalogue is still the only list of levels this build can open.
 
 #include "Campus/CampusUI.h"
 
 #include "Campus/CampusAngular.h"
+#include "Campus/CampusBackend.h"
 #include "Campus/CampusMapArt.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "Campus/CampusSave.h"
@@ -75,6 +81,88 @@ namespace
 }
 
 // -------------------------------------------------------------------------------------------------
+// What the console is allowed to change about this screen (PHASE_B_CONTRACT B3): which modes and maps
+// are offered, and in what order. The compiled catalogue is what this APK can actually open, so the
+// blob may only HIDE or REORDER its rows - never add one.
+
+FString SCampusLobbyWidget::MapBannerKey(const TCHAR* MapId)
+{
+	return MapId ? FString(TEXT("map/")) + FString(MapId).ToLower() : FString();
+}
+
+namespace
+{
+	/** The console's running order for one id, or a key past every published sort so an id the blob
+	 *  says nothing about keeps its compiled position at the end. */
+	int64 SelectSortKey(int32 Published, int32 CompiledIndex)
+	{
+		return Published == INDEX_NONE ? 1000000 + int64(CompiledIndex) : int64(Published) * 1000 + CompiledIndex;
+	}
+}
+
+void SCampusLobbyWidget::OrderedMaps(TArray<int32>& Out) const
+{
+	const UCampusBackend* Api = Backend();
+	Out.Reset(CampusCatalog::NumMaps);
+	for (int32 Index = 0; Index < CampusCatalog::NumMaps; ++Index)
+	{
+		if (!Api || Api->IsMapEnabled(CampusCatalog::Map(Index).Id))
+		{
+			Out.Add(Index);
+		}
+	}
+	if (Out.Num() == 0)
+	{
+		// EVERYTHING OFF IS A MISTAKE, not an instruction. A screen with no maps on it is the game
+		// taken away by a switch nobody meant to flip, so the compiled list stands.
+		for (int32 Index = 0; Index < CampusCatalog::NumMaps; ++Index)
+		{
+			Out.Add(Index);
+		}
+		return;
+	}
+	if (!Api)
+	{
+		return;
+	}
+	Out.Sort([Api](int32 A, int32 B)
+	{
+		return SelectSortKey(Api->MapSortOf(CampusCatalog::Map(A).Id), A)
+			< SelectSortKey(Api->MapSortOf(CampusCatalog::Map(B).Id), B);
+	});
+}
+
+void SCampusLobbyWidget::OrderedModes(TArray<int32>& Out) const
+{
+	const UCampusBackend* Api = Backend();
+	Out.Reset(CampusCatalog::NumModes);
+	for (int32 Index = 0; Index < CampusCatalog::NumModes; ++Index)
+	{
+		if (!Api || Api->IsModeEnabled(CampusCatalog::Mode(Index).Id))
+		{
+			Out.Add(Index);
+		}
+	}
+	if (Out.Num() == 0)
+	{
+		for (int32 Index = 0; Index < CampusCatalog::NumModes; ++Index)
+		{
+			Out.Add(Index);
+		}
+		return;
+	}
+	if (!Api)
+	{
+		return;
+	}
+	Out.Sort([Api](int32 A, int32 B)
+	{
+		return SelectSortKey(Api->ModeSortOf(CampusCatalog::Mode(A).Id), A)
+			< SelectSortKey(Api->ModeSortOf(CampusCatalog::Mode(B).Id), B);
+	});
+}
+
+// -------------------------------------------------------------------------------------------------
 // The lobby plate, above START
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildModePlate()
@@ -133,6 +221,20 @@ void SCampusLobbyWidget::OpenMapSelect()
 	PendingMap = SelectedMap;
 	PendingMode = SelectedMode;
 	HelpMode = INDEX_NONE;
+	// A SELECTION THE CONSOLE HAS SINCE SWITCHED OFF cannot be shown as selected, and must not be
+	// what CONFIRM writes back: the screen opens on the first row that is still offered instead.
+	TArray<int32> Maps;
+	TArray<int32> Modes;
+	OrderedMaps(Maps);
+	OrderedModes(Modes);
+	if (!Modes.Contains(PendingMode))
+	{
+		PendingMode = Modes[0];
+	}
+	if (!Maps.Contains(PendingMap))
+	{
+		PendingMap = Maps[0];
+	}
 	if (const UCampusSave* Save = Profile())
 	{
 		bPendingRandomMap = Save->bRandomMap;
@@ -205,6 +307,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapBanner(int32 Index)
 	return SNew(SCampusArtPlate)
 		.Shape(FCampusShape::Notched(18.f))
 		.Art(Entry.Art)
+		// The console's banner for this map when it has uploaded one; the packaged PNG otherwise.
+		.RemoteKey(MapBannerKey(Entry.Id))
 		.FocusY(0.56f)
 		.Tint(bLocked ? SelectTintLocked : (bSelected ? SelectTintOn : SelectTintOff))
 		.ScrimStrength(bSelected ? 0.30f : 0.42f)
@@ -225,7 +329,11 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapBanner(int32 Index)
 			// Keep the mode honest: if it does not run on this map, move to one that does.
 			if (!CampusCatalog::ModeHasMap(PendingMode, FName(CampusCatalog::Map(Index).Id)))
 			{
-				for (int32 Scan = 0; Scan < CampusCatalog::NumModes; ++Scan)
+				// Only a mode that is still OFFERED can be moved to: a console that switched Quick
+				// Match off must not have it selected behind the player's back by a map tap.
+				TArray<int32> Offered;
+				OrderedModes(Offered);
+				for (const int32 Scan : Offered)
 				{
 					if (CampusCatalog::Mode(Scan).bPlayable && CampusCatalog::ModeHasMap(Scan, FName(CampusCatalog::Map(Index).Id)))
 					{
@@ -274,7 +382,18 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeCard(int32 Index)
 			.ColorAndOpacity(bLocked ? FLinearColor(1.f, 1.f, 1.f, 0.30f) : Muted)
 		];
 
-	if (Entry.Window && *Entry.Window)
+	// THE CLOCK ROW, from either of two places. A compiled window (FModeEntry::Window) is a card that
+	// has always been time-limited; the BATTLE-ROYALE SCHEDULE is the console's, published in the
+	// `modes` blob as IST wall-clock rules, and it is only worth the row when the window is SHUT - a
+	// mode that can be played right now should say nothing at all.
+	const UCampusBackend* Api = Backend();
+	const bool bIsBattleRoyale = FName(Entry.Id) == FName(TEXT("BattleRoyale"));
+	FString WindowText = Entry.Window ? FString(Entry.Window) : FString();
+	if (WindowText.IsEmpty() && bIsBattleRoyale && Api && !Api->IsBattleRoyaleOpenNow())
+	{
+		WindowText = Api->BattleRoyaleWindowText();
+	}
+	if (!WindowText.IsEmpty())
 	{
 		// Time-limited card: the clock row says when, the padlock says not now.
 		Text->AddSlot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
@@ -287,8 +406,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeCard(int32 Index)
 			]
 			+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
 			[
-				SNew(STextBlock).Text(FText::FromString(Entry.Window)).Font(CampusAngular::Body(13))
-				.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.42f))
+				SNew(STextBlock).Text(FText::FromString(WindowText)).Font(CampusAngular::Body(13))
+				.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.42f)).AutoWrapText(true)
 			]
 		];
 	}
@@ -296,7 +415,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeCard(int32 Index)
 	// BATTLE ROYALE carries its own DAY / NIGHT choice. It sits on the card (not in a submenu) because
 	// it is the only per-mode setting there is, and it is drawn ABOVE the card so the tap toggles the
 	// lighting instead of re-selecting the mode - the same trick the green "?" uses.
-	const bool bHasDayNight = !bLocked && FName(Entry.Id) == FName(TEXT("BattleRoyale"));
+	const bool bHasDayNight = !bLocked && bIsBattleRoyale;
 	if (bHasDayNight)
 	{
 		const bool bNight = bPendingBrNight;
@@ -445,10 +564,15 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 		.Orientation(Orient_Horizontal)
 		.ScrollBarVisibility(EVisibility::Collapsed)
 		.AllowOverscroll(EAllowOverscroll::Yes);
+	// THE PUBLISHED ORDER, with anything the console switched off left out. The two passes stay: the
+	// one wide 50-player card has to lead the row whatever sort the console gives it, because the
+	// layout - not the running order - is what makes it wide.
+	TArray<int32> Maps;
+	OrderedMaps(Maps);
 	bool bFirst = true;
 	for (const bool bLargePass : { true, false })
 	{
-		for (int32 Index = 0; Index < CampusCatalog::NumMaps; ++Index)
+		for (const int32 Index : Maps)
 		{
 			if (CampusCatalog::Map(Index).bLarge != bLargePass)
 			{
@@ -462,10 +586,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 		}
 	}
 
+	TArray<int32> Modes;
+	OrderedModes(Modes);
 	TSharedRef<SScrollBox> ModeList = SNew(SScrollBox).ScrollBarVisibility(EVisibility::Collapsed);
-	for (int32 Index = 0; Index < CampusCatalog::NumModes; ++Index)
+	for (int32 Slot = 0; Slot < Modes.Num(); ++Slot)
 	{
-		ModeList->AddSlot().Padding(0.f, Index == 0 ? 0.f : 10.f, 0.f, 0.f)
+		const int32 Index = Modes[Slot];
+		ModeList->AddSlot().Padding(0.f, Slot == 0 ? 0.f : 10.f, 0.f, 0.f)
 		[
 			// Fixed height: the list must not reflow when the selection moves between cards, and the
 			// tallest card (BATTLE ROYALE, with its DAY / NIGHT chip) sets it for all of them.

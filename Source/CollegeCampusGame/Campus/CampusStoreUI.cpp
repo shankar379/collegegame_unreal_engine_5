@@ -10,6 +10,11 @@
 //     player cannot afford does not show a dead BUY: it shows BUY DIAMONDS and jumps to the diamonds tab,
 //     which is the only useful thing that tap could do.
 //
+// TILE ART COMES FROM THE CONSOLE WHEN THERE IS ANY (PHASE_B_CONTRACT B2): an item whose `image_key` names a
+// published picture shows it, and the drawn silhouette below is what every other item still shows. The two
+// layers are built together and swapped by VISIBILITY, so an uploaded picture appears the moment its bytes
+// land and no tile is rebuilt to make that happen.
+//
 // Gun art is drawn, not textured: a per-class angular silhouette assembled from the same FCampusShape painter
 // the rest of the UI uses (6-8 draw elements, no texture to fail to load, no scene capture). Attribute bars
 // read from FCampusGun's stats, and the skin bonuses the backend sends per gun ("fire_rate:+20") are parsed
@@ -23,8 +28,10 @@
 
 #include "Campus/CampusAngular.h"
 #include "Campus/CampusBackend.h"
+#include "Campus/CampusMapArt.h"
 #include "Campus/CampusPlayBilling.h"
 #include "Campus/CampusPlayerControllers.h"
+#include "Campus/CampusRemoteImage.h"
 #include "Engine/GameInstance.h"
 #include "Rendering/DrawElements.h"
 #include "Widgets/Layout/SBox.h"
@@ -252,6 +259,46 @@ namespace CampusStoreV2
 		Out.Add(Range);
 		Out.Add(Reload);
 		Out.Add(Mag);
+	}
+
+	/**
+	 * THE CONSOLE'S OWN PICTURE FOR A TILE, over the drawn silhouette, when `image_key` names art the
+	 * admin console has published (PHASE_B_CONTRACT B2). Both layers are built every time and it is
+	 * their VISIBILITY that decides - an attribute, so the uploaded picture simply appears when the
+	 * bytes land and no tile is ever rebuilt for it.
+	 *
+	 * The REMOTE layer's lambda is the one that calls Get(), because Get is what starts the single
+	 * fetch: StateOf deliberately starts nothing, so asking it from the layer that is collapsed first
+	 * would be a picture that is never requested.
+	 */
+	static TSharedRef<SWidget> RemoteArt(const FString& ImageKey)
+	{
+		return SNew(SBox)
+			.Visibility_Lambda([ImageKey]()
+			{
+				return CampusRemoteImage::Get(ImageKey).IsReady() ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+			})
+			[
+				SNew(SCampusArtPlate).Shape(FCampusShape::Notched(12.f)).RemoteKey(ImageKey).FocusY(0.5f)
+			];
+	}
+
+	/** The packaged layer beside it: visible until (and unless) the uploaded picture is ready. */
+	static TSharedRef<SWidget> PackagedArt(const FString& ImageKey, TSharedRef<SWidget> Art)
+	{
+		if (ImageKey.IsEmpty())
+		{
+			return Art;
+		}
+		return SNew(SBox)
+			.Visibility_Lambda([ImageKey]()
+			{
+				return CampusRemoteImage::StateOf(ImageKey) == CampusRemoteImage::EState::Ready
+					? EVisibility::Collapsed : EVisibility::HitTestInvisible;
+			})
+			[
+				Art
+			];
 	}
 
 	/** The leading number in an id or name: "pack_diamonds_550" -> 550. 0 when there is none. */
@@ -721,12 +768,21 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStoreGunTile(int32 Index)
 						[
 							SNew(SCampusAngularPanel).Shape(FCampusShape::Notched(12.f)).Fill(CampusStoreV2::CardFillTop)
 						]
+						// THE CONSOLE'S PICTURE, when `image_key` names art it has published; the drawn
+						// silhouette otherwise. Exactly one of the two layers is ever visible.
 						+ SOverlay::Slot()
 						[
-							SNew(SCampusStoreGunArt)
-							.GunName(Gun.Name)
-							.Tint(bOwned ? CampusStoreV2::Steel : CampusStoreV2::SteelDark * 1.3f)
-							.Height(CampusStoreV2::ArtHeight)
+							Gun.ImageKey.IsEmpty()
+								? SNullWidget::NullWidget
+								: CampusStoreV2::RemoteArt(Gun.ImageKey)
+						]
+						+ SOverlay::Slot()
+						[
+							CampusStoreV2::PackagedArt(Gun.ImageKey,
+								SNew(SCampusStoreGunArt)
+								.GunName(Gun.Name)
+								.Tint(bOwned ? CampusStoreV2::Steel : CampusStoreV2::SteelDark * 1.3f)
+								.Height(CampusStoreV2::ArtHeight))
 						]
 						// level chip, for a gun that can be upgraded
 						+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom)
@@ -858,10 +914,26 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStorePackTile(const FCampusOffer& P
 					SNew(SHorizontalBox)
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 10.f, 0.f)
 					[
-						SNew(SCampusAngularPanel).Shape(FCampusShape::Notched(10.f))
-						.Fill(CampusStoreV2::GemDeep).ContentPadding(FMargin(9.f))
+						// The console's pack art when it has uploaded some, the gem plate otherwise.
+						// A fixed square either way, so a tile with art and a tile without still line up.
+						SNew(SBox).WidthOverride(52.f).HeightOverride(52.f)
 						[
-							SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Gem).Size(30.f).Color(CampusStoreV2::Gem)
+							SNew(SOverlay)
+							+ SOverlay::Slot()
+							[
+								Pack.ImageKey.IsEmpty()
+									? SNullWidget::NullWidget
+									: CampusStoreV2::RemoteArt(Pack.ImageKey)
+							]
+							+ SOverlay::Slot()
+							[
+								CampusStoreV2::PackagedArt(Pack.ImageKey,
+									SNew(SCampusAngularPanel).Shape(FCampusShape::Notched(10.f))
+									.Fill(CampusStoreV2::GemDeep).ContentPadding(FMargin(9.f))
+									[
+										SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Gem).Size(30.f).Color(CampusStoreV2::Gem)
+									])
+							]
 						]
 					]
 					+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)

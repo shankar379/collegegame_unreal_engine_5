@@ -10,6 +10,8 @@
 //   CampusLobbyEngagementUI.cpp  weekend board, missions, streak, 18+ confirm, college picker
 //   CampusLobbyStoreUI.cpp       the text store cards and the real-money button
 //   CampusLobbyRoomsUI.cpp       the room dialog and the account screen
+//   CampusEventsUI.cpp           the lobby's live-event banner and the EVENTS sheet behind it
+//   CampusReportUI.cpp           the report button on a player card, and its reason picker
 //   ... and beside them CampusWardrobeUI.cpp, CampusStoreUI.cpp, CampusProfileUI.cpp,
 //       CampusSocialUI.cpp, CampusMapSelect.cpp and CampusLiveConfigUI.cpp, which were already split
 //       out the same way.

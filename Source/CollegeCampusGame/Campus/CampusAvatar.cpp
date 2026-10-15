@@ -1,6 +1,7 @@
 #include "Campus/CampusAvatar.h"
 
 #include "Campus/CampusBackend.h"
+#include "Campus/CampusRemoteImage.h"
 #include "Dom/JsonObject.h"
 #include "Engine/Texture2D.h"
 #include "Framework/Application/SlateApplication.h"
@@ -40,12 +41,6 @@ namespace CampusAvatar
 			return Map;
 		}
 
-		TWeakObjectPtr<UCampusBackend>& SessionRef()
-		{
-			static TWeakObjectPtr<UCampusBackend> Api;
-			return Api;
-		}
-
 		/** Uploads / deletes in flight, so the EDIT sheet can disable both buttons. */
 		int32 Pending = 0;
 
@@ -70,59 +65,13 @@ namespace CampusAvatar
 			FFileHelper::SaveArrayToFile(Bytes, *Path);
 		}
 
-		UTexture2D* Decode(const uint8* Bytes, int64 Num)
-		{
-			if (!Bytes || Num <= 0)
-			{
-				return nullptr;
-			}
-			IImageWrapperModule& Module = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
-			// JPEG from our own pipeline, but a PNG the server re-encoded must not be a black square.
-			const EImageFormat Format = Module.DetectImageFormat(Bytes, Num);
-			if (Format == EImageFormat::Invalid)
-			{
-				return nullptr;
-			}
-			const TSharedPtr<IImageWrapper> Wrapper = Module.CreateImageWrapper(Format);
-			if (!Wrapper.IsValid() || !Wrapper->SetCompressed(Bytes, Num))
-			{
-				return nullptr;
-			}
-			TArray64<uint8> Raw;
-			if (!Wrapper->GetRaw(ERGBFormat::BGRA, 8, Raw))
-			{
-				return nullptr;
-			}
-			const int32 Width = Wrapper->GetWidth();
-			const int32 Height = Wrapper->GetHeight();
-			if (Width <= 0 || Height <= 0 || Raw.Num() < int64(Width) * Height * 4)
-			{
-				return nullptr;
-			}
-			UTexture2D* Texture = UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8);
-			if (!Texture)
-			{
-				return nullptr;
-			}
-			Texture->SRGB = true;
-			Texture->NeverStream = true;
-			Texture->LODGroup = TEXTUREGROUP_UI;
-			Texture->Filter = TF_Bilinear;
-			Texture->AddressX = TA_Clamp;
-			Texture->AddressY = TA_Clamp;
-			FTexture2DMipMap& Mip = Texture->GetPlatformData()->Mips[0];
-			void* Pixels = Mip.BulkData.Lock(LOCK_READ_WRITE);
-			FMemory::Memcpy(Pixels, Raw.GetData(), int64(Width) * Height * 4);
-			Mip.BulkData.Unlock();
-			Texture->UpdateResource();
-			Texture->AddToRoot();
-			return Texture;
-		}
-
-		/** Decoded bytes -> a ready entry. Fails softly: the caller marks the entry Failed. */
+		/** Decoded bytes -> a ready entry. Fails softly: the caller marks the entry Failed.
+		 *  ONE DECODER FOR THE WHOLE GAME (CampusRemoteImage::DecodeTexture): avatars, map banners and
+		 *  the console's uploaded art are the same problem - bytes of some image format in, a rooted
+		 *  transient UI texture out - and this file used to carry its own copy of it. */
 		bool Adopt(FEntry& Entry, const uint8* Bytes, int64 Num)
 		{
-			UTexture2D* Texture = Decode(Bytes, Num);
+			UTexture2D* Texture = CampusRemoteImage::DecodeTexture(Bytes, Num);
 			if (!Texture || !FSlateApplication::IsInitialized())
 			{
 				return false;
@@ -143,7 +92,7 @@ namespace CampusAvatar
 
 		void Fetch(const FString& Resolved, TSharedPtr<FEntry> Entry)
 		{
-			UCampusBackend* Api = SessionRef().Get();
+			const UCampusBackend* Api = CampusRemoteImage::Session();
 			const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
 			Request->SetVerb(TEXT("GET"));
 			Request->SetURL(Resolved);
@@ -185,42 +134,16 @@ namespace CampusAvatar
 
 	void UseSession(UCampusBackend* Api)
 	{
-		SessionRef() = Api;
+		// ONE SESSION for every picture this game fetches. CampusRemoteImage holds it, because the
+		// console's remote art needs exactly the same base URL and bearer that an avatar does.
+		CampusRemoteImage::UseSession(Api);
 	}
 
 	FString Resolve(const FString& Url)
 	{
-		FString Trimmed = Url.TrimStartAndEnd();
-		if (Trimmed.IsEmpty())
-		{
-			return FString();
-		}
-		if (Trimmed.StartsWith(TEXT("http://")) || Trimmed.StartsWith(TEXT("https://")))
-		{
-			return Trimmed;
-		}
-		const UCampusBackend* Api = SessionRef().Get();
-		if (!Api)
-		{
-			// Nothing can be fetched before the lobby hands us the session; the caller keeps its fallback.
-			return FString();
-		}
-		FString Base = Api->ApiBaseUrl();   // ".../v1", after the ini quote / "//" defences
-		Base.RemoveFromEnd(TEXT("/"));
-		if (!Trimmed.StartsWith(TEXT("/")))
-		{
-			Trimmed = TEXT("/") + Trimmed;
-		}
-		// Two shapes are legal: "/v1/avatars/<id>?v=3" (origin-relative, what the API returns) and
-		// "/avatars/<id>" (base-relative). Anything already carrying the version prefix is joined to
-		// the ORIGIN so the path cannot come out as ".../v1/v1/...".
-		if (Trimmed.StartsWith(TEXT("/v1/")))
-		{
-			FString Origin = Base;
-			Origin.RemoveFromEnd(TEXT("/v1"));
-			return Origin + Trimmed;
-		}
-		return Base + Trimmed;
+		// "/v1/avatars/<id>?v=3" (origin-relative, what the API returns), "/avatars/<id>"
+		// (base-relative) and an absolute URL are all legal, and all three are resolved in one place.
+		return CampusRemoteImage::ResolveUrl(Url);
 	}
 
 	const FImage& Get(const FString& Url)

@@ -4,7 +4,9 @@
 //   * CampusAvatarApi - the backend contract in ONE struct of constants. The server side of this is
 //                       being built in parallel, so when a path or a field name moves, it moves here
 //                       and nowhere else.
-//   * CampusAvatar    - resolve a (possibly relative) avatar_url against the API base, fetch it once
+//   * CampusAvatar    - resolve a (possibly relative) avatar_url against the API base (through
+//                       CampusRemoteImage, which owns the session, the resolver and the decoder every
+//                       picture in this game shares), fetch it once
 //                       through FHttpModule with the SAME headers CampusBackend uses (Bearer +
 //                       ngrok-skip-browser-warning), decode it with IImageWrapper into a transient
 //                       UTexture2D, and hand it out as a Slate resource handle. Memory cache keyed by

@@ -21,6 +21,9 @@ class UCampusPlayBilling;
 class UCampusSave;
 class UCampusSocial;
 struct FCampusOffer;
+struct FCampusEvent;
+struct FCampusEventProgress;
+struct FCampusEventRewardProgress;
 struct FCampusMission;
 struct FCampusMilestone;
 struct FCampusPartyMember;
@@ -345,6 +348,15 @@ private:
 	void OpenMapSelect();
 	/** CONFIRM: writes the pending choice to the profile and goes back to the lobby. */
 	void ConfirmMapSelect();
+	/** CampusCatalog indices in the order the published `modes` blob asks for, with the rows it
+	 *  switched off dropped. The compiled order is the fallback for anything the blob does not name,
+	 *  and the WHOLE compiled list is the fallback when the blob would leave nothing to play: a
+	 *  console mistake may not take the game away. */
+	void OrderedMaps(TArray<int32>& Out) const;
+	void OrderedModes(TArray<int32>& Out) const;
+	/** The content key for a map banner: `map/<client id lowercase>`, which is what the console
+	 *  uploads against. Art for a key nobody published is simply never asked for. */
+	static FString MapBannerKey(const TCHAR* MapId);
 
 	// ---- wardrobe + lobby decoration (Campus/CampusWardrobeUI.cpp)
 	/** The closet: the figure on the left under the profile camera, a 3-column grid of OWNED outfits
@@ -439,8 +451,25 @@ private:
 	TSharedRef<SWidget> BuildRooms();
 	TSharedRef<SWidget> BuildAccount();
 	TSharedRef<SWidget> BuildDaily();
-	TSharedRef<SWidget> BuildEvent();
 	TSharedRef<SWidget> BuildSettings();
+
+	// ---- live events (Campus/CampusEventsUI.cpp). What the console is running right now: the lobby
+	//      banner, and the sheet behind it with every reward, its progress and CLAIM.
+	/** The lobby banner for the live event: the console's picture, the label, the time left and the
+	 *  multipliers. Zero footprint when nothing is running or starting inside the published horizon. */
+	TSharedRef<SWidget> BuildEventBanner();
+	/** The EVENTS sheet. The menu tab, the mail icon and the banner all land here. */
+	TSharedRef<SWidget> BuildEvent();
+	/** One reward row: what it gives, how far along it is, and CLAIM / CLAIMED / the count. */
+	TSharedRef<SWidget> BuildEventRewardRow(const FCampusEventRewardProgress& Reward);
+	/** ENTERING the sheet: picks the event to show and clears the progress latch, so the one read
+	 *  happens here and never from a Build function. */
+	void OpenEventSheet();
+	/** GET /v1/events/:id/progress for the event the sheet is showing. Latched, asked once per visit. */
+	void RefreshEventProgress();
+	/** CLAIM on a row: POST with an idempotency key, then the wallet and the rows come back from the
+	 *  server rather than being guessed at here. */
+	void ClaimEventReward(int32 RewardIndex);
 
 	// ---- engagement
 	/** The weekend board panel under the menu tabs: countdown, top 3, my row, empty state. */
@@ -502,6 +531,21 @@ private:
 	/** + ADD FRIEND / REQUESTED / ACCEPT / FRIENDS, from friend_state, optimistic on tap. */
 	TSharedRef<SWidget> FriendButton(const FCampusPlayerCard& Card, FVector2D Size);
 
+	// ---- reporting a player (Campus/CampusReportUI.cpp). One surface, reachable from every player
+	//      card: the profile page (which the party plates, the friends rows and the ONLINE strip all
+	//      tap through to) and the post-match scoreboard, which has no profile tap of its own.
+	/** The square "!" button that opens the reason picker. Reads SENT once this session's report
+	 *  landed, and is simply absent for my own row. */
+	TSharedRef<SWidget> BuildReportButton(const FString& PlayerId, const FString& PlayerName,
+		const FString& RoomCode, float Size);
+	/** The sheet: the five reasons a moderator can act on, one tap each. Floats over whatever screen
+	 *  asked for it, so it works from the profile page and the scoreboard alike. */
+	void OpenReportPlayer(const FString& PlayerId, const FString& PlayerName, const FString& RoomCode);
+	/** POST /v1/players/:id/report. 409 (already reported today) and 429 are both answered with a
+	 *  sentence rather than an error the player did not earn. */
+	void SendPlayerReport(const FString& PlayerId, const FString& PlayerName, const FString& Reason,
+		const FString& RoomCode);
+
 	// ---- profile (Campus/CampusProfileUI.cpp)
 	/** Full screen: the 3D figure on the left, the angular tabbed panel on the right. */
 	TSharedRef<SWidget> BuildProfile();
@@ -559,6 +603,8 @@ private:
 	TSharedPtr<SBox> ModeSelectBox;
 	TSharedPtr<SBox> ModePlateBox;
 	TSharedPtr<SBox> StartBox;
+	/** The live event banner, under the claim banner in the same top-centre column. */
+	TSharedPtr<SBox> EventBannerBox;
 	/** EVERY region is fingerprinted. A repaint re-fills only the regions whose own data moved, so a
 	 *  SOLO / DUO / SQUAD tap leaves the menu column, the map plate, START and the ONLINE strip alone -
 	 *  and the chips themselves restyle from a lambda, so even they are not rebuilt. */
@@ -572,6 +618,7 @@ private:
 	uint32 ModeSelectStamp = 0;
 	uint32 ModePlateStamp = 0;
 	uint32 StartStamp = 0;
+	uint32 EventBannerStamp = 0;
 
 	EScreen Current = EScreen::Splash;
 	EStoreTab StoreTab = EStoreTab::Guns;
@@ -639,6 +686,27 @@ private:
 	bool bShowCollegeTick = false;
 	FString CollegeFilter;
 
+	// ---- live events state (Campus/CampusEventsUI.cpp)
+	/** Which event the sheet is showing; 0 before one has been chosen. */
+	int32 EventShownId = 0;
+	/** The server's progress for that event, held by pointer so this header needs no event struct. */
+	TSharedPtr<FCampusEventProgress> EventProgress;
+	bool bEventProgressLoading = false;
+	/** The progress read has been asked for on this visit to the sheet. LATCHED for the reason
+	 *  bStorePricesQueried is: a Build function must never start a round trip its own reply repaints
+	 *  it into starting again. Cleared by OpenEventSheet. */
+	bool bEventProgressAsked = false;
+	/** The reward whose claim is in flight, or INDEX_NONE. One at a time, so a double tap cannot
+	 *  race two POSTs - and the row that is waiting is the one that says so. */
+	int32 EventClaimIndex = INDEX_NONE;
+
+	// ---- moderation (Campus/CampusReportUI.cpp)
+	/** Players reported during this session, so the button reads SENT without a second request. The
+	 *  server's own rule is one report per target per IST game day; this is only the local echo. */
+	TSet<FString> ReportedPlayers;
+	/** A report is in flight: every reason button disables so nothing is sent twice. */
+	bool bReportInFlight = false;
+
 	// ---- social / profile state
 	EFriendTab FriendTab = EFriendTab::Friends;
 	EProfileTab ProfileTab = EProfileTab::Profile;
@@ -688,8 +756,10 @@ private:
 	 *  is the right behaviour for a nudge; remembering it in the save for ever is not. */
 	bool bUpdateCardDismissed = false;
 	/** A blob landed: raise the dirty flag and let Tick re-fill the column. Bound with AddSP so a
-	 *  stale binding can only ever be inert - see Construct. */
-	void OnLiveConfigPushed() { bAnnouncementsDirty = true; }
+	 *  stale binding can only ever be inert - see Construct. The REPAINT is asked for too, because
+	 *  the published keys also decide the event banner and what map select offers, and both are
+	 *  fingerprinted on the revision - Refresh is coalesced, so this costs one repaint at most. */
+	void OnLiveConfigPushed() { bAnnouncementsDirty = true; Refresh(); }
 	/** The subsystem OnLiveConfigChanged was bound on, so the destructor can unbind without going
 	 *  back through Controller - which may already be gone by then. */
 	TWeakObjectPtr<UCampusBackend> LiveConfigApi;

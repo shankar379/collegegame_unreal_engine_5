@@ -110,8 +110,18 @@ TSharedRef<SWidget> SCampusLobbyWidget::FriendButton(const FCampusPlayerCard& Ca
 		{
 			if (UCampusSocial* Live = Social())
 			{
-				Live->AcceptFriend(Who, [this, Name](bool bOk, const FString& Error)
+				// WEAK, AND NOT OPTIONAL. UCampusSocial is a GameInstanceSubsystem: it OUTLIVES this widget,
+				// it survives level travel, and it holds this callback until the request finishes. A raw
+				// `this` was a use-after-free the moment a reply landed on a lobby that had already been torn
+				// down - a player tapping PLAY while a friend request is in the air is all it took. Same
+				// convention as every UCampusBackend callback (Campus/CampusWardrobeUI.cpp).
+				TWeakPtr<SWidget> Weak = AsWeak();
+				Live->AcceptFriend(Who, [this, Weak, Name](bool bOk, const FString& Error)
 				{
+					if (!Weak.IsValid())
+					{
+						return;
+					}
 					Toast(bOk ? FString::Printf(TEXT("%s IS NOW YOUR FRIEND."), *Name.ToUpper()) : Error);
 					Refresh();
 				});
@@ -129,8 +139,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::FriendButton(const FCampusPlayerCard& Ca
 		// Optimistic: the button flips to REQUESTED at once and reverts with a toast on failure.
 		OptimisticFriends.Add(Who);
 		Refresh();
-		Live->RequestFriend(Who, [this, Who](bool bOk, const FString& Why)
+		TWeakPtr<SWidget> Weak = AsWeak();
+		Live->RequestFriend(Who, [this, Weak, Who](bool bOk, const FString& Why)
 		{
+			if (!Weak.IsValid())
+			{
+				return;
+			}
 			if (!bOk)
 			{
 				OptimisticFriends.Remove(Who);
@@ -252,8 +267,14 @@ void SCampusLobbyWidget::OpenProfile(const FString& PlayerId)
 	ProfileData.Reset();
 	bProfileLoading = true;
 	Show(EScreen::Profile);
-	Live->LoadProfile(PlayerId, [this](bool bOk, const FString& Error, const FCampusProfile& Loaded)
+	// Weak, for the reason spelled out in FriendButton at the top of this file.
+	TWeakPtr<SWidget> Weak = AsWeak();
+	Live->LoadProfile(PlayerId, [this, Weak](bool bOk, const FString& Error, const FCampusProfile& Loaded)
 	{
+		if (!Weak.IsValid())
+		{
+			return;
+		}
 		bProfileLoading = false;
 		if (bOk)
 		{
@@ -281,8 +302,14 @@ void SCampusLobbyWidget::SendInvite(const FString& PlayerId)
 	// Solo is the absence of a party, so an invite from a Solo lobby opens a Squad - which is what a
 	// player who just tapped "+ INVITE" plainly meant.
 	const int32 Mode = SelectedTeamSize == 2 ? 2 : 4;
-	Live->InvitePlayer(PlayerId, Mode, [this](bool bOk, const FString& Error)
+	// Weak, for the reason spelled out in FriendButton at the top of this file.
+	TWeakPtr<SWidget> Weak = AsWeak();
+	Live->InvitePlayer(PlayerId, Mode, [this, Weak](bool bOk, const FString& Error)
 	{
+		if (!Weak.IsValid())
+		{
+			return;
+		}
 		bBusy = false;
 		if (!bOk)
 		{
@@ -314,6 +341,9 @@ void SCampusLobbyWidget::AnswerInvite(const FString& InviteId, bool bAccept)
 	}
 	// Accepting while already in a squad is a confirm, never a silent auto-leave: quietly abandoning a
 	// friend is the kind of thing players remember.
+	// RAW `this` IS CORRECT HERE, and it is the only one left in this file: Send is a local helper
+	// called synchronously below, not a callback anybody holds. Everything it hands to UCampusSocial
+	// carries a weak pointer of its own.
 	auto Send = [this, InviteId, SenderName](bool bLeaveCurrent)
 	{
 		UCampusSocial* Live2 = Social();
@@ -321,10 +351,13 @@ void SCampusLobbyWidget::AnswerInvite(const FString& InviteId, bool bAccept)
 		{
 			return;
 		}
-		Live2->AcceptInvite(InviteId, bLeaveCurrent, [this, InviteId, SenderName, bLeaveCurrent](bool bOk, const FString& Error, const FString& Code)
+		// Weak, for the reason spelled out in FriendButton at the top of this file.
+		TWeakPtr<SWidget> Weak = AsWeak();
+		Live2->AcceptInvite(InviteId, bLeaveCurrent,
+			[this, Weak, InviteId, SenderName, bLeaveCurrent](bool bOk, const FString& Error, const FString& Code)
 		{
 			UCampusSocial* Live3 = Social();
-			if (!Live3)
+			if (!Weak.IsValid() || !Live3)
 			{
 				return;
 			}
@@ -346,8 +379,14 @@ void SCampusLobbyWidget::AnswerInvite(const FString& InviteId, bool bAccept)
 					{
 						if (UCampusSocial* Again = Social())
 						{
-							Again->AcceptInvite(InviteId, true, [this, InviteId](bool bOk2, const FString& Error2, const FString&)
+							TWeakPtr<SWidget> Weak2 = AsWeak();
+							Again->AcceptInvite(InviteId, true,
+								[this, Weak2, InviteId](bool bOk2, const FString& Error2, const FString&)
 							{
+								if (!Weak2.IsValid())
+								{
+									return;
+								}
 								if (UCampusSocial* Live4 = Social())
 								{
 									Live4->ResolveNotice(InviteId, bOk2 ? TEXT("JOINED") : TEXT("TOO LATE"));
@@ -456,14 +495,20 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildFriendRow(const FCampusPlayerCard& 
 					}
 					if (bIncoming)
 					{
-						Live2->AcceptFriend(Who, [this](bool, const FString&) { Refresh(); });
+						TWeakPtr<SWidget> Weak = AsWeak();
+						Live2->AcceptFriend(Who, [this, Weak](bool, const FString&) { if (Weak.IsValid()) { Refresh(); } });
 						return FReply::Handled();
 					}
 					// Optimistic: the "+" becomes the tick at once and reverts with a toast on failure.
 					OptimisticFriends.Add(Who);
 					Refresh();
-					Live2->RequestFriend(Who, [this, Who](bool bOk, const FString& Why)
+					TWeakPtr<SWidget> Weak = AsWeak();
+					Live2->RequestFriend(Who, [this, Weak, Who](bool bOk, const FString& Why)
 					{
+						if (!Weak.IsValid())
+						{
+							return;
+						}
 						if (!bOk)
 						{
 							OptimisticFriends.Remove(Who);
@@ -493,8 +538,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildFriendRow(const FCampusPlayerCard& 
 				{
 					if (UCampusSocial* Live2 = Social())
 					{
-						Live2->AcceptFriend(Who, [this](bool bOk, const FString& Error)
+						TWeakPtr<SWidget> Weak = AsWeak();
+						Live2->AcceptFriend(Who, [this, Weak](bool bOk, const FString& Error)
 						{
+							if (!Weak.IsValid())
+							{
+								return;
+							}
 							if (!bOk) { Toast(Error); }
 							Refresh();
 						});
@@ -508,7 +558,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildFriendRow(const FCampusPlayerCard& 
 				{
 					if (UCampusSocial* Live2 = Social())
 					{
-						Live2->DeclineFriend(Who, [this](bool, const FString&) { Refresh(); });
+						TWeakPtr<SWidget> Weak = AsWeak();
+						Live2->DeclineFriend(Who, [this, Weak](bool, const FString&) { if (Weak.IsValid()) { Refresh(); } });
 					}
 					return FReply::Handled();
 				}), EButton::Ghost, 15, FVector2D(140.f, 50.f))
@@ -519,7 +570,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildFriendRow(const FCampusPlayerCard& 
 		{
 			if (UCampusSocial* Live2 = Social())
 			{
-				Live2->RemoveFriend(Who, [this](bool, const FString&) { Refresh(); });
+				TWeakPtr<SWidget> Weak = AsWeak();
+				Live2->RemoveFriend(Who, [this, Weak](bool, const FString&) { if (Weak.IsValid()) { Refresh(); } });
 			}
 			return FReply::Handled();
 		}), EButton::Ghost, 15, FVector2D(160.f, 50.f));
@@ -529,7 +581,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildFriendRow(const FCampusPlayerCard& 
 		{
 			if (UCampusSocial* Live2 = Social())
 			{
-				Live2->UnblockPlayer(Who, [this](bool, const FString&) { Refresh(); });
+				TWeakPtr<SWidget> Weak = AsWeak();
+				Live2->UnblockPlayer(Who, [this, Weak](bool, const FString&) { if (Weak.IsValid()) { Refresh(); } });
 			}
 			return FReply::Handled();
 		}), EButton::Ghost, 15, FVector2D(160.f, 50.f));
@@ -711,7 +764,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildFriendTab(EFriendTab Tab, const FTe
 					// first time the tab is opened and never polled.
 					if (Tab == EFriendTab::Add && !Live->GetRoster().bRecentLoaded)
 					{
-						Live->RefreshRecent([this](bool, const FString&) { Refresh(); });
+						TWeakPtr<SWidget> Weak = AsWeak();
+						Live->RefreshRecent([this, Weak](bool, const FString&) { if (Weak.IsValid()) { Refresh(); } });
 					}
 					if (Tab != EFriendTab::Add)
 					{
@@ -888,8 +942,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildFriends()
 				return;
 			}
 			Busy(TEXT("Searching..."));
-			Live2->SearchPlayers(SearchText, [this](bool bOk, const FString& Error)
+			TWeakPtr<SWidget> Weak = AsWeak();
+			Live2->SearchPlayers(SearchText, [this, Weak](bool bOk, const FString& Error)
 			{
+				if (!Weak.IsValid())
+				{
+					return;
+				}
 				bBusy = false;
 				if (!bOk)
 				{
@@ -910,7 +969,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildFriends()
 					{
 						SearchText.Reset();
 						Live2->ClearSearch();
-						Live2->RefreshRecent([this](bool, const FString&) { Refresh(); });
+						TWeakPtr<SWidget> Weak = AsWeak();
+						Live2->RefreshRecent([this, Weak](bool, const FString&) { if (Weak.IsValid()) { Refresh(); } });
 					}
 					Refresh();
 					return FReply::Handled();
@@ -1043,7 +1103,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildFriendPick()
 				FriendsReturn = EScreen::Lobby;
 				if (UCampusSocial* Live2 = Social(); Live2 && !Live2->GetRoster().bRecentLoaded)
 				{
-					Live2->RefreshRecent([this](bool, const FString&) { Refresh(); });
+					TWeakPtr<SWidget> Weak = AsWeak();
+					Live2->RefreshRecent([this, Weak](bool, const FString&) { if (Weak.IsValid()) { Refresh(); } });
 				}
 				Show(EScreen::Friends);
 				return FReply::Handled();
@@ -1098,9 +1159,10 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobbyFriends()
 				{
 					if (UCampusSocial* Live2 = Social())
 					{
-						Live2->RefreshFriends([this](bool, const FString&)
+						TWeakPtr<SWidget> Weak = AsWeak();
+						Live2->RefreshFriends([this, Weak](bool, const FString&)
 						{
-							if (Current == EScreen::Lobby) { Refresh(); }
+							if (Weak.IsValid() && Current == EScreen::Lobby) { Refresh(); }
 						});
 					}
 				}
@@ -1328,7 +1390,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildInviteTray()
 									else if (UCampusSocial* Live2 = Social())
 									{
 										Live2->ResolveNotice(Key, TEXT("ACCEPTED"));
-										Live2->AcceptFriend(Key, [this](bool, const FString&) { Refresh(); });
+										TWeakPtr<SWidget> Weak = AsWeak();
+										Live2->AcceptFriend(Key, [this, Weak](bool, const FString&) { if (Weak.IsValid()) { Refresh(); } });
 									}
 									Refresh();
 									return FReply::Handled();
@@ -1345,7 +1408,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildInviteTray()
 									else if (UCampusSocial* Live2 = Social())
 									{
 										Live2->ResolveNotice(Key, TEXT("DECLINED"));
-										Live2->DeclineFriend(Key, [this](bool, const FString&) { Refresh(); });
+										TWeakPtr<SWidget> Weak = AsWeak();
+										Live2->DeclineFriend(Key, [this, Weak](bool, const FString&) { if (Weak.IsValid()) { Refresh(); } });
 									}
 									Refresh();
 									return FReply::Handled();
@@ -1422,8 +1486,13 @@ void SCampusLobbyWidget::OpenManageSquad()
 							{
 								if (UCampusSocial* Live2 = Social())
 								{
-									Live2->LeaveParty([this](bool bOk, const FString& Error)
+									TWeakPtr<SWidget> Weak = AsWeak();
+									Live2->LeaveParty([this, Weak](bool bOk, const FString& Error)
 									{
+										if (!Weak.IsValid())
+										{
+											return;
+										}
 										if (!bOk)
 										{
 											Toast(Error);
@@ -1469,8 +1538,13 @@ void SCampusLobbyWidget::OpenManageSquad()
 							{
 								if (UCampusSocial* Live2 = Social())
 								{
-									Live2->KickMember(Who, [this](bool bOk, const FString& Error)
+									TWeakPtr<SWidget> Weak = AsWeak();
+									Live2->KickMember(Who, [this, Weak](bool bOk, const FString& Error)
 									{
+										if (!Weak.IsValid())
+										{
+											return;
+										}
 										if (!bOk)
 										{
 											Toast(Error);
@@ -1506,7 +1580,8 @@ void SCampusLobbyWidget::OpenManageSquad()
 					{
 						if (UCampusSocial* Live2 = Social())
 						{
-							Live2->CancelInvite(InviteId, [this](bool, const FString&) { Refresh(); });
+							TWeakPtr<SWidget> Weak = AsWeak();
+							Live2->CancelInvite(InviteId, [this, Weak](bool, const FString&) { if (Weak.IsValid()) { Refresh(); } });
 						}
 						CloseConfirm();
 						return FReply::Handled();
@@ -1583,8 +1658,13 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildPartyBar()
 				{
 					if (UCampusSocial* Live2 = Social())
 					{
-						Live2->LeaveParty([this](bool bOk, const FString& Error)
+						TWeakPtr<SWidget> Weak = AsWeak();
+						Live2->LeaveParty([this, Weak](bool bOk, const FString& Error)
 						{
+							if (!Weak.IsValid())
+							{
+								return;
+							}
 							if (!bOk)
 							{
 								Toast(Error);
@@ -1618,8 +1698,14 @@ void SCampusLobbyWidget::OpenSummary(const FString& RoomCode)
 	{
 		return;
 	}
-	Live->LoadSummary(RoomCode, [this](bool bOk, const FString& Error, const FCampusSummary& Loaded)
+	// Weak, for the reason spelled out in FriendButton at the top of this file.
+	TWeakPtr<SWidget> Weak = AsWeak();
+	Live->LoadSummary(RoomCode, [this, Weak](bool bOk, const FString& Error, const FCampusSummary& Loaded)
 	{
+		if (!Weak.IsValid())
+		{
+			return;
+		}
 		if (!bOk || !Loaded.bValid || Loaded.Players.Num() == 0)
 		{
 			// The host may not have reported yet. Say nothing and leave the lobby alone - the local
@@ -1669,6 +1755,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSummaryRow(const FCampusSummaryRow&
 				[
 					SNew(STextBlock).Text(Name).Font(CampusAngular::Display(18))
 					.ColorAndOpacity(bGone ? CampusAngular::TextMuted : FLinearColor::White)
+					// CLIPPED: this is the one slot that gives way when the row runs out of width, and
+					// a long name used to paint straight over the stat columns beside it.
+					.Clipping(EWidgetClipping::ClipToBounds)
 				]
 				// Tabular numerals: the three stat columns have to line up down the table.
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.f, 0.f)
@@ -1703,6 +1792,17 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSummaryRow(const FCampusSummaryRow&
 					[
 						bGone || Row.bMe ? SNullWidget::NullWidget : FriendButton(Card, FVector2D(158.f, 46.f))
 					]
+				]
+				// REPORT. This scoreboard is the one player list in the game with no tap through to a
+				// profile, so it carries the button itself - and this is also the only screen that can
+				// hand the report the ROOM CODE the match was played in, which is what lets a moderator
+				// check the claim against match_results.
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.f, 0.f, 0.f, 0.f)
+				[
+					bGone || Row.bMe
+						? SNullWidget::NullWidget
+						: BuildReportButton(Row.PlayerId, Row.Name,
+							SummaryData.IsValid() ? SummaryData->Code : FString(), 44.f)
 				]
 			]
 		];
@@ -1842,7 +1942,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildSummary()
 					.ColorAndOpacity(CampusAngular::TextMuted).Justification(ETextJustify::Right)
 				]
 			]
-			+ SHorizontalBox::Slot().AutoWidth()[SNew(SBox).WidthOverride(158.f)]
+			// The friend button (158) plus the report square (6 + 44): the headings have to sit over
+			// their own columns, so this spacer is exactly what the row spends to their right.
+			+ SHorizontalBox::Slot().AutoWidth()[SNew(SBox).WidthOverride(208.f)]
 		];
 		for (const FCampusSummaryRow& Row : Summary.Players)
 		{

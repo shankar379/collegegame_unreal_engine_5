@@ -6,7 +6,9 @@
 //                     UFS, see DefaultGame.ini). Decoded once, cached, and handed out as a Slate
 //                     resource handle so nothing is looked up or allocated per frame. A missing
 //                     file is not an error: SCampusArtPlate paints its gradient stand-in instead.
-//   * SCampusArtPlate - an angular, tappable card whose fill is that picture, cropped "cover".
+//   * SCampusArtPlate - an angular, tappable card whose fill is that picture, cropped "cover" - or
+//                     the one the ADMIN CONSOLE uploaded, when a published content key has one
+//                     (Campus/CampusRemoteImage.h); the packaged PNG is then the fallback.
 //
 // Three levels are built - the college room (L_Match), Campus Grounds (L_CampusMap) and the open
 // battle-royale valley (L_VarsityValley); the rest are honest "coming soon" plates that cannot be
@@ -119,13 +121,20 @@ namespace CampusMapArt
 }
 
 /** An angular card filled with banner art: the map banners and the mode key-art strips.
- *  Paints art (or a gradient stand-in) + a bottom scrim + the border, then its own content. */
+ *  Paints art (or a gradient stand-in) + a bottom scrim + the border, then its own content.
+ *
+ *  THE REMOTE PICTURE WINS WHEN THERE IS ONE. Pass a published content key (RemoteKey) and the plate
+ *  paints whatever the admin console uploaded for it the moment the bytes land - the packaged PNG in
+ *  Art stays the fallback for every other state: no blob, no art published for this key, still
+ *  downloading, or a download that failed. One card, two sources, no flicker and no rebuild: the
+ *  lookup happens in OnPaint, so a picture that arrives mid-session simply appears. */
 class SCampusArtPlate : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS(SCampusArtPlate)
 		: _Shape(FCampusShape())
 		, _Art(nullptr)
+		, _RemoteKey()
 		, _Tint(FLinearColor::White)
 		, _Border(CampusAngular::Hairline)
 		, _BorderWidth(1.f)
@@ -138,6 +147,9 @@ public:
 		SLATE_ARGUMENT(FCampusShape, Shape)
 		/** Base name under Content/CampusUI/MapArt; null paints the gradient only. */
 		SLATE_ARGUMENT(const TCHAR*, Art)
+		/** A published `content` key ("map/campusmap", "event/diwali_banner"). Empty = packaged art
+		 *  only, and no request is ever made for a key the published blob does not name. */
+		SLATE_ARGUMENT(FString, RemoteKey)
 		/** Multiplies the picture: dim an unselected card, grey out a locked one. */
 		SLATE_ATTRIBUTE(FLinearColor, Tint)
 		SLATE_ATTRIBUTE(FLinearColor, Border)
@@ -161,6 +173,7 @@ public:
 private:
 	FCampusShape Shape;
 	const TCHAR* Art = nullptr;
+	FString RemoteKey;
 	TAttribute<FLinearColor> Tint;
 	TAttribute<FLinearColor> Border;
 	TAttribute<FLinearColor> AccentEdge;

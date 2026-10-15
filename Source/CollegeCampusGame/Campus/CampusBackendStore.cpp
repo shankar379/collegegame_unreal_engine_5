@@ -58,6 +58,9 @@ void UCampusBackend::ReadStore(TSharedPtr<FJsonObject> Json)
 			Gun.Description = Str(Item, TEXT("description"));
 			Gun.Badge = Str(Item, TEXT("badge"));
 			Gun.Perks = Strings(Item, TEXT("perks"));
+			// The console's uploaded tile art (migration 026). Absent on a server that predates it,
+			// and the drawn silhouette is the fallback either way.
+			Gun.ImageKey = Str(Item, TEXT("image_key"));
 			Gun.PriceDiamonds = int32(Num(Item, TEXT("price_diamonds")));
 			Gun.PriceInr = float(Num(Item, TEXT("price_inr")));
 			Gun.bOwned = Bool(Item, TEXT("owned"));
@@ -86,6 +89,7 @@ void UCampusBackend::ReadStore(TSharedPtr<FJsonObject> Json)
 				Offer.Description = Str(Item, TEXT("description"));
 				Offer.Badge = Str(Item, TEXT("badge"));
 				Offer.Perks = Strings(Item, TEXT("perks"));
+				Offer.ImageKey = Str(Item, TEXT("image_key"));
 				Offer.PriceInr = float(Num(Item, TEXT("price_inr")));
 				NoteGoogleId(Item, Offer.Id);
 			}

@@ -772,10 +772,20 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 							SAssignNew(WeekendBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
 						]
 					]
-					// A settled weekend's unclaimed reward: top-centre, under the top bar, impossible to miss.
+					// Top-centre, under the top bar, impossible to miss: a settled weekend's unclaimed
+					// reward, and under it whatever event the console is running. ONE column, so the
+					// two can never land on top of each other and either can be absent.
 					+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(0.f, 96.f, 0.f, 0.f)
 					[
-						SAssignNew(ClaimBannerBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+						SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+						[
+							SAssignNew(ClaimBannerBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+						]
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 10.f, 0.f, 0.f)
+						[
+							SAssignNew(EventBannerBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+						]
 					]
 					// Squad name plates, under the characters.
 					+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 108.f)
@@ -882,6 +892,22 @@ void SCampusLobbyWidget::RepaintLobby()
 			Api ? *Api->Engagement.LastWeekend.Reward.Describe() : TEXT(""))),
 		[this]() { return BuildClaimBanner(); });
 
+	// THE EVENT BANNER reads the published blob and nothing else, so it is re-filled when the console
+	// publishes (a new revision) and never because a mode chip was tapped. The COUNTDOWN on it is a
+	// text lambda and the PICTURE is looked up in OnPaint, so neither the ticking clock nor the banner
+	// arriving from the network needs a repaint of its own.
+	uint32 Banner = 0;
+	if (Api)
+	{
+		Banner = GetTypeHash(FString::Printf(TEXT("%d|%d"), Api->GetLiveConfig().Revision, EventShownId));
+		for (const FCampusEvent& Row : Api->VisibleEvents())
+		{
+			Banner = HashCombine(Banner, GetTypeHash(FString::Printf(TEXT("%d|%s|%s|%lld|%lld"),
+				Row.Id, *Row.Label, *Row.BannerKey, Row.StartsAt.GetTicks(), Row.EndsAt.GetTicks())));
+		}
+	}
+	FillRegion(EventBannerBox, EventBannerStamp, Banner, [this]() { return BuildEventBanner(); });
+
 	// ---- The regions a mode tap, the ONLINE strip or an invite can legitimately change. These were
 	// re-filled unconditionally, which is why START, the map plate and the friends list still flinched
 	// when a mode chip was tapped. Each one now carries its own fingerprint too.
@@ -982,19 +1008,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildDaily()
 	return Dialog(LOCTEXT("DailyTitle", "DAILY REWARD"), Body, 720.f, true, EScreen::Lobby);
 }
 
-TSharedRef<SWidget> SCampusLobbyWidget::BuildEvent()
-{
-	TSharedRef<SWidget> Body = SNew(SVerticalBox)
-		+ SVerticalBox::Slot().AutoHeight()[Label(LOCTEXT("EventName", "Founders' Week"), 40)]
-		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 22.f)
-		[
-			Label(LOCTEXT("EventBody", "First 30 players get the Founder badge  ·  daily free Room Card  ·  Combo Offer ₹100"), 19, Muted, false)
-		]
-		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left)
-		[
-			Button(LOCTEXT("PlayNow", "PLAY NOW"), FOnClicked::CreateLambda([this]() { Show(EScreen::Lobby); return FReply::Handled(); }), EButton::Accent, 24, FVector2D(300.f, 72.f))
-		];
-	return Dialog(LOCTEXT("LiveEvent", "LIVE EVENT"), Body, 780.f, true, EScreen::Lobby);
-}
+// THE EVENTS SHEET used to be a hard-coded "Founders' Week" card written into this file. It is now
+// the console's own live event, with the rewards a player can actually claim out of it:
+// Campus/CampusEventsUI.cpp.
 
 #undef LOCTEXT_NAMESPACE
