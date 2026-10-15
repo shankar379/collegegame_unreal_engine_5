@@ -390,6 +390,15 @@ namespace CampusAngular
 			Line(Out, Layer, Geometry, { At(-R * 0.74f, -R * 0.2f), At(0.f, R * 0.8f), At(R * 0.74f, -R * 0.2f) }, Color, T);
 			break;
 		}
+		case EGlyph::Hanger:
+		{
+			// Hook, shoulders, bar: the closet's mark. Straight lines and one small arc, so it still
+			// reads at the 16 px it is drawn at on a preset tile.
+			Arc(Out, Layer, Geometry, At(0.f, -R * 0.56f), R * 0.22f, UE_PI * 0.15f, UE_PI * 1.85f, 10, Color, T);
+			Line(Out, Layer, Geometry, { At(-R * 0.9f, R * 0.46f), At(0.f, -R * 0.3f), At(R * 0.9f, R * 0.46f) }, Color, T);
+			Line(Out, Layer, Geometry, { At(-R * 0.9f, R * 0.46f), At(R * 0.9f, R * 0.46f) }, Color, T * 1.2f);
+			break;
+		}
 		}
 	}
 
@@ -404,6 +413,7 @@ namespace CampusAngular
 			{ TEXT("lock"), EGlyph::Lock }, { TEXT("clock"), EGlyph::Clock }, { TEXT("tick"), EGlyph::Tick },
 			{ TEXT("skull"), EGlyph::Skull }, { TEXT("target"), EGlyph::Target }, { TEXT("trophy"), EGlyph::Trophy },
 			{ TEXT("heart"), EGlyph::Heart },
+			{ TEXT("hanger"), EGlyph::Hanger },
 		};
 		const EGlyph* Found = ByName.Find(Name.ToLower());
 		return Found ? *Found : EGlyph::Rank;

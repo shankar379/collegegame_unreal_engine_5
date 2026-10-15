@@ -79,8 +79,9 @@ namespace
 		{ ELobbyTab::Character, TEXT("CHARACTER"), CampusAngular::EGlyph::Friends },
 		// Directly under CHARACTER, because they are the same subject: CHARACTER is who you are,
 		// WARDROBE is what you are wearing. The lobby decor sheet hangs off the wardrobe rather than
-		// taking a seventh row of its own.
-		{ ELobbyTab::Wardrobe,  TEXT("WARDROBE"),  CampusAngular::EGlyph::Trophy },
+		// taking a seventh row of its own. A HANGER, not the trophy it used to borrow: the closet's
+		// own DECOR rail wears Trophy, and one mark must mean one thing.
+		{ ELobbyTab::Wardrobe,  TEXT("WARDROBE"),  CampusAngular::EGlyph::Hanger },
 		{ ELobbyTab::Vault,     TEXT("VAULT"),     CampusAngular::EGlyph::Gem },
 		{ ELobbyTab::Weapons,   TEXT("WEAPONS"),   CampusAngular::EGlyph::Rank },
 		{ ELobbyTab::Events,    TEXT("EVENTS"),    CampusAngular::EGlyph::Crown },
@@ -1049,6 +1050,12 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildAgreement()
 {
 	// DPDP notice before any account exists: what is stored, why, how long, how to delete.
 	const FText Notice = LOCTEXT("Notice",
+		"Campus Combat is a just-for-fun game: students and colleges play friendly matches against each other. "
+		"There are no cash prizes, no betting and no real-money rewards. Diamonds, Room Cards and items are for use "
+		"inside the game only, have no cash value and cannot be withdrawn, sold or exchanged for money.\n\n"
+		"College names appear only for friendly rivalry on leaderboards. Campus Combat is not run, endorsed or "
+		"sponsored by any college or university, and is not affiliated with any other game or publisher.\n\n"
+		"Play fair and be respectful: cheating, hacks, abuse or harassment can get an account banned.\n\n"
 		"To play we store: a game ID for this phone, your nickname, and (if you add them) email, roll no., branch "
 		"and college for leaderboards; your Room Cards, Diamonds, guns and purchases; and match results.\n\n"
 		"Why: to keep your progress and run fair matches. Roll numbers are shown masked (21XX..45).\n"

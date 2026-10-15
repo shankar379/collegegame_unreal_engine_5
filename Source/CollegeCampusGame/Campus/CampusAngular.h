@@ -149,7 +149,11 @@ namespace CampusAngular
 	enum class EGlyph : uint8 { Gear, Mail, Friends, Plus, Rank, Coin, Gem, Wifi, Crown, Close, Chevron, Lock, Clock, Tick,
 		/** Profile page: deaths, headshots / accuracy, wins + MVP, likes. Drawn, not textured, for the
 		 *  same reason as every glyph above - four icons do not earn an atlas that can fail to load. */
-		Skull, Target, Trophy, Heart };
+		Skull, Target, Trophy, Heart,
+		/** The closet: the WARDROBE menu tab, the OUTFIT rail and the preset tiles. A hanger says
+		 *  "what you are wearing" in a way no other icon in this set does - Trophy was standing in
+		 *  for it, which left the lobby tab and the decor rail wearing the same mark. */
+		Hanger };
 
 	/** The glyph a server-side milestone row names (`milestones.glyph`), or Rank when it is unknown. */
 	EGlyph GlyphFromName(const FString& Name);

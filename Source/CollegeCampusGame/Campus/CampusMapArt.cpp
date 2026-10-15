@@ -35,17 +35,20 @@ namespace CampusCatalog
 		{ TEXT("TeamClash"), TEXT("Team Clash"), { TEXT("Classic"), TEXT("CampusMap") }, TEXT("mode_clash"),
 			TEXT("Two squads, one campus. You pick the map, how many rounds (4-7) and how long each one runs; every "
 			     "round is played and the squad that wins the most takes the match. Everyone respawns between rounds. "
-			     "Hosting costs one Room Card and gives you a 6-letter code to share."),
+			     "Hosting costs one Room Card and gives you a 6-letter code to share.\n\n"
+			     "Just for fun: friendly matches between players and colleges. No cash prizes, no betting."),
 			nullptr, true },
 		{ TEXT("QuickMatch"), TEXT("Quick Match"), { TEXT("Classic"), TEXT("CampusMap") }, TEXT("mode_quick"),
 			TEXT("One tap into the room already open on your network. Free, no Room Card, no code to type - "
-			     "the match starts on the host's settings, including the host's map."),
+			     "the match starts on the host's settings, including the host's map.\n\n"
+			     "Just for fun: friendly matches between players and colleges. No cash prizes, no betting."),
 			nullptr, true },
 		{ TEXT("BattleRoyale"), TEXT("Battle Royale"), { TEXT("VarsityValley"), TEXT("CampusMap") }, TEXT("mode_br"),
 			TEXT("Fifty players drop into Varsity Valley - or onto the tighter Campus Grounds - and the circle closes "
 			     "until one squad is left. No Room Card: tap START and the server puts you in the next match, solo / "
 			     "duo / squad as you picked. The DAY / NIGHT chip is your preference - the match you are given says "
-			     "which it is."),
+			     "which it is.\n\n"
+			     "Just for fun: friendly matches between players and colleges. No cash prizes, no betting."),
 			nullptr, true },
 	};
 	const int32 NumModes = UE_ARRAY_COUNT(Modes);
