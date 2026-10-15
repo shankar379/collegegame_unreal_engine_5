@@ -1,7 +1,7 @@
 // Map / mode select (Slate, lobby level). Free Fire's layout, our content:
 //
-//   LEFT  ~62%  three full-width map banners stacked, the selected one bordered in accent and the
-//               unbuilt ones dimmed behind a padlock.
+//   LEFT  ~62%  one horizontal row of map cards that scrolls sideways: the 50-player battle-royale map
+//               as the one wide card first, the 4v4 maps as squares after it. Selected = accent border.
 //   RIGHT ~38%  mode cards: key-art strip, mode name, the map it runs on, a green "?" that opens
 //               the rules, and a clock row on anything time-limited.
 //   BOTTOM      RANDOM MAP on the left, the yellow slanted CONFIRM on the right.
@@ -172,12 +172,14 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapBanner(int32 Index)
 			SNew(SVerticalBox)
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
 			[
-				SelectTitle(Name, 50, bLocked ? FLinearColor(1.f, 1.f, 1.f, 0.55f) : FLinearColor::White)
+				SelectTitle(Name, Entry.bLarge ? 44 : 30, bLocked ? FLinearColor(1.f, 1.f, 1.f, 0.55f) : FLinearColor::White)
 			]
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
 			[
 				SNew(STextBlock)
 				.Text(FText::FromString(Entry.Tagline))
+				.AutoWrapText(true)
+				.Justification(ETextJustify::Right)
 				.Font(CampusAngular::Body(14))
 				.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, bLocked ? 0.45f : 0.72f))
 				.ShadowOffset(FVector2D(2.f, 2.f))
@@ -431,17 +433,30 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeCard(int32 Index)
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 {
-	// Banners: a FIXED height each and the column scrolls, which it did not have to do while there
-	// were four of them sharing the height. A fifth map took each banner under 120 px on a phone and
-	// the 50 pt map name no longer fitted in its own card - so the list scrolls like the mode column
-	// beside it, and swapping the selection still never reflows anything.
-	TSharedRef<SScrollBox> Banners = SNew(SScrollBox).ScrollBarVisibility(EVisibility::Collapsed);
-	for (int32 Index = 0; Index < CampusCatalog::NumMaps; ++Index)
+	// Map cards in one row that scrolls sideways: the large battle-royale map first as the one wide
+	// card, then the 4v4 maps as squares. Fixed sizes, so the art is cropped to a known shape and
+	// swapping the selection never reflows the row.
+	constexpr float CardHeight = 500.f;
+	constexpr float WideWidth = 800.f;
+	TSharedRef<SScrollBox> Banners = SNew(SScrollBox)
+		.Orientation(Orient_Horizontal)
+		.ScrollBarVisibility(EVisibility::Collapsed)
+		.AllowOverscroll(EAllowOverscroll::Yes);
+	bool bFirst = true;
+	for (const bool bLargePass : { true, false })
 	{
-		Banners->AddSlot().Padding(0.f, Index == 0 ? 0.f : 8.f, 0.f, 0.f)
-		[
-			SNew(SBox).HeightOverride(170.f)[BuildMapBanner(Index)]
-		];
+		for (int32 Index = 0; Index < CampusCatalog::NumMaps; ++Index)
+		{
+			if (CampusCatalog::Map(Index).bLarge != bLargePass)
+			{
+				continue;
+			}
+			Banners->AddSlot().VAlign(VAlign_Top).Padding(bFirst ? 0.f : 12.f, 0.f, 0.f, 0.f)
+			[
+				SNew(SBox).WidthOverride(bLargePass ? WideWidth : CardHeight).HeightOverride(CardHeight)[BuildMapBanner(Index)]
+			];
+			bFirst = false;
+		}
 	}
 
 	TSharedRef<SScrollBox> ModeList = SNew(SScrollBox).ScrollBarVisibility(EVisibility::Collapsed);

@@ -427,8 +427,10 @@ namespace CampusAngular
 		// so a 3:1 banner squeezed into a 5:1 slot loses sky, never stretches.
 		const float BoxAspect = Size.X / Size.Y;
 		const float ArtAspect = ImageSize.X / ImageSize.Y;
-		const float USpan = BoxAspect > ArtAspect ? 1.f : ArtAspect / BoxAspect;
-		const float VSpan = BoxAspect > ArtAspect ? BoxAspect / ArtAspect : 1.f;
+		// Spans are the FRACTION of the picture shown (<= 1). They were inverted (> 1), which sampled past
+		// the texture's edge and smeared its border pixels across the card: the "stretched" look.
+		const float USpan = BoxAspect > ArtAspect ? 1.f : BoxAspect / ArtAspect;
+		const float VSpan = BoxAspect > ArtAspect ? ArtAspect / BoxAspect : 1.f;
 		const float U0 = (1.f - USpan) * 0.5f;
 		const float V0 = (1.f - VSpan) * FMath::Clamp(FocusY, 0.f, 1.f);
 
@@ -616,6 +618,8 @@ void SCampusAngularButton::Construct(const FArguments& InArgs)
 		.ContentPadding(InArgs._ContentPadding)
 		.HAlign(HAlign_Center)
 		.VAlign(VAlign_Center)
+		// PreciseTap: a swipe that starts on the card scrolls its list; only a tap clicks.
+		.TouchMethod(EButtonTouchMethod::PreciseTap)
 		.OnClicked(InArgs._OnClicked)
 		[
 			InArgs._Content.Widget

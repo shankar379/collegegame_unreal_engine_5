@@ -21,18 +21,13 @@ namespace CampusCatalog
 {
 	// Three real levels: L_Match (the college room), L_CampusMap (Campus Grounds, the walled campus
 	// ported from the web game's CAMPUS map) and L_VarsityValley (the open 800 m battle-royale map).
-	// The rest are deliberately empty plates, not faked screenshots - see Scripts/render_map_art.py.
 	const FMapEntry Maps[] = {
 		{ TEXT("Classic"), TEXT("Campus"),      TEXT("The college  ·  quad, corridors and rooftops"), TEXT("map_campus"),
 			TEXT("/Game/Maps/L_Match"), true },
 		{ TEXT("CampusMap"), TEXT("Campus Grounds"), TEXT("Clock tower  ·  seven blocks, one courtyard"), TEXT("map_campusmap"),
 			TEXT("/Game/Maps/L_CampusMap"), true },
 		{ TEXT("VarsityValley"), TEXT("Varsity Valley"), TEXT("Open valley  ·  50 players, one circle"), TEXT("map_valley"),
-			TEXT("/Game/Maps/L_VarsityValley"), true },
-		{ TEXT("Hostel"),  TEXT("Hostel Block"), TEXT("Coming soon"),                                  TEXT("map_hostel"),
-			nullptr, false },
-		{ TEXT("Arena"),   TEXT("Sports Arena"), TEXT("Coming soon"),                                  TEXT("map_arena"),
-			nullptr, false },
+			TEXT("/Game/Maps/L_VarsityValley"), true, true },
 	};
 	const int32 NumMaps = UE_ARRAY_COUNT(Maps);
 
@@ -46,11 +41,6 @@ namespace CampusCatalog
 			TEXT("One tap into the room already open on your network. Free, no Room Card, no code to type - "
 			     "the match starts on the host's settings, including the host's map."),
 			nullptr, true },
-		// Placeholder schedule: the window text below is UI only until a real rotation exists.
-		{ TEXT("NightRaid"), TEXT("Night Raid"), { TEXT("Classic"), nullptr }, TEXT("mode_locked"),
-			TEXT("Not live yet. Team Clash after dark, on a shorter clock. The daily window below is a placeholder "
-			     "until the rotation is switched on."),
-			TEXT("Opens daily 18:00 - 22:00"), false },
 		{ TEXT("BattleRoyale"), TEXT("Battle Royale"), { TEXT("VarsityValley"), TEXT("CampusMap") }, TEXT("mode_br"),
 			TEXT("Fifty players drop into Varsity Valley - or onto the tighter Campus Grounds - and the circle closes "
 			     "until one squad is left. No Room Card: tap START and the server puts you in the next match, solo / "
@@ -341,6 +331,8 @@ void SCampusArtPlate::Construct(const FArguments& InArgs)
 			.ContentPadding(InArgs._ContentPadding)
 			.HAlign(HAlign_Fill)
 			.VAlign(VAlign_Fill)
+			// PreciseTap: a swipe that starts on the card scrolls its list; only a tap clicks.
+			.TouchMethod(EButtonTouchMethod::PreciseTap)
 			.OnClicked(InArgs._OnClicked)
 			[
 				InArgs._Content.Widget

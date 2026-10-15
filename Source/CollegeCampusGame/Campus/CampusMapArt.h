@@ -43,6 +43,8 @@ namespace CampusCatalog
 		 *  room host and the end screen all come through here. Null on a "coming soon" plate. */
 		const TCHAR* Level;
 		bool bPlayable;
+		/** The 50-player battle-royale map: drawn as the one wide card, the 4v4 maps as squares. */
+		bool bLarge = false;
 	};
 
 	/** One row of the mode list, in the order the right-hand column shows them. */
