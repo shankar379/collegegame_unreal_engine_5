@@ -1,4 +1,4 @@
-// Battle royale: 50 combatants, one circle, last squad standing.
+﻿// Battle royale: 50 combatants, one circle, last squad standing.
 // Selected with the travel option "?Mode=BR" (see HostOptionsFor, which also hands the engine the
 // "?game=" it needs to pick this class). The TDM mode in CampusGameMode.* is untouched.
 //

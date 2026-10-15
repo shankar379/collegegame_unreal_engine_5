@@ -283,6 +283,12 @@ struct FCampusLiveConfig
 	FString MaintenanceMessage;
 	/** A build below this must update before it can play. 0 / absent = no floor. */
 	int32 MinClientBuild = 0;
+	/** THIS FLOOR CAME FROM A LIVE ANSWER (a /live-config 200 or 304, or a 426 on any call) and not
+	 *  from the blob cached on disk. Only a live floor may put up the dead-end UPDATE REQUIRED gate:
+	 *  a phone that is offline, or on a LAN with no route to the API, would otherwise be locked out of
+	 *  its own game by yesterday's number with no way to prove the number had moved on. A cached
+	 *  floor shows a dismissible "update available" card instead. */
+	bool bMinBuildLive = false;
 	/** Where the update lives, when the console has published one (`update_url` / `store_url`). */
 	FString UpdateUrl;
 	TArray<FCampusAnnouncement> Announcements;
@@ -371,8 +377,14 @@ public:
 	/** The server's own sentence, so the lock screen says why rather than guessing. */
 	FString MaintenanceText() const;
 
-	/** This build is below the published floor, or a sign-in answered 426 CLIENT_TOO_OLD. */
-	bool IsUpdateRequired() const { return bClientTooOld || (MinBuildFloor() > ClientBuild()); }
+	/** THE HARD GATE: this build is below a floor a LIVE answer published, or a call answered 426
+	 *  CLIENT_TOO_OLD. A floor read off the cached blob deliberately does NOT count - see
+	 *  FCampusLiveConfig::bMinBuildLive. A dead end with no RETRY that an offline phone can fall into
+	 *  on launch is indistinguishable, to the player, from the game being broken. */
+	bool IsUpdateRequired() const { return bClientTooOld || (LiveConfig.bMinBuildLive && MinBuildFloor() > ClientBuild()); }
+	/** THE SOFT NUDGE: a floor we only know about from the cached blob says this build is behind. The
+	 *  lobby shows a dismissible card; nothing is taken away, because nothing has been confirmed. */
+	bool IsUpdateAvailable() const { return !IsUpdateRequired() && MinBuildFloor() > ClientBuild(); }
 	/** The published APK / store link, empty when the console has not set one. */
 	const FString& UpdateUrl() const { return LiveConfig.UpdateUrl; }
 	/** THE BUILD NUMBER, and the only definition of it in the game: the APK's version code, read from
@@ -535,8 +547,13 @@ private:
 	 *  API tolerates only while the floor is 1. */
 	void AddClientBuild(TSharedPtr<FJsonObject> Body) const;
 	void ReadEngagement(TSharedPtr<FJsonObject> Json);
-	/** Applies a live-config body. bFromCache drops `maintenance.on`: only a live answer may lock. */
+	/** Applies a live-config body. bFromCache drops `maintenance.on` and marks the minimum build as
+	 *  not-live: only a live answer may lock the game or gate it on a version. */
 	void ReadLiveConfig(TSharedPtr<FJsonObject> Json, bool bFromCache);
+	/** Re-reads the blob held in the save. Returns false when there is nothing there to read, or it
+	 *  does not parse. bFromCache is forwarded verbatim: FALSE is correct on a 304, where the server
+	 *  has just told us these exact bytes ARE the current revision. */
+	bool ReadLiveConfigFromSave(bool bFromCache);
 	/** The published floor, or 0 when no blob has ever been read. */
 	int32 MinBuildFloor() const { return LiveConfig.MinClientBuild; }
 	FString ApiBase() const;
@@ -570,6 +587,20 @@ private:
 	FDelegateHandle ForegroundHandle;
 	/** How stale a blob may be before a resume refetches it (design: ten minutes). */
 	static constexpr double LiveConfigMaxAgeSeconds = 600.0;
+	/** THE CACHE CEILING. The blob is written verbatim into the save file, which is read synchronously
+	 *  on every launch, and nothing on the console caps what it may publish - one runaway announcement
+	 *  body would make every start-up slower for ever. A blob past this is used for THIS run and then
+	 *  simply not cached (and the ETag is dropped with it, so the next launch asks unconditionally
+	 *  rather than sending an ETag with no bytes behind it). 64 KB is ~30x the real blob. */
+	static constexpr int32 LiveConfigCacheMaxBytes = 64 * 1024;
+	/** What a card can carry. Longer copy belongs on the console's own screen, not over the lobby:
+	 *  past this the card is a wall of text in the corner, and the strings sit in the save for ever. */
+	static constexpr int32 AnnouncementTitleMaxChars = 120;
+	static constexpr int32 AnnouncementBodyMaxChars = 400;
+	/** How many dismissals the save remembers. Oldest first out: the ids are server-side sequence
+	 *  numbers that only ever climb, so the oldest entry is also the one least likely to come back,
+	 *  and an unbounded list is a save file that grows for the life of the account. */
+	static constexpr int32 MaxDismissedAnnouncements = 100;
 
 	/** Set by Send() when a protected route answered 403 AGE_CONFIRM_REQUIRED and the local tick was absent. */
 	bool bAgeConfirmRequired = false;

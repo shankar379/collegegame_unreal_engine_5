@@ -1,4 +1,4 @@
-// BATTLE ROYALE matchmaking overlay (Slate, lobby level). Free Fire's queue screen:
+﻿// BATTLE ROYALE matchmaking overlay (Slate, lobby level). Free Fire's queue screen:
 //
 //        SEARCHING FOR SESSION...         the one line that says what is happening
 //        VARSITY VALLEY  ·  SQUAD  ·  NIGHT

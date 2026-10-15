@@ -1,4 +1,4 @@
-#include "Campus/CampusPlayerControllers.h"
+﻿#include "Campus/CampusPlayerControllers.h"
 
 #include "Animation/SkeletalMeshActor.h"
 #include "Camera/CameraActor.h"
@@ -398,6 +398,12 @@ void ACampusLobbyPlayerController::BeginPlay()
 	RemovePodium();
 	// Read the floor AFTER the podium is gone, so its top can never be mistaken for the floor.
 	FloorPlaneZ = ReadFloorHeight();
+
+	// EVERY OUTFIT AND EVERY PROP, LOADED ONCE, HERE. The wardrobe previews instantly by design, and
+	// an equip tap that had to reach the disk for a mesh the player has not worn before would hitch on
+	// exactly the frame they are judging the clothes. Latched inside; the match level pays the same
+	// price from ACampusCharacter::BeginPlay.
+	CampusOutfit::Preload();
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;

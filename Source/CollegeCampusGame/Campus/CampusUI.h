@@ -1,4 +1,4 @@
-// Menu screens built in Slate (no widget assets to cook):
+﻿// Menu screens built in Slate (no widget assets to cook):
 //   Lobby level: Splash -> Sign in -> Event post (optional) -> Lobby -> Create / Join / Settings.
 //   Match level: Waiting room -> (game HUD lives in SCampusTouchControls) -> Settings -> Win screen.
 //
@@ -430,6 +430,11 @@ private:
 	/** Re-fills the announcement column under the invite stack. Called from Tick only. */
 	void RefreshAnnouncements();
 	TSharedRef<SWidget> BuildAnnouncementCard(const struct FCampusAnnouncement& Row);
+	/** THE SOFT UPDATE NUDGE, for a floor this phone only knows from the blob cached on disk
+	 *  (UCampusBackend::IsUpdateAvailable). It sits at the TOP of the announcement column, wears the
+	 *  gem edge like a NEWS card, and carries the store link when the console published one. It is
+	 *  never the dead-end gate: nothing has confirmed the floor, so nothing may be taken away. */
+	TSharedRef<SWidget> BuildUpdateCard();
 
 	TSharedRef<SWidget> BuildRooms();
 	TSharedRef<SWidget> BuildAccount();
@@ -592,9 +597,15 @@ private:
 	 *  and a failed read whose error path repaints would otherwise feed itself - the same trap
 	 *  bStorePricesQueried and bPresetsAsked exist for. */
 	bool bCosmeticsAsked = false;
-	/** A cosmetic PUT is in flight: every card and preset button disables, so a double tap cannot
-	 *  race two equips at the server. */
-	bool bCosmeticsBusy = false;
+	/** HOW MANY cosmetic PUTs are in flight: every card and preset button disables while this is
+	 *  above zero, so a double tap cannot race two equips at the server.
+	 *
+	 *  A COUNT AND NOT A FLAG. Equipping an outfit and saving a preset are two different requests the
+	 *  player can start inside one second, and with a bool the FIRST reply cleared the latch while the
+	 *  second was still in the air - the grid came back to life mid-save, which is the exact double
+	 *  tap the latch exists to stop. */
+	int32 CosmeticsInFlight = 0;
+	bool IsCosmeticsBusy() const { return CosmeticsInFlight > 0; }
 	/** Which of the eight anchors the decor sheet is editing. */
 	int32 DecorAnchor = 0;
 	float SplashTime = 0.f;
@@ -671,6 +682,17 @@ private:
 	 *  the tap or the network callback that asked for it - that tears down the button still routing
 	 *  the touch, which is the whole reason bRefreshQueued exists. */
 	bool bAnnouncementsDirty = false;
+	/** The soft "update available" card has been closed. SESSION-LOCAL on purpose, unlike a real
+	 *  announcement's dismissal: the card is not news that happened once, it is a standing fact about
+	 *  this APK, and it stops being true the moment the player updates. Returning on the next launch
+	 *  is the right behaviour for a nudge; remembering it in the save for ever is not. */
+	bool bUpdateCardDismissed = false;
+	/** A blob landed: raise the dirty flag and let Tick re-fill the column. Bound with AddSP so a
+	 *  stale binding can only ever be inert - see Construct. */
+	void OnLiveConfigPushed() { bAnnouncementsDirty = true; }
+	/** The subsystem OnLiveConfigChanged was bound on, so the destructor can unbind without going
+	 *  back through Controller - which may already be gone by then. */
+	TWeakObjectPtr<UCampusBackend> LiveConfigApi;
 	FDelegateHandle LiveConfigHandle;
 	FDelegateHandle SocialPartyHandle;
 	FDelegateHandle SocialRosterHandle;

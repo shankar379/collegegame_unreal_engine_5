@@ -49,6 +49,31 @@ Run these in order after a restart, or after anything was stopped for an Unreal 
 
 Before an Android build, stop Docker (`wsl --shutdown`), the API, bots and ngrok to free memory. The PC has 7.7 GB of RAM and the cook needs most of it. Build with `C:\UE\Projects\CampusCombat\Build Campus Combat.bat`.
 
+## Release checklist
+
+The game's build number is `StoreVersion` in `Config/DefaultEngine.ini`, under `[/Script/AndroidRuntimeSettings.AndroidRuntimeSettings]`. There is no second definition of it: UBT stamps it into the Android manifest, Play orders releases by it, `UCampusBackend::ClientBuild()` reads it back out of the cooked ini, and every sign-in sends it to the API as `client_build`. The server compares that against `MIN_CLIENT_BUILD` and answers `426 CLIENT_TOO_OLD` when it is short.
+
+**Bump `StoreVersion` and ship the APK BEFORE you raise `min_client_build` on the server.** In that order, every time:
+
+1. Raise `StoreVersion` in `Config/DefaultEngine.ini` (it is 1 today).
+2. Build and upload the APK, and wait for the Play rollout to actually reach players.
+3. Only then raise `min_client_build` in the admin console, to a number no higher than the `StoreVersion` you just shipped.
+
+> **`Config/DefaultEngine.ini` is hidden from git.** It has the *skip-worktree* bit set (`git ls-files -v Config/` shows `S` against it), so git reports no change to it no matter what you edit — which means a `StoreVersion` bump will silently never be committed, and any other machine or CI job will keep building build 1. Before step 1, clear the bit:
+>
+> ```
+> git update-index --no-skip-worktree Config/DefaultEngine.ini
+> ```
+>
+> Commit the bump, then re-set the bit if the local editor churn in that file is why it was hidden in the first place.
+
+Getting this backwards puts `UPDATE REQUIRED` in front of players whose only available update *is* the build they are already running — a dead end with nothing on screen that can get them out of it. Raising the floor above a `StoreVersion` nobody ever bumped does the same thing to everybody at once.
+
+Two things stop that from being permanent, and neither is an excuse to skip the order above:
+
+* The hard gate only stands on a floor from a **live** answer (a `/v1/live-config` 200 or 304, or a 426 on any call). A floor known only from the blob cached on disk shows a dismissible "update available" card, so an offline or LAN-only phone is never locked out by a stale number.
+* A 426 latch is cleared by the next successful sign-in or token refresh, so lowering `MIN_CLIENT_BUILD` back down takes effect without the player reinstalling.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

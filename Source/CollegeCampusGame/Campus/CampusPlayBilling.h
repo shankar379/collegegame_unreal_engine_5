@@ -1,4 +1,4 @@
-// Google Play Billing for the real-money store. Play takes the money; our backend is the only thing that decides
+﻿// Google Play Billing for the real-money store. Play takes the money; our backend is the only thing that decides
 // what the player actually gets: every paid token is POSTed to /store/google/verify, which checks it with Google,
 // credits the wallet and consumes it server-side. The client never consumes, so an interrupted purchase is still
 // sitting in Play's queryPurchases next time we look - that is the whole recovery story (see RestoreUnfinished).

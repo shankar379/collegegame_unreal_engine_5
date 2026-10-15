@@ -1,4 +1,4 @@
-// Local profile: name, coins, owned items, skills and stats. Lives on the device until the
+﻿// Local profile: name, coins, owned items, skills and stats. Lives on the device until the
 // backend (Phase 1) takes over; the field names match the planned API so the move is mechanical.
 
 #pragma once

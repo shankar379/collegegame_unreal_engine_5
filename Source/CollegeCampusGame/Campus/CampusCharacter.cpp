@@ -199,7 +199,11 @@ void ACampusCharacter::BeginPlay()
 		GiveWeapon(CampusWeapons::Starter().Id, 0);
 	}
 	ApplyWeapon();
-	// Whatever OutfitId holds right now - the default on the host, or a value that replicated in
+	// THE WHOLE COSMETIC CATALOGUE, PAID FOR HERE. Latched inside, so only the first pawn on this
+	// level pays: after it, OnRep_Outfit for a remote player who is wearing something new is a map
+	// lookup instead of a synchronous disk load on the network frame.
+	CampusOutfit::Preload();
+	// Whatever OutfitIndex holds right now - the default on the host, or a value that replicated in
 	// before this ran on a client. Idempotent, so the OnRep that may follow costs nothing.
 	ApplyOutfit();
 	if (IsLocallyControlled())
@@ -227,8 +231,8 @@ void ACampusCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	// owner's own HUD paints both slots from these two values.
 	DOREPLIFETIME(ACampusCharacter, WeaponSlots);
 	DOREPLIFETIME(ACampusCharacter, CurrentSlot);
-	// NOT SkipOwner: the owner's own body is drawn in third person, so their phone needs the id too.
-	DOREPLIFETIME(ACampusCharacter, OutfitId);
+	// NOT SkipOwner: the owner's own body is drawn in third person, so their phone needs the index too.
+	DOREPLIFETIME(ACampusCharacter, OutfitIndex);
 	DOREPLIFETIME(ACampusCharacter, Armor);
 	DOREPLIFETIME(ACampusCharacter, bHelmet);
 }
@@ -2696,9 +2700,14 @@ void ACampusCharacter::ServerSwitchWeapon_Implementation(uint8 Slot)
 	MulticastUpperBody(false);
 }
 
+FName ACampusCharacter::GetOutfitId() const
+{
+	return CampusCosmetics::OutfitIdAt(OutfitIndex);
+}
+
 void ACampusCharacter::ApplyOutfit()
 {
-	CampusOutfit::Apply(GetMesh(), OutfitId);
+	CampusOutfit::Apply(GetMesh(), GetOutfitId());
 }
 
 void ACampusCharacter::OnRep_Outfit()
@@ -2706,15 +2715,33 @@ void ACampusCharacter::OnRep_Outfit()
 	ApplyOutfit();
 }
 
-void ACampusCharacter::ServerSetOutfit_Implementation(FName InOutfitId)
+void ACampusCharacter::ServerSetOutfit_Implementation(uint8 InOutfitIndex)
 {
-	// The id has to be one this build knows, or the body would fall back to the starter on every
-	// machine anyway and the replicated value would be a lie about what everyone can see.
-	if (CampusCosmetics::FindOutfit(InOutfitId) == INDEX_NONE)
+	// The index has to name a row this build knows, or the body would fall back to the starter on
+	// every machine anyway and the replicated value would be a lie about what everyone can see.
+	if (!CampusCosmetics::IsValidOutfitIndex(InOutfitIndex))
 	{
 		return;
 	}
-	OutfitId = InOutfitId;
+	// ALREADY WEARING IT. The lobby re-sends the equipped outfit on every spawn and on every
+	// ApplyBackendLoadout, so this is the common case, not the exceptional one - and answering it
+	// with an assignment would dirty a replicated property for the whole match to re-receive.
+	// Checked BEFORE the cooldown: a no-op must never spend the player's one change.
+	if (InOutfitIndex == OutfitIndex)
+	{
+		return;
+	}
+	// ONE CHANGE PER OutfitChangeCooldown. Nothing a human does needs more, and a client looping this
+	// RPC would otherwise make the host push a property update to every other connection as fast as
+	// it can send - a cosmetic with no gameplay effect paying for everybody's bandwidth.
+	const UWorld* World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.f;
+	if (Now - LastOutfitChangeTime < OutfitChangeCooldown)
+	{
+		return;
+	}
+	LastOutfitChangeTime = Now;
+	OutfitIndex = InOutfitIndex;
 	// The host draws this body too, and a replicated property does not notify the machine that set it.
 	ApplyOutfit();
 }
@@ -2733,16 +2760,19 @@ void ACampusCharacter::ApplyBackendLoadout()
 	// (it creates the save on first ask), so the typed getter is what can actually be called.
 	UCampusGameInstance* Campus = GetGameInstance<UCampusGameInstance>();
 	const UCampusSave* Profile = Campus ? Campus->GetProfile() : nullptr;
+	// THE SAVE AND THE LOBBY STILL SPEAK IN IDS (that is what the API carries); only the wire is an
+	// index. FindOutfit is the one place the two meet.
 	const FName WantedOutfit = Profile ? Profile->EquippedOutfit : NAME_None;
-	if (CampusCosmetics::FindOutfit(WantedOutfit) != INDEX_NONE && WantedOutfit != OutfitId)
+	const int32 WantedIndex = CampusCosmetics::FindOutfit(WantedOutfit);
+	if (WantedIndex != INDEX_NONE && uint8(WantedIndex) != OutfitIndex)
 	{
 		if (HasAuthority())
 		{
-			ServerSetOutfit_Implementation(WantedOutfit);
+			ServerSetOutfit_Implementation(uint8(WantedIndex));
 		}
 		else
 		{
-			ServerSetOutfit(WantedOutfit);
+			ServerSetOutfit(uint8(WantedIndex));
 		}
 	}
 

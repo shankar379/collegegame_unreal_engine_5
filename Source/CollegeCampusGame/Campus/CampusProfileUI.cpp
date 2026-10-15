@@ -1,4 +1,4 @@
-// The profile page (docs/PROFILE_DESIGN.md): the full-screen identity sheet reached from the lobby's
+﻿// The profile page (docs/PROFILE_DESIGN.md): the full-screen identity sheet reached from the lobby's
 // top-left plate, and the public version reached from the friends list and the post-match screen.
 //
 // Left half: the lobby mannequin, isolated and drag-to-rotate - the same actor and the same

@@ -160,10 +160,12 @@ public:
 	 *  (/v1/me -> EquippedGun, /v1/me/cosmetics -> EquippedOutfit). */
 	void ApplyBackendLoadout();
 
-	// ---- cosmetics (CampusCosmetics.h). The id replicates to everyone, so a squad in a match sees
-	// what each other is wearing; the look itself is never sent - every machine reads the same table.
-	FName GetOutfitId() const { return OutfitId; }
-	/** Dresses this body in OutfitId. Local; called from OnRep and from BeginPlay. */
+	// ---- cosmetics (CampusCosmetics.h). A CATALOGUE INDEX replicates to everyone, so a squad in a
+	// match sees what each other is wearing; the look itself is never sent - every machine reads the
+	// same table. See CampusCosmetics.h's "THE WIRE FORM" note for why this is not an FName.
+	/** The catalogue id behind OutfitIndex. Never NAME_None: an out-of-range index is the starter. */
+	FName GetOutfitId() const;
+	/** Dresses this body in OutfitIndex. Local; called from OnRep and from BeginPlay. */
 	void ApplyOutfit();
 
 	// ---- battle-royale body gear
@@ -317,12 +319,19 @@ private:
 	UFUNCTION(Server, Reliable)
 	void ServerTakePickup(ACampusPickup* Pickup);
 
-	/** The owner's equipped outfit. VALIDATED against CampusCosmetics, which is all a host can do:
-	 *  the same INTERIM TRUST GAP as ServerSetLoadout above - the host cannot yet check that this
-	 *  account owns the outfit, only that the id is one this build knows. A cosmetic carries no
-	 *  gameplay effect whatsoever, so the worst a liar gets is a shirt they did not pay for. */
+	/** The owner's equipped outfit, as a CampusCosmetics CATALOGUE INDEX.
+	 *
+	 *  NOT AN FName, and this is not a style choice: an FName RPC parameter is interned into the
+	 *  engine's global name table the moment it arrives, and that table is never freed. A client
+	 *  spamming a fresh junk id was an unbounded server-side leak over one cosmetic that cannot
+	 *  affect gameplay at all. An index can only ever name a row this build already ships.
+	 *
+	 *  VALIDATED against CampusCosmetics, which is all a host can do: the same INTERIM TRUST GAP as
+	 *  ServerSetLoadout above - the host cannot yet check that this account OWNS the outfit, only
+	 *  that the index names a real row. Rate limited to one accepted change per OutfitChangeCooldown
+	 *  per pawn, so a tap-spamming client cannot push replication traffic at everyone in the match. */
 	UFUNCTION(Server, Reliable)
-	void ServerSetOutfit(FName InOutfitId);
+	void ServerSetOutfit(uint8 InOutfitIndex);
 
 	UFUNCTION()
 	void OnRep_Outfit();
@@ -743,11 +752,22 @@ private:
 	/** The current gun's row with its store mods already folded in (ApplyWeapon rebuilds it). */
 	FCampusWeaponDef CurrentDef;
 
-	/** COSMETIC OUTFIT: the catalogue id, replicated to everyone (the owner included - their own
-	 *  phone draws the same body as every other). An unknown id is the free starter, so a build that
-	 *  has not heard of a new outfit draws a dressed player rather than nothing. */
+	/** COSMETIC OUTFIT: the catalogue INDEX, replicated to everyone (the owner included - their own
+	 *  phone draws the same body as every other). An index this build has no row for is the free
+	 *  starter, so an older APK draws a dressed player rather than nothing. 0 is the starter. */
 	UPROPERTY(ReplicatedUsing=OnRep_Outfit)
-	FName OutfitId = TEXT("outfit_starter");
+	uint8 OutfitIndex = 0;
+
+	/** Seconds a pawn must wait between two ACCEPTED outfit changes. Generous for a human in a
+	 *  wardrobe (the lobby sends one on spawn and the player cannot re-dress mid-match at all) and
+	 *  tight enough that a scripted client cannot make everyone else's connection carry the churn. */
+	static constexpr float OutfitChangeCooldown = 2.f;
+
+	/** SERVER ONLY. World time of the last ACCEPTED ServerSetOutfit, so the next one inside the
+	 *  cooldown is dropped. Not replicated and not reset by a refusal: a client that keeps asking
+	 *  keeps being refused rather than resetting its own clock. Starts a full cooldown in the past so
+	 *  the one call the lobby makes on spawn is never the one that gets eaten. */
+	float LastOutfitChangeTime = -OutfitChangeCooldown;
 
 	/** Vest points left; absorbs ArmorAbsorbShare of every hit until they are gone. */
 	UPROPERTY(Replicated)

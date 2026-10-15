@@ -1,4 +1,4 @@
-// The invite / friend-request card stack: the one piece of UI that must beat every other screen.
+﻿// The invite / friend-request card stack: the one piece of UI that must beat every other screen.
 //
 // It sits in the lobby's root SOverlay ABOVE the busy scrim and below the toast, so an invite that
 // arrives while the Store is open - or while a claim is in flight - is still answerable. Slate

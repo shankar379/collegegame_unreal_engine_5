@@ -15,7 +15,13 @@
 //
 // DECOR props are built from the engine's basic shapes at runtime rather than from authored assets,
 // for the same reason the UI glyphs are drawn rather than textured: a handful of boxes and cylinders
-// cannot fail to load, cannot miss a cook, and need nobody in Blender today.
+// need nobody in Blender today.
+//
+// THEY STILL HAVE TO BE COOKED. /Engine/BasicShapes is reachable ONLY by LoadObject path from
+// CampusOutfit.cpp, so no level and no asset reference shows it to the cooker: Config/DefaultGame.ini
+// carries `+DirectoriesToAlwaysCook=(Path="/Engine/BasicShapes")` next to the UEFN_Mannequin entries
+// for exactly this reason. Without it every prop fails to load on a packaged build (which is why
+// ACampusLobbyDecor::Rebuild logs a Warning rather than failing silently).
 
 #pragma once
 
@@ -143,6 +149,33 @@ namespace CampusCosmetics
 		return FName(Outfit(0).Id);
 	}
 
+	// ---- THE WIRE FORM: a catalogue index, never an FName.
+	//
+	// ACampusCharacter replicates OutfitIndex and ServerSetOutfit takes one, because an FName RPC
+	// parameter is interned into the engine's name table on arrival and that table is NEVER FREED -
+	// a client sending a fresh 64-character junk id every tick is an unbounded server-side leak with
+	// no gameplay reason to exist. An index cannot name anything this build does not already have.
+	// uint8 is ample and will stay so: the grid is hand-authored, one row per outfit.
+
+	/** True when this index names a row in the table above. The only check the wire form needs. */
+	inline bool IsValidOutfitIndex(int32 Index)
+	{
+		return Index >= 0 && Index < NumOutfits();
+	}
+
+	/** The id at a wire index. Out-of-range is the starter, for the same reason OutfitFor is never null. */
+	inline FName OutfitIdAt(int32 Index)
+	{
+		return FName(Outfit(IsValidOutfitIndex(Index) ? Index : 0).Id);
+	}
+
+	/** The wire index for an id, or 0 (the starter) for one this build does not know. */
+	inline uint8 OutfitIndexFor(FName Id)
+	{
+		const int32 Index = FindOutfit(Id);
+		return uint8(Index == INDEX_NONE ? 0 : Index);
+	}
+
 	/**
 	 * NEVER NULL. An id this build does not know - an old save's "Default", a cosmetic the server sold
 	 * after this APK shipped, NAME_None - is the starter outfit, because a body with no mesh is not a
@@ -238,6 +271,19 @@ namespace CampusCosmetics
 		return Mask;
 	}
 
+	/** EVERY anchor, the hanging one included. Spell this out rather than leaving FDecorEntry::Anchors
+	 *  at 0: an empty mask used to mean "allowed everywhere", which reads as its own opposite and made
+	 *  a row that forgot the field silently legal on all eight. Zero now means NOWHERE. */
+	inline uint32 AllAnchors()
+	{
+		uint32 Mask = 0;
+		for (int32 Index = 0; Index < NumAnchors; ++Index)
+		{
+			Mask |= AnchorBit(Index);
+		}
+		return Mask;
+	}
+
 	// ---------------------------------------------------------------------------------------------
 	// Decor props
 
@@ -268,7 +314,8 @@ namespace CampusCosmetics
 		const TCHAR* Id;
 		const TCHAR* Name;
 		ERarity Rarity;
-		/** Every anchor this prop is allowed on, as AnchorBit flags. */
+		/** Every anchor this prop is allowed on, as AnchorBit flags. StandingAnchors() for the usual
+		 *  case, AllAnchors() for one that may hang too. 0 is NOWHERE, never "everywhere". */
 		uint32 Anchors;
 		FDecorPart Parts[MaxDecorParts];
 	};
@@ -312,7 +359,7 @@ namespace CampusCosmetics
 			} },
 			// The only prop allowed on the hanging anchor as well: a pole with a cloth and a finial,
 			// which reads as a banner whether it stands on the floor or hangs over the line-up.
-			{ TEXT("decor_banner"), TEXT("Club Banner"), ERarity::Common, 0u, {
+			{ TEXT("decor_banner"), TEXT("Club Banner"), ERarity::Common, AllAnchors(), {
 				{ ShapeCylinder(),  0.f,   0.f, 105.f,   6.f,   6.f, 210.f, 0.f,  0.f, Steel },
 				{ ShapeCube(),      0.f,  46.f, 150.f,   4.f,  90.f, 120.f, 0.f,  0.f, Gold },
 				{ ShapeSphere(),    0.f,   0.f, 214.f,  14.f,  14.f,  14.f, 0.f,  0.f, Gold },
@@ -393,9 +440,10 @@ namespace CampusCosmetics
 		return Index == INDEX_NONE ? nullptr : &Decor(Index);
 	}
 
+	/** An EMPTY mask is NOWHERE. See FDecorEntry::Anchors and AllAnchors(). */
 	inline bool DecorAllowedAt(const FDecorEntry& Entry, int32 AnchorIndex)
 	{
-		return Entry.Anchors == 0u || (Entry.Anchors & AnchorBit(AnchorIndex)) != 0u;
+		return (Entry.Anchors & AnchorBit(AnchorIndex)) != 0u;
 	}
 
 	/** How tall this prop is, measured off its own recipe. What the hanging anchor drops it by. */

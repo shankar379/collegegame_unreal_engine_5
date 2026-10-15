@@ -1,4 +1,4 @@
-// The social screens: the friends list, the invite picker behind every "+ INVITE" plate, the stacked
+﻿// The social screens: the friends list, the invite picker behind every "+ INVITE" plate, the stacked
 // invite tray, the squad strip under the line-up, and the post-match PLAYER OF THE MATCH screen.
 //
 // Same language as the rest of the lobby: FCampusShape plates, one accent (#FFB800), bold condensed

@@ -1,4 +1,4 @@
-// One controller per level.
+﻿// One controller per level.
 // Lobby: UI only — the squad stands side by side on the lobby floor (no podium), drag to turn,
 //        menus, START.
 // Match: game controls — waiting room, then on-screen controls + HUD, then the win screen.

@@ -1,4 +1,4 @@
-// BATTLE SESSION matchmaking, client side. One game-instance subsystem so the queue survives the
+﻿// BATTLE SESSION matchmaking, client side. One game-instance subsystem so the queue survives the
 // lobby widget being rebuilt (and a level travel) and there is exactly one place that knows whether
 // this phone is queued.
 //

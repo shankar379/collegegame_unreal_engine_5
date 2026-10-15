@@ -1,4 +1,4 @@
-// Where the game finds its backend. Today: this PC on the shared Wi-Fi, standing in for the AWS box.
+﻿// Where the game finds its backend. Today: this PC on the shared Wi-Fi, standing in for the AWS box.
 // Change the values in Config/DefaultGame.ini under [/Script/CollegeCampusGame.CampusNetSettings].
 
 #pragma once

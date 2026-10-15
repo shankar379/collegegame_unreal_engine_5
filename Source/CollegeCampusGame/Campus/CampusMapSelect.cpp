@@ -438,6 +438,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 	// swapping the selection never reflows the row.
 	constexpr float CardHeight = 500.f;
 	constexpr float WideWidth = 800.f;
+	/** A 4v4 card is SQUARE. Named, because reading `WidthOverride(CardHeight)` below looked like a
+	 *  copy-paste slip every time and the next reader was going to "fix" it. */
+	constexpr float SquareWidth = CardHeight;
 	TSharedRef<SScrollBox> Banners = SNew(SScrollBox)
 		.Orientation(Orient_Horizontal)
 		.ScrollBarVisibility(EVisibility::Collapsed)
@@ -453,7 +456,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 			}
 			Banners->AddSlot().VAlign(VAlign_Top).Padding(bFirst ? 0.f : 12.f, 0.f, 0.f, 0.f)
 			[
-				SNew(SBox).WidthOverride(bLargePass ? WideWidth : CardHeight).HeightOverride(CardHeight)[BuildMapBanner(Index)]
+				SNew(SBox).WidthOverride(bLargePass ? WideWidth : SquareWidth).HeightOverride(CardHeight)[BuildMapBanner(Index)]
 			];
 			bFirst = false;
 		}

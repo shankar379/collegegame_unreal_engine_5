@@ -1,4 +1,4 @@
-// Friends, squads, invites, presence and the profile page's data - one game-instance subsystem holding
+﻿// Friends, squads, invites, presence and the profile page's data - one game-instance subsystem holding
 // ONE WebSocket to /v1/social/ws (subprotocol campus.social.v1).
 //
 // WHY A SOCKET AND NOT A POLL. The API lives behind an ngrok free tunnel metered at 20,000 HTTP requests

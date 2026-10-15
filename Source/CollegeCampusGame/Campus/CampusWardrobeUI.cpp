@@ -498,8 +498,18 @@ void SCampusLobbyWidget::RefreshCosmetics()
 		return;
 	}
 	bCosmeticsAsked = true;
-	Api->LoadCosmetics([this](bool bOk, const FString&)
+	// WEAK, AND NOT OPTIONAL. UCampusBackend is a GameInstanceSubsystem: it OUTLIVES this widget, it
+	// survives level travel, and it holds this callback until the request finishes. A raw `this` was
+	// a use-after-free the moment a reply landed on a lobby that had already been torn down - the
+	// player tapping PLAY while a cosmetics read is in the air is all it took. Same convention as
+	// SCampusLobbyWidget::EnsureAvatarPresets (Campus/CampusProfileUI.cpp).
+	TWeakPtr<SWidget> Weak = AsWeak();
+	Api->LoadCosmetics([this, Weak](bool bOk, const FString&)
 	{
+		if (!Weak.IsValid())
+		{
+			return;
+		}
 		if (!bOk)
 		{
 			// A wardrobe that could not be read is not an error worth a dialog: the player wears the
@@ -571,10 +581,17 @@ void SCampusLobbyWidget::EquipOutfit(FName OutfitId)
 	{
 		return;
 	}
-	bCosmeticsBusy = true;
-	Api->SaveCosmetics(OutfitId.ToString(), [this](bool bOk, const FString& Error)
+	++CosmeticsInFlight;
+	TWeakPtr<SWidget> Weak = AsWeak();
+	Api->SaveCosmetics(OutfitId.ToString(), [this, Weak](bool bOk, const FString& Error)
 	{
-		bCosmeticsBusy = false;
+		// Weak, for the reason spelled out in RefreshCosmetics above. The counter dies with the
+		// widget, so there is nothing to decrement once this fails.
+		if (!Weak.IsValid())
+		{
+			return;
+		}
+		--CosmeticsInFlight;
 		if (!bOk)
 		{
 			// The outfit STAYS ON. The device already believes it and so does the next launch; the
@@ -621,10 +638,15 @@ void SCampusLobbyWidget::StorePreset(int32 Index)
 	{
 		return;
 	}
-	bCosmeticsBusy = true;
-	Api->SavePreset(Index, Worn.ToString(), [this](bool bOk, const FString& Error)
+	++CosmeticsInFlight;
+	TWeakPtr<SWidget> Weak = AsWeak();
+	Api->SavePreset(Index, Worn.ToString(), [this, Weak](bool bOk, const FString& Error)
 	{
-		bCosmeticsBusy = false;
+		if (!Weak.IsValid())
+		{
+			return;
+		}
+		--CosmeticsInFlight;
 		if (!bOk)
 		{
 			// THE PRESET STAYS SAVED on this device, whatever the server said (409 NOT_OWNED, 422
@@ -684,10 +706,15 @@ void SCampusLobbyWidget::SetDecorAt(int32 AnchorIndex, FName ItemId)
 	{
 		Wire.Add(Pair.Key.ToString(), Pair.Value.ToString());
 	}
-	bCosmeticsBusy = true;
-	Api->SaveLobbyDecor(Wire, [this](bool bOk, const FString& Error)
+	++CosmeticsInFlight;
+	TWeakPtr<SWidget> Weak = AsWeak();
+	Api->SaveLobbyDecor(Wire, [this, Weak](bool bOk, const FString& Error)
 	{
-		bCosmeticsBusy = false;
+		if (!Weak.IsValid())
+		{
+			return;
+		}
+		--CosmeticsInFlight;
 		if (!bOk)
 		{
 			// Same rule as the closet: the prop STAYS where the player put it. A 422 UNKNOWN_ANCHOR
@@ -887,16 +914,16 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildPresetRow()
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildWardrobe()
 {
-	// The camera moves to the figure and the rest of the line-up hides: the SAME call the profile page
-	// makes, so there is still exactly one 3D path in the lobby.
-	if (Controller.IsValid())
-	{
-		Controller->FocusProfile(true);
-	}
+	// THE CAMERA MOVE LIVES IN Show(), not here. A Build function runs on EVERY repaint - and this one
+	// repaints on every equip tap and on every network reply - so moving the 3D camera from inside it
+	// re-ran a scene change dozens of times for one visit to the closet. Entering the screen is the
+	// event that owns it, which is the same rule the round trips in Show() already follow.
 
 	// OWNED ONLY, and the order is the catalogue's so a new outfit lands where the designer put it.
+	// Hoisted: NumOutfits() walks the table to count it, so it does not belong in a loop condition.
 	TArray<int32> Wearable;
-	for (int32 Index = 0; Index < CampusCosmetics::NumOutfits(); ++Index)
+	const int32 OutfitCount = CampusCosmetics::NumOutfits();
+	for (int32 Index = 0; Index < OutfitCount; ++Index)
 	{
 		if (OwnsCosmetic(FName(CampusCosmetics::Outfit(Index).Id)))
 		{
@@ -956,7 +983,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildWardrobe()
 	// One honest line at the foot of the panel, with a glyph as well as a colour.
 	TSharedRef<SWidget> Status = StatusLine(CampusAngular::EGlyph::Tick,
 		LOCTEXT("ClosetHint", "Tap an outfit to wear it. The figure changes as you tap."), Dim);
-	if (bCosmeticsBusy)
+	if (IsCosmeticsBusy())
 	{
 		Status = StatusLine(CampusAngular::EGlyph::Clock, LOCTEXT("ClosetSaving", "Saving your choice..."), Accent);
 	}
@@ -1085,7 +1112,10 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildWardrobe()
 		[
 			SNew(SBox).MaxDesiredWidth(PresetRowMaxWidth).HAlign(HAlign_Left)
 			// Only the cards and the presets go dead while a PUT is in the air; the X never does.
-			.IsEnabled(!bCosmeticsBusy)
+			// AN ATTRIBUTE, not a value baked in at build time: the reply that clears the counter
+			// arrives from the network, not from a repaint, and a value here left the row disabled
+			// until something else happened to rebuild it.
+			.IsEnabled_Lambda([this]() { return !IsCosmeticsBusy(); })
 			[
 				BuildPresetRow()
 			]
@@ -1169,7 +1199,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildWardrobe()
 					+ SHorizontalBox::Slot().FillWidth(ClosetSceneShare)[Figure]
 					+ SHorizontalBox::Slot().FillWidth(ClosetPanelShare).Padding(16.f, 0.f, 0.f, 0.f)
 					[
-						SNew(SBox).IsEnabled(!bCosmeticsBusy)[Panel]
+						SNew(SBox).IsEnabled_Lambda([this]() { return !IsCosmeticsBusy(); })[Panel]
 					]
 					+ SHorizontalBox::Slot().AutoWidth().Padding(Gap, 0.f, 0.f, 0.f)[Rail]
 				]
@@ -1381,7 +1411,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildDecorScreen()
 		.AllowOverscroll(EAllowOverscroll::Yes);
 	Props->AddSlot()[BuildDecorCard(INDEX_NONE)];
 	int32 Offered = 0;
-	for (int32 Index = 0; Index < CampusCosmetics::NumDecor(); ++Index)
+	// Hoisted for the same reason as OutfitCount in BuildWardrobe: NumDecor() counts the table.
+	const int32 DecorCount = CampusCosmetics::NumDecor();
+	for (int32 Index = 0; Index < DecorCount; ++Index)
 	{
 		const CampusCosmetics::FDecorEntry& Entry = CampusCosmetics::Decor(Index);
 		if (!CampusCosmetics::DecorAllowedAt(Entry, DecorAnchor) || !OwnsCosmetic(FName(Entry.Id)))
@@ -1534,7 +1566,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildDecorScreen()
 				]
 				+ SVerticalBox::Slot().AutoHeight()
 				[
-					SNew(SBox).IsEnabled(!bCosmeticsBusy)[Sheet]
+					SNew(SBox).IsEnabled_Lambda([this]() { return !IsCosmeticsBusy(); })[Sheet]
 				]
 			]
 		];

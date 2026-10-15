@@ -1,15 +1,21 @@
 // What the admin console changes without a release, as the player sees it (ADMIN_CONSOLE_DESIGN
 // "Game integration" 1 and 3). Three surfaces, one source: UCampusBackend's live-config blob.
 //
-//   THE GATE        a full-screen plate above every lobby screen. UPDATE REQUIRED when this build is
-//                   below the published floor - a dead end by design, with the store link when the
-//                   console has published one - otherwise the MAINTENANCE lock, with the server's own
-//                   sentence and a RETRY that re-reads /v1/live-config. It lives in the LOBBY widget
-//                   and nowhere else, which is what stops it ever closing over a live match.
+//   THE GATE        a full-screen plate above every lobby screen. UPDATE REQUIRED when a LIVE answer
+//                   says this build is below the floor, with the store link when the console has
+//                   published one - otherwise the MAINTENANCE lock, with the server's own sentence.
+//                   RETRY re-reads /v1/live-config and is on the plate in BOTH states: this is a
+//                   screen with nothing else on it, and that one request is the only thing in the
+//                   game that can clear either lock. It lives in the LOBBY widget and nowhere else,
+//                   which is what stops it ever closing over a live match.
 //   THE CARDS       announcements under the invite stack, in the same column, at the same width, so
 //                   nothing overlaps and the corner reads as one surface. NOTICE and MAINTENANCE wear
 //                   the accent and the danger edge; NEWS wears the gem edge. All dismissible, and a
 //                   dismissal is remembered in the save by id.
+//   THE NUDGE       one more card, at the top of that column, when the floor is known ONLY from the
+//                   blob cached on disk (UCampusBackend::IsUpdateAvailable). A phone that is offline
+//                   or LAN-only cannot tell a floor that still stands from one the owner rolled back,
+//                   so a cached floor may nag and may never gate. Dismissible, session-local.
 //
 // NOTHING HERE IS REBUILT TO CHANGE STATE. The gate is built once in the lobby's root overlay and
 // driven entirely by attributes, so it costs nothing while it is collapsed; the card column is
@@ -193,10 +199,16 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLiveGate()
 							// RETRY re-reads /v1/live-config, which is the ONLY route the 503 does not
 							// cover - so the lock can always be asked whether it is over. Forced, or
 							// the ten-minute throttle would make the button do nothing.
+							//
+							// IT IS ALWAYS HERE, the UPDATE state included. This plate is a dead end
+							// with nothing else on it, and the floor behind it can be lowered by the
+							// owner (a bad release rolled back) or have been read wrong by a phone
+							// whose network only came up a moment ago. A screen with no button at all
+							// is indistinguishable from the game being broken, and the one request
+							// that can clear it is exactly the one this button makes.
 							+ SHorizontalBox::Slot().AutoWidth()
 							[
 								SNew(SBox).WidthOverride(240.f).HeightOverride(64.f)
-								.Visibility_Lambda([Update]() { return Update() ? EVisibility::Collapsed : EVisibility::Visible; })
 								[
 									SNew(SCampusAngularButton)
 									.Shape(FCampusShape::Wedge(16.f, 12.f))
@@ -300,13 +312,27 @@ void SCampusLobbyWidget::RefreshAnnouncements()
 	}
 	const UCampusBackend* Api = Backend();
 	const TArray<FCampusAnnouncement> Rows = Api ? Api->ActiveAnnouncements() : TArray<FCampusAnnouncement>();
-	if (Rows.Num() == 0)
+	// The soft update nudge, for a floor known only from the cached blob. FIRST in the column, because
+	// it is the only card that is about the player's own build rather than about the game.
+	const bool bUpdateCard = Api && Api->IsUpdateAvailable() && !bUpdateCardDismissed;
+	if (Rows.Num() == 0 && !bUpdateCard)
 	{
 		AnnounceBox->SetContent(SNullWidget::NullWidget);
 		return;
 	}
 	const TSharedRef<SVerticalBox> Column = SNew(SVerticalBox);
-	for (int32 Index = 0; Index < Rows.Num() && Index < MaxAnnouncementCards; ++Index)
+	int32 Shown = 0;
+	if (bUpdateCard)
+	{
+		Column->AddSlot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, SCampusNoticeStack::CardGap)
+		[
+			BuildUpdateCard()
+		];
+		++Shown;
+	}
+	// MaxAnnouncementCards counts the whole column, the update card included: a fourth card is a wall
+	// of text in the corner whatever is written on it.
+	for (int32 Index = 0; Index < Rows.Num() && Shown < MaxAnnouncementCards; ++Index, ++Shown)
 	{
 		Column->AddSlot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, SCampusNoticeStack::CardGap)
 		[
@@ -314,6 +340,103 @@ void SCampusLobbyWidget::RefreshAnnouncements()
 		];
 	}
 	AnnounceBox->SetContent(Column);
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildUpdateCard()
+{
+	// NOT THE GATE, and the difference is the whole point of this card existing. The published floor
+	// says this build is behind, but the only place we read that floor was the blob cached on disk -
+	// and a phone that is offline, on a LAN with no route to the API, or simply started before the
+	// network came up, cannot tell a floor that still stands from one the owner rolled back hours ago.
+	// Taking the game away on that evidence locks a player out with nothing on screen they can act on.
+	// So: the same shape as a NEWS card, the store link when there is one, and an X.
+	const FString Url = Backend() ? Backend()->UpdateUrl() : FString();
+
+	const TSharedRef<SVerticalBox> Body = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left)
+		[
+			KindChip(CampusAngular::EGlyph::Rank, LOCTEXT("KindUpdate", "UPDATE"), CampusAngular::Gem)
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 10.f, 0.f, 0.f)
+		[
+			SNew(STextBlock).Text(LOCTEXT("UpdateCardTitle", "A NEWER VERSION IS OUT"))
+			.Font(CampusAngular::Display(21))
+			.ColorAndOpacity(FLinearColor::White).AutoWrapText(true)
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("UpdateCardBody", "You can keep playing. Update when it suits you to stay on the latest build."))
+			.Font(CampusAngular::Body(15))
+			.ColorAndOpacity(CampusAngular::TextMuted).AutoWrapText(true)
+		];
+	if (!Url.IsEmpty())
+	{
+		Body->AddSlot().AutoHeight().HAlign(HAlign_Left).Padding(0.f, 12.f, 0.f, 0.f)
+		[
+			SNew(SBox).WidthOverride(200.f).HeightOverride(48.f)
+			[
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Wedge(12.f, 9.f))
+				.Fill(CampusAngular::Gem)
+				.Border(FLinearColor(1.f, 1.f, 1.f, 0.28f))
+				.BorderWidth(1.f)
+				.ContentPadding(FMargin(12.f, 3.f))
+				.OnClicked(FOnClicked::CreateLambda([this, Url]()
+				{
+					FPlatformProcess::LaunchURL(*Url, nullptr, nullptr);
+					return FReply::Handled();
+				}))
+				[
+					SNew(STextBlock).Text(LOCTEXT("UpdateCardGo", "UPDATE"))
+					.Font(CampusAngular::Display(17))
+					.ColorAndOpacity(FLinearColor(0.05f, 0.04f, 0.f, 1.f))
+				]
+			]
+		];
+	}
+
+	return SNew(SBox).WidthOverride(SCampusNoticeStack::CardWidth)
+		[
+			SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Notched(16.f))
+			.Fill(CampusAngular::InkStrong)
+			.Border(CampusAngular::Gem.CopyWithNewOpacity(0.75f))
+			.BorderWidth(2.f)
+			.AccentEdge(CampusAngular::Gem)
+			.AccentEdgeWidth(5.f)
+			.ContentPadding(FMargin(20.f, 14.f, 14.f, 16.f))
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(1.f)[Body]
+				// X, 44 square like the announcement cards. SESSION-LOCAL (bUpdateCardDismissed): this
+				// is a standing fact about the APK, not news that happened once, so it is right for it
+				// to come back on the next launch and wrong for it to sit in the save for ever.
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(10.f, 0.f, 0.f, 0.f)
+				[
+					SNew(SBox).WidthOverride(44.f).HeightOverride(44.f)
+					[
+						SNew(SCampusAngularButton)
+						.Shape(FCampusShape::Notched(10.f))
+						.Fill(FLinearColor(1.f, 1.f, 1.f, 0.08f))
+						.Border(CampusAngular::Hairline)
+						.BorderWidth(1.f)
+						.OnClicked(FOnClicked::CreateLambda([this]()
+						{
+							bUpdateCardDismissed = true;
+							// NEVER from inside the tap: re-filling the column here would tear down
+							// the very button still routing this touch. The lobby's Tick serves it.
+							bAnnouncementsDirty = true;
+							return FReply::Handled();
+						}))
+						[
+							SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Close).Size(18.f)
+							.Color(FLinearColor(1.f, 1.f, 1.f, 0.7f))
+						]
+					]
+				]
+			]
+		];
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildAnnouncementCard(const FCampusAnnouncement& Row)
