@@ -417,6 +417,20 @@ private:
 	void StoreEquipGun(int32 Index);
 	UCampusPlayBilling* StoreBilling() const;
 
+	// ---- live config: maintenance, minimum version, announcements (Campus/CampusLiveConfigUI.cpp).
+	//      Everything the admin console can change without a release, as the player sees it.
+	/** The full-screen plate above every lobby screen: UPDATE REQUIRED, else the MAINTENANCE lock.
+	 *  Built ONCE into the root overlay and driven entirely by attributes, so it costs nothing while
+	 *  it is collapsed and never has to be rebuilt to change state. It is in the LOBBY widget and
+	 *  nowhere else, which is what stops it ever closing over a live match. */
+	TSharedRef<SWidget> BuildLiveGate();
+	/** Lobby entry, and the lock's RETRY: paint the cached blob, then GET /v1/live-config. The call is
+	 *  throttled inside the subsystem - once per app run, then only after a stale resume. */
+	void RefreshLiveConfig();
+	/** Re-fills the announcement column under the invite stack. Called from Tick only. */
+	void RefreshAnnouncements();
+	TSharedRef<SWidget> BuildAnnouncementCard(const struct FCampusAnnouncement& Row);
+
 	TSharedRef<SWidget> BuildRooms();
 	TSharedRef<SWidget> BuildAccount();
 	TSharedRef<SWidget> BuildDaily();
@@ -648,6 +662,16 @@ private:
 	bool bLobbyFriendsOpen = false;
 	/** The yes/no that floats over whatever screen is showing; empty content = nothing asked. */
 	TSharedPtr<SBox> ConfirmBox;
+
+	// ---- live config state (Campus/CampusLiveConfigUI.cpp)
+	/** The announcement column, directly under the invite stack and at the same width, so the two
+	 *  never overlap and the corner reads as one surface. */
+	TSharedPtr<SBox> AnnounceBox;
+	/** A blob landed, or a card was dismissed: re-fill the column on the next Tick. NEVER from inside
+	 *  the tap or the network callback that asked for it - that tears down the button still routing
+	 *  the touch, which is the whole reason bRefreshQueued exists. */
+	bool bAnnouncementsDirty = false;
+	FDelegateHandle LiveConfigHandle;
 	FDelegateHandle SocialPartyHandle;
 	FDelegateHandle SocialRosterHandle;
 	FDelegateHandle SocialStateHandle;

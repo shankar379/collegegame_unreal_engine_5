@@ -9,6 +9,8 @@
 #include "HttpModule.h"
 #include "Interfaces/IHttpResponse.h"
 #include "Misc/Base64.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/CoreDelegates.h"
 #include "HAL/PlatformProcess.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -100,6 +102,18 @@ namespace
 		return !Text.IsEmpty() && FDateTime::ParseIso8601(*Text, Out) ? Out : FDateTime();
 	}
 
+	/** An id that may arrive as a JSON number (announcements) or as a string, always read as text:
+	 *  the client only ever compares it and remembers it, so it has no business being arithmetic. */
+	FString Id(const TSharedPtr<FJsonObject>& Json, const TCHAR* Field)
+	{
+		if (const FString Text = Str(Json, Field); !Text.IsEmpty())
+		{
+			return Text;
+		}
+		double Value = 0.0;
+		return Json.IsValid() && Json->TryGetNumberField(Field, Value) ? LexToString(int64(Value)) : FString();
+	}
+
 	/** Every reward in the engagement API is the same open shape: {diamonds?, room_cards?, title?}. */
 	FCampusReward ReadReward(const TSharedPtr<FJsonObject>& Json)
 	{
@@ -171,6 +185,16 @@ void UCampusBackend::Initialize(FSubsystemCollectionBase& Collection)
 		// cache now, and the server's word replaces it the moment GET /me lands.
 		AvatarUrl = Profile->AvatarUrl;
 	}
+	// The published blob, from the save, BEFORE anything asks for it: the minimum build and the live
+	// announcements have to be right on the first frame and with no network at all.
+	LoadLiveConfigFromCache();
+	// THE RESUME. The design's second trigger is a resume older than ten minutes, and the staleness
+	// test lives inside FetchLiveConfig - so this is the whole of it. No timer, no poll: a phone that
+	// is woken twice in a minute costs one request, not two.
+	ForegroundHandle = FCoreDelegates::ApplicationHasEnteredForegroundDelegate.AddLambda([this]()
+	{
+		FetchLiveConfig(false);
+	});
 }
 
 void UCampusBackend::ApplyProgress(int32 InLevel, int32 InXpInto, int32 InXpForNext, int32 InLevelMax)
@@ -205,6 +229,11 @@ void UCampusBackend::CallApi(const FString& Verb, const FString& Path, TSharedPt
 void UCampusBackend::Deinitialize()
 {
 	FTSTicker::GetCoreTicker().RemoveTicker(HeartbeatHandle);
+	if (ForegroundHandle.IsValid())
+	{
+		FCoreDelegates::ApplicationHasEnteredForegroundDelegate.Remove(ForegroundHandle);
+		ForegroundHandle.Reset();
+	}
 	Super::Deinitialize();
 }
 
@@ -313,7 +342,7 @@ void UCampusBackend::Request(const FString& Verb, const FString& Path, TSharedPt
 	Send(Verb, Path, BodyText, bAuth, bIdempotent ? NewKey() : FString(), MoveTemp(OnResponse), bRetried);
 }
 
-void UCampusBackend::Send(const FString& Verb, const FString& Path, const FString& BodyText, bool bAuth, const FString& IdempotencyKey, FResponse OnResponse, bool bRetried)
+TSharedRef<IHttpRequest, ESPMode::ThreadSafe> UCampusBackend::OpenRequest(const FString& Verb, const FString& Path) const
 {
 	const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Http = FHttpModule::Get().CreateRequest();
 	Http->SetURL(ApiBase() + Path);
@@ -321,6 +350,12 @@ void UCampusBackend::Send(const FString& Verb, const FString& Path, const FStrin
 	Http->SetTimeout(10.f);
 	Http->SetHeader(TEXT("Accept"), TEXT("application/json"));
 	Http->SetHeader(TEXT("ngrok-skip-browser-warning"), TEXT("1")); // tunnel interstitial off for API calls
+	return Http;
+}
+
+void UCampusBackend::Send(const FString& Verb, const FString& Path, const FString& BodyText, bool bAuth, const FString& IdempotencyKey, FResponse OnResponse, bool bRetried)
+{
+	const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Http = OpenRequest(Verb, Path);
 	// Mutations always carry a JSON body ("{}" when there is nothing to send): without one, Android's HTTP stack
 	// labels the empty POST as a form and the API refuses it ("Unsupported Media Type").
 	if (Verb != TEXT("GET"))
@@ -399,6 +434,33 @@ void UCampusBackend::Send(const FString& Verb, const FString& Path, const FStrin
 				}
 				Self->bAgeConfirmRequired = true;
 			}
+			// MAINTENANCE. Every route but health, /config and /live-config answers 503 MAINTENANCE
+			// while the owner has the game locked, so ANY call is enough to raise the lock screen -
+			// a phone that was already in the lobby when the switch was thrown does not have to
+			// wait for its next live-config read to be told why nothing works.
+			if (Status == 503 && Code == TEXT("MAINTENANCE"))
+			{
+				Self->bMaintenanceFromCall = true;
+				Self->CallMaintenanceMessage = ErrorText(Status, Json);
+			}
+			else if (Status >= 200 && Status < 300)
+			{
+				// The window is over: the server is answering again, so the lock lets go by itself.
+				Self->bMaintenanceFromCall = false;
+				Self->CallMaintenanceMessage.Reset();
+			}
+			// 426 CLIENT_TOO_OLD (routes/auth.js): the floor was raised past this build. The server
+			// hands back the new floor, which is what lets the update screen stand even on a phone
+			// that has never read a live-config blob.
+			if (Status == 426 || Code == TEXT("CLIENT_TOO_OLD"))
+			{
+				Self->bClientTooOld = true;
+				const TSharedPtr<FJsonObject> Details = Obj(Obj(Json, TEXT("error")), TEXT("details"));
+				if (const int32 Floor = int32(Num(Details, TEXT("min_client_build"))); Floor > Self->LiveConfig.MinClientBuild)
+				{
+					Self->LiveConfig.MinClientBuild = Floor;
+				}
+			}
 			if (Status == 0)
 			{
 				// show WHY on screen (no USB log on a friend's phone): the engine's failure reason + the address tried
@@ -422,6 +484,9 @@ void UCampusBackend::RefreshAccess(TFunction<void(bool bOk)> Then)
 	bRefreshing = true;
 	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
 	Body->SetStringField(TEXT("refresh_token"), Save() ? Save()->RefreshToken : FString());
+	// A resumed session is a sign-in: RefreshBody takes client_build too, so a retired build is told
+	// to update on app start rather than halfway through its first menu.
+	AddClientBuild(Body);
 	Request(TEXT("POST"), TEXT("/auth/refresh"), Body, false, false, [this](int32 Status, TSharedPtr<FJsonObject> Json)
 	{
 		const bool bOk = Status == 200;
@@ -536,6 +601,7 @@ void UCampusBackend::SignInGuest(FDone Done)
 	Body->SetStringField(TEXT("device_secret"), Profile->DeviceSecret);
 	Body->SetStringField(TEXT("platform"), PlatformName());
 	AddAdultTick(Body); // guest sign-in creates an account too: it needs the 18+ tick like register/login
+	AddClientBuild(Body);
 	Request(TEXT("POST"), TEXT("/auth/device"), Body, false, false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
 	{
 		if (Status != 200 && Status != 201)
@@ -556,6 +622,7 @@ void UCampusBackend::Register(const FString& InEmail, const FString& Password, c
 	Body->SetStringField(TEXT("display_name"), Name.TrimStartAndEnd());
 	Body->SetStringField(TEXT("platform"), PlatformName());
 	AddAdultTick(Body);
+	AddClientBuild(Body);
 	// signed in as a guest: the bearer makes the server upgrade that guest instead of starting over
 	Request(TEXT("POST"), TEXT("/auth/register"), Body, IsSignedIn(), false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
 	{
@@ -576,6 +643,7 @@ void UCampusBackend::Login(const FString& InEmail, const FString& Password, FDon
 	Body->SetStringField(TEXT("password"), Password);
 	Body->SetStringField(TEXT("platform"), PlatformName());
 	AddAdultTick(Body);
+	AddClientBuild(Body);
 	Request(TEXT("POST"), TEXT("/auth/login"), Body, false, false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
 	{
 		if (Status != 200)
@@ -633,6 +701,16 @@ void UCampusBackend::AddAdultTick(TSharedPtr<FJsonObject> Body) const
 	if (Body.IsValid() && HasAdultTick())
 	{
 		Body->SetBoolField(TEXT("adultConfirmed"), true);
+	}
+}
+
+void UCampusBackend::AddClientBuild(TSharedPtr<FJsonObject> Body) const
+{
+	// A NUMBER, never a version string: routes/auth.js refuses "1.4.2" outright, because comparing
+	// build strings puts '9' above '10' and waves through exactly the build being retired.
+	if (Body.IsValid())
+	{
+		Body->SetNumberField(TEXT("client_build"), ClientBuild());
 	}
 }
 
@@ -904,6 +982,227 @@ void UCampusBackend::LoadEngagementHome(FDone Done)
 		}
 		Done(true, FString());
 	});
+}
+
+// -------------------------------------------------------------------------------------------------
+// Live config: maintenance, minimum build, announcements (ADMIN_CONSOLE_DESIGN "Game integration" 1
+// and 3). ONE public, unauthenticated, conditional GET. It does not go through Request()/Send():
+// there is no bearer to refresh, no idempotency key to replay and no 18+ gate on this route, and it
+// needs two things Send() has no business growing - a request header in and a response header out.
+// What it DOES share is OpenRequest(), so the ngrok opt-out and the "//" defended base stay in one
+// place. Compiled-in values and the cached blob are the fallback, in that order; nothing here can
+// block, empty or delay the lobby.
+
+int32 UCampusBackend::ClientBuild()
+{
+	// THE SOURCE OF TRUTH, and the only one: the APK's version code. Config/DefaultEngine.ini
+	// [/Script/AndroidRuntimeSettings.AndroidRuntimeSettings] StoreVersion is what UBT stamps into the
+	// manifest, what Play orders releases by, and what the server's MIN_CLIENT_BUILD has always been
+	// comparing `client_build` against. Read once; the ini is cooked into the package.
+	static int32 Cached = 0;
+	if (Cached == 0)
+	{
+		int32 Value = 0;
+		if (GConfig)
+		{
+			GConfig->GetInt(TEXT("/Script/AndroidRuntimeSettings.AndroidRuntimeSettings"), TEXT("StoreVersion"), Value, GEngineIni);
+		}
+		// A build that cannot name itself is build 1, which is the floor the API tolerates.
+		Cached = FMath::Max(1, Value);
+	}
+	return Cached;
+}
+
+FString UCampusBackend::MaintenanceText() const
+{
+	if (!LiveConfig.MaintenanceMessage.IsEmpty())
+	{
+		return LiveConfig.MaintenanceMessage;
+	}
+	if (!CallMaintenanceMessage.IsEmpty())
+	{
+		return CallMaintenanceMessage;
+	}
+	return TEXT("Campus Combat is down for maintenance. Please try again shortly.");
+}
+
+void UCampusBackend::ReadLiveConfig(TSharedPtr<FJsonObject> Json, bool bFromCache)
+{
+	if (!Json.IsValid())
+	{
+		return;
+	}
+	FCampusLiveConfig Out;
+	Out.bLoaded = true;
+	Out.Revision = int32(Num(Json, TEXT("revision")));
+	const TSharedPtr<FJsonObject> Maintenance = Obj(Json, TEXT("maintenance"));
+	// A LOCK SCREEN IS NEVER RESTORED FROM DISK (see CampusSave.h). Yesterday's blob is kept for the
+	// minimum build and the announcements, but only a live answer - this fetch, or a 503 on any call -
+	// may take the game away from the player.
+	Out.bMaintenance = !bFromCache && Bool(Maintenance, TEXT("on"));
+	// The message is kept ONLY while this blob is the thing asserting the lock. Yesterday's sentence
+	// sitting next to today's 503 would make the lock screen quote the wrong window.
+	Out.MaintenanceMessage = Out.bMaintenance ? Str(Maintenance, TEXT("message")) : FString();
+	Out.MinClientBuild = int32(Num(Json, TEXT("min_client_build")));
+	// Whichever spelling the console publishes; both are optional and the screen works without either.
+	Out.UpdateUrl = Str(Json, TEXT("update_url"));
+	if (Out.UpdateUrl.IsEmpty())
+	{
+		Out.UpdateUrl = Str(Json, TEXT("store_url"));
+	}
+	const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
+	if (Json->TryGetArrayField(TEXT("announcements"), Items))
+	{
+		Out.Announcements.Reserve(Items->Num());
+		for (const TSharedPtr<FJsonValue>& Value : *Items)
+		{
+			const TSharedPtr<FJsonObject> Item = Value->AsObject();
+			const FString RowId = Id(Item, TEXT("id"));
+			if (RowId.IsEmpty())
+			{
+				continue; // nothing to remember a dismissal under: not showable
+			}
+			FCampusAnnouncement& Row = Out.Announcements.AddDefaulted_GetRef();
+			Row.Id = RowId;
+			Row.Kind = Str(Item, TEXT("kind")).ToLower();
+			Row.Title = Str(Item, TEXT("title"));
+			Row.Body = Str(Item, TEXT("body"));
+			Row.StartsAt = Stamp(Item, TEXT("starts_at"));
+			Row.EndsAt = Stamp(Item, TEXT("ends_at"));
+		}
+	}
+	// Every other published key is ignored on purpose: this build can only act on ids it already
+	// knows, and a key it invents a meaning for is a second source of truth waiting to drift.
+	LiveConfig = MoveTemp(Out);
+	if (!LiveConfig.bMaintenance && !bFromCache)
+	{
+		// /v1/live-config is exempt from the 503, so a live blob that says the window is over is the
+		// one answer that can clear a lock raised by another call. This is what RETRY actually does.
+		bMaintenanceFromCall = false;
+		CallMaintenanceMessage.Reset();
+	}
+}
+
+void UCampusBackend::LoadLiveConfigFromCache()
+{
+	const UCampusSave* Profile = Save();
+	if (!Profile || Profile->LiveConfigCache.IsEmpty())
+	{
+		return;
+	}
+	TSharedPtr<FJsonObject> Json;
+	if (FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Profile->LiveConfigCache), Json))
+	{
+		ReadLiveConfig(Json, true);
+	}
+}
+
+void UCampusBackend::FetchLiveConfig(bool bForce)
+{
+	if (bLiveConfigInFlight)
+	{
+		return;
+	}
+	const double Now = FPlatformTime::Seconds();
+	// ONE FETCH PER APP RUN plus one per stale resume. The lobby calls this on every entry and the
+	// resume hook on every wake; this test is what keeps that honest on a 20,000-a-month tunnel.
+	if (!bForce && LiveConfigFetchedAt > 0.0 && Now - LiveConfigFetchedAt < LiveConfigMaxAgeSeconds)
+	{
+		return;
+	}
+	bLiveConfigInFlight = true;
+	const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Http = OpenRequest(TEXT("GET"), TEXT("/live-config"));
+	const UCampusSave* Profile = Save();
+	// The conditional request. An ETag with no blob behind it would turn a 304 into an empty screen,
+	// so that pair is only sent when both halves are there.
+	if (Profile && !Profile->LiveConfigEtag.IsEmpty() && !Profile->LiveConfigCache.IsEmpty())
+	{
+		Http->SetHeader(TEXT("If-None-Match"), Profile->LiveConfigEtag);
+	}
+	// The route is public, but the bearer is harmless and keeps the server's rate limiting per account.
+	if (!AccessToken.IsEmpty())
+	{
+		Http->SetHeader(TEXT("Authorization"), TEXT("Bearer ") + AccessToken);
+	}
+	TWeakObjectPtr<UCampusBackend> WeakThis(this);
+	Http->OnProcessRequestComplete().BindLambda(
+		[WeakThis](FHttpRequestPtr, FHttpResponsePtr Response, bool bConnected)
+		{
+			UCampusBackend* Self = WeakThis.Get();
+			if (!Self)
+			{
+				return;
+			}
+			Self->bLiveConfigInFlight = false;
+			const int32 Status = bConnected && Response.IsValid() ? Response->GetResponseCode() : 0;
+			if (Status == 304)
+			{
+				// The revision has not moved: nothing was sent, nothing has to be parsed, and the copy
+				// already applied from the save stands. This is the request this call is designed to be.
+				Self->LiveConfigFetchedAt = FPlatformTime::Seconds();
+				Self->OnLiveConfigChanged.Broadcast();
+				return;
+			}
+			if (Status != 200)
+			{
+				// A timeout, a 5xx or no network at all: keep the cached blob and the compiled-in
+				// defaults, say nothing, and leave the timestamp alone so the next resume tries again.
+				return;
+			}
+			const FString BodyText = Response->GetContentAsString();
+			TSharedPtr<FJsonObject> Json;
+			if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(BodyText), Json))
+			{
+				return;
+			}
+			Self->ReadLiveConfig(Json, false);
+			Self->LiveConfigFetchedAt = FPlatformTime::Seconds();
+			if (UCampusSave* Profile2 = Self->Save())
+			{
+				// The body verbatim, not a re-serialised copy: the ETag the server gave belongs to
+				// these exact bytes, and the next launch has to paint from them before the network.
+				Profile2->LiveConfigCache = BodyText;
+				Profile2->LiveConfigEtag = Response->GetHeader(TEXT("ETag"));
+				Profile2->Persist();
+			}
+			Self->OnLiveConfigChanged.Broadcast();
+		});
+	Http->ProcessRequest();
+}
+
+TArray<FCampusAnnouncement> UCampusBackend::ActiveAnnouncements() const
+{
+	TArray<FCampusAnnouncement> Out;
+	const UCampusSave* Profile = Save();
+	// The API already filters the window; this is the device's own check, so a blob cached before an
+	// announcement opened - or kept past the moment it closed - still shows the truth offline.
+	const FDateTime Now = FDateTime::UtcNow();
+	for (const FCampusAnnouncement& Row : LiveConfig.Announcements)
+	{
+		if (!Row.IsActiveAt(Now))
+		{
+			continue;
+		}
+		if (Profile && Profile->DismissedAnnouncements.Contains(Row.Id))
+		{
+			continue;
+		}
+		Out.Add(Row);
+	}
+	return Out;
+}
+
+void UCampusBackend::DismissAnnouncement(const FString& InId)
+{
+	if (InId.IsEmpty())
+	{
+		return;
+	}
+	if (UCampusSave* Profile = Save(); Profile && !Profile->DismissedAnnouncements.Contains(InId))
+	{
+		Profile->DismissedAnnouncements.Add(InId);
+		Profile->Persist();
+	}
 }
 
 /** Every claim answers with the new wallet; taking it from the response is what keeps the counters honest. */

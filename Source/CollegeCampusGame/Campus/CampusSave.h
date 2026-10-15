@@ -176,6 +176,26 @@ public:
 	UPROPERTY()
 	FString StreakPopupDay;
 
+	// ---- live config (GET /v1/live-config, admin console phase A). The last PUBLISHED blob and its
+	// ETag, so the lobby knows the minimum build, the live announcements and the maintenance message on
+	// the first frame and offline - and so the next fetch costs one conditional request on a tunnel
+	// metered at 20,000 a month. MAINTENANCE IS DELIBERATELY NOT TRUSTED FROM HERE: a lock screen is the
+	// one thing a stale cache must never invent, so UCampusBackend drops `maintenance.on` when it reads
+	// this back and only a live response can raise it.
+
+	/** The strong ETag the server gave the cached blob ("lc-<revision>"), sent back as If-None-Match. */
+	UPROPERTY()
+	FString LiveConfigEtag;
+
+	/** The last 200 body of GET /v1/live-config, verbatim. */
+	UPROPERTY()
+	FString LiveConfigCache;
+
+	/** Announcement ids this player has dismissed, so a card never comes back. The server's numeric id
+	 *  as TEXT: an old save keeps loading if that type ever widens, and nothing here has to do maths. */
+	UPROPERTY()
+	TArray<FString> DismissedAnnouncements;
+
 	// ---- social (UCampusSocial, migration 012) and server-side progression (migration 013)
 
 	/** The last social event sequence this phone APPLIED. Persisted so an app restart does not replay

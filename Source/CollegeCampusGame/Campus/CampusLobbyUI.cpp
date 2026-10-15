@@ -293,6 +293,14 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 		Queue->ColdCheck();
 	}
 
+	// The published blob can land at any time (lobby entry, or a resume ten minutes later), and the
+	// cards it draws must not be rebuilt from inside the network callback - the same rule as every
+	// other repaint here. One flag, served by Tick.
+	if (UCampusBackend* Api = Backend())
+	{
+		LiveConfigHandle = Api->OnLiveConfigChanged.AddLambda([this]() { bAnnouncementsDirty = true; });
+	}
+
 	ChildSlot
 	[
 		SNew(SOverlay)
@@ -376,43 +384,60 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 				SNew(SBox).HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(FMargin(0.f, 150.f, 0.f, 0.f))
 				.Visibility(EVisibility::SelfHitTestInvisible)
 				[
-					SNew(SCampusNoticeStack)
-					.Social(Social())
-					.OnAccept(FOnCampusNoticeAction::CreateLambda([this](FString Key)
-					{
-						UCampusSocial* Live = Social();
-						const FCampusNotice* Card = Live ? Live->FindNotice(Key) : nullptr;
-						if (!Card)
+					SNew(SVerticalBox)
+					.Visibility(EVisibility::SelfHitTestInvisible)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(SCampusNoticeStack)
+						.Social(Social())
+						.OnAccept(FOnCampusNoticeAction::CreateLambda([this](FString Key)
 						{
-							return;
-						}
-						if (Card->Kind == ECampusNoticeKind::Invite)
+							UCampusSocial* Live = Social();
+							const FCampusNotice* Card = Live ? Live->FindNotice(Key) : nullptr;
+							if (!Card)
+							{
+								return;
+							}
+							if (Card->Kind == ECampusNoticeKind::Invite)
+							{
+								AnswerInvite(Key, true);
+								return;
+							}
+							const FString Who = Card->Sender.PlayerId;
+							Live->ResolveNotice(Key, TEXT("ACCEPTED"));
+							Live->AcceptFriend(Who, [this](bool, const FString&) { Refresh(); });
+						}))
+						.OnReject(FOnCampusNoticeAction::CreateLambda([this](FString Key)
 						{
-							AnswerInvite(Key, true);
-							return;
-						}
-						const FString Who = Card->Sender.PlayerId;
-						Live->ResolveNotice(Key, TEXT("ACCEPTED"));
-						Live->AcceptFriend(Who, [this](bool, const FString&) { Refresh(); });
-					}))
-					.OnReject(FOnCampusNoticeAction::CreateLambda([this](FString Key)
-					{
-						UCampusSocial* Live = Social();
-						const FCampusNotice* Card = Live ? Live->FindNotice(Key) : nullptr;
-						if (!Card)
+							UCampusSocial* Live = Social();
+							const FCampusNotice* Card = Live ? Live->FindNotice(Key) : nullptr;
+							if (!Card)
+							{
+								return;
+							}
+							if (Card->Kind == ECampusNoticeKind::Invite)
+							{
+								AnswerInvite(Key, false);
+								return;
+							}
+							const FString Who = Card->Sender.PlayerId;
+							Live->ResolveNotice(Key, TEXT("DECLINED"));
+							Live->DeclineFriend(Who, [this](bool, const FString&) { Refresh(); });
+						}))
+						.OnOpenTray(FSimpleDelegate::CreateLambda([this]() { Show(EScreen::InviteTray); }))
+					]
+					// ANNOUNCEMENTS from the admin console (Campus/CampusLiveConfigUI.cpp), in the SAME
+					// column and at the same width, directly UNDER the invites: nothing overlaps, the corner
+					// stays one surface, and a time-critical invite still sits on top of the news. Lobby
+					// only, unlike the invites - an invite must survive the Store, a notice need not.
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 12.f, 0.f, 0.f)
+					[
+						SAssignNew(AnnounceBox, SBox)
+						.Visibility_Lambda([this]()
 						{
-							return;
-						}
-						if (Card->Kind == ECampusNoticeKind::Invite)
-						{
-							AnswerInvite(Key, false);
-							return;
-						}
-						const FString Who = Card->Sender.PlayerId;
-						Live->ResolveNotice(Key, TEXT("DECLINED"));
-						Live->DeclineFriend(Who, [this](bool, const FString&) { Refresh(); });
-					}))
-					.OnOpenTray(FSimpleDelegate::CreateLambda([this]() { Show(EScreen::InviteTray); }))
+							return Current == EScreen::Lobby ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed;
+						})
+					]
 				]
 			]
 		]
@@ -428,6 +453,14 @@ void SCampusLobbyWidget::Construct(const FArguments& InArgs)
 			[
 				SNew(STextBlock).Text_Lambda([this]() { return FText::FromString(ToastText); }).Font(Font(20)).ColorAndOpacity(FLinearColor::White)
 			]
+		]
+		// THE GATE, topmost: UPDATE REQUIRED or the MAINTENANCE lock. Last in the overlay, so while it
+		// is up nothing under it - not the toast, not an invite, not START - can be reached. It is
+		// COLLAPSED unless the server says otherwise, and it only exists on the lobby level, which is
+		// what guarantees it can never close over a match in progress.
+		+ SOverlay::Slot()
+		[
+			BuildLiveGate()
 		]
 	];
 
@@ -455,6 +488,10 @@ SCampusLobbyWidget::~SCampusLobbyWidget()
 		Live->OnNotice.Remove(SocialNoticeHandle);
 		Live->OnRoomReady.Remove(SocialRoomHandle);
 		Live->OnSummaryReady.Remove(SocialSummaryHandle);
+	}
+	if (UCampusBackend* Api = Backend())
+	{
+		Api->OnLiveConfigChanged.Remove(LiveConfigHandle);
 	}
 	// Same reason: the queue survives level travel and this widget does not. The QUEUE ITSELF is left
 	// running on purpose - a player who taps away mid-queue is still queued, and the overlay picks the
@@ -544,6 +581,11 @@ void SCampusLobbyWidget::Tick(const FGeometry& AllottedGeometry, const double In
 	if (bRefreshQueued)
 	{
 		Show(Current);
+	}
+	if (bAnnouncementsDirty)
+	{
+		bAnnouncementsDirty = false;
+		RefreshAnnouncements();
 	}
 
 	if (Current == EScreen::Splash && !bSplashReady)
@@ -694,6 +736,10 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 		// closet is only where it is edited. Covers the resumed-session path that never calls
 		// AfterSignIn, and costs nothing on the way back from a match.
 		RefreshCosmetics();
+		// GET /v1/live-config: maintenance, the minimum build and the announcements. On ENTRY, never
+		// in a Build function, and throttled inside the subsystem to once per app run plus one stale
+		// resume - the tunnel is metered at 20,000 requests a month.
+		RefreshLiveConfig();
 	}
 
 	TSharedRef<SWidget> Body = SNullWidget::NullWidget;

@@ -246,6 +246,48 @@ struct FCampusEngagement
 	int32 TotalClaimable() const;
 };
 
+// -------------------------------------------------------------------------------------------------
+// Live config (GET /v1/live-config, admin console phase A): ONE published blob, one revision, one
+// strong ETag. It can only enable, disable, order, price, schedule and relabel ids this build already
+// knows - every mesh, tint and stat curve still needs a new APK - so an unknown key here is ignored
+// rather than interpreted, and the compiled-in values stay the fallback.
+
+/** One row of `announcements[]`: the lobby card, the news item, the maintenance line. */
+struct FCampusAnnouncement
+{
+	/** The server's numeric id as text; the key the dismissal is remembered under. */
+	FString Id;
+	/** news | notice | maintenance. Anything else is shown as a plain card rather than dropped. */
+	FString Kind;
+	FString Title;
+	FString Body;
+	/** Zero = no edge. The API already filters the window; this is the second check, on the device. */
+	FDateTime StartsAt = FDateTime();
+	FDateTime EndsAt = FDateTime();
+
+	bool IsActiveAt(const FDateTime& Now) const
+	{
+		return (StartsAt == FDateTime() || StartsAt <= Now) && (EndsAt == FDateTime() || EndsAt > Now);
+	}
+};
+
+/** The published blob, as this build reads it. Unknown keys are left alone, deliberately. */
+struct FCampusLiveConfig
+{
+	/** A blob has been read, from the network or from the save. */
+	bool bLoaded = false;
+	int32 Revision = 0;
+	/** The owner has locked the game in the admin console. NEVER restored from the save - see
+	 *  CampusSave.h: a stale cache must not be able to invent a lock screen. */
+	bool bMaintenance = false;
+	FString MaintenanceMessage;
+	/** A build below this must update before it can play. 0 / absent = no floor. */
+	int32 MinClientBuild = 0;
+	/** Where the update lives, when the console has published one (`update_url` / `store_url`). */
+	FString UpdateUrl;
+	TArray<FCampusAnnouncement> Announcements;
+};
+
 UCLASS()
 class UCampusBackend : public UGameInstanceSubsystem
 {
@@ -303,6 +345,46 @@ public:
 	void ClaimStreak(FDone Done);
 	/** A settled weekend's reward (last_weekend.unclaimed_reward). */
 	void ClaimPeriodReward(const FString& PeriodId, FDone Done);
+
+	// ---- live config, maintenance, minimum version, announcements (ADMIN_CONSOLE_DESIGN "Game
+	//      integration" 1 and 3). ONE call, on lobby entry and after a resume older than ten minutes.
+	//      There is no poll and no timer anywhere in here: the tunnel is metered at 20,000 requests a
+	//      month, so a lobby entry must cost a conditional request and nothing else.
+	/** GET /v1/live-config with If-None-Match from the save. Does nothing when a fetch is already in
+	 *  flight, or when the last one landed less than ten minutes ago and bForce is false (lobby entry
+	 *  and resume both go through here). A 304, a timeout or a 5xx all leave the cached blob standing:
+	 *  this call can never block or empty the lobby. */
+	void FetchLiveConfig(bool bForce = false);
+	/** Re-reads the blob cached in the save, for the first frame and for offline. `maintenance.on` is
+	 *  dropped on the way in, by design. Safe before any network call. */
+	void LoadLiveConfigFromCache();
+	const FCampusLiveConfig& GetLiveConfig() const { return LiveConfig; }
+	/** A fetch is in the air, so the lock screen's RETRY can say so instead of looking dead. */
+	bool IsLiveConfigFetching() const { return bLiveConfigInFlight; }
+	/** Fires when a 200 or a 304 lands; the lobby repaints its cards and the gate re-reads itself. */
+	FSimpleMulticastDelegate OnLiveConfigChanged;
+
+	/** The lobby and the menus are locked: either the published blob says maintenance is on, or a call
+	 *  came back 503 MAINTENANCE. A match already in progress is NEVER gated by this - the lock lives
+	 *  in the lobby widget, which does not exist on the match level. */
+	bool IsMaintenanceOn() const { return LiveConfig.bMaintenance || bMaintenanceFromCall; }
+	/** The server's own sentence, so the lock screen says why rather than guessing. */
+	FString MaintenanceText() const;
+
+	/** This build is below the published floor, or a sign-in answered 426 CLIENT_TOO_OLD. */
+	bool IsUpdateRequired() const { return bClientTooOld || (MinBuildFloor() > ClientBuild()); }
+	/** The published APK / store link, empty when the console has not set one. */
+	const FString& UpdateUrl() const { return LiveConfig.UpdateUrl; }
+	/** THE BUILD NUMBER, and the only definition of it in the game: the APK's version code, read from
+	 *  Config/DefaultEngine.ini [/Script/AndroidRuntimeSettings.AndroidRuntimeSettings] StoreVersion.
+	 *  It is what Play compares, what every sign-in sends as `client_build`, and what the server's
+	 *  MIN_CLIENT_BUILD check has always been comparing against. Raise StoreVersion, nothing else. */
+	static int32 ClientBuild();
+
+	/** The announcements that are live by the device clock and not dismissed, in the server's order. */
+	TArray<FCampusAnnouncement> ActiveAnnouncements() const;
+	/** X on a card: remembered in the save, so it never comes back on this phone. */
+	void DismissAnnouncement(const FString& Id);
 
 	// ---- store
 	void LoadStore(FDone Done);
@@ -433,6 +515,11 @@ private:
 	using FResponse = TFunction<void(int32 Status, TSharedPtr<FJsonObject> Json)>;
 
 	UCampusSave* Save() const;
+	/** A request to the API with the headers every call shares (url, verb, timeout, Accept, the ngrok
+	 *  interstitial opt-out). Send() and the live-config fetch are its only two callers: the fetch is
+	 *  a public, unauthenticated, conditional GET and wants none of Send's session machinery, but the
+	 *  tunnel header and the "//" defended base must never be written down twice. */
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> OpenRequest(const FString& Verb, const FString& Path) const;
 	void Request(const FString& Verb, const FString& Path, TSharedPtr<FJsonObject> Body, bool bAuth, bool bIdempotent, FResponse OnResponse, bool bRetried = false);
 	void Send(const FString& Verb, const FString& Path, const FString& BodyText, bool bAuth, const FString& IdempotencyKey, FResponse OnResponse, bool bRetried);
 	void RefreshAccess(TFunction<void(bool bOk)> Then);
@@ -443,7 +530,15 @@ private:
 	static FString ErrorText(int32 Status, TSharedPtr<FJsonObject> Json);
 	/** Adds adultConfirmed:true to a sign-in body when the player has ticked the 18+ box. */
 	void AddAdultTick(TSharedPtr<FJsonObject> Body) const;
+	/** Adds client_build to every sign-in body. The server has always compared this against
+	 *  MIN_CLIENT_BUILD and answered 426 CLIENT_TOO_OLD; until now the game sent nothing, which the
+	 *  API tolerates only while the floor is 1. */
+	void AddClientBuild(TSharedPtr<FJsonObject> Body) const;
 	void ReadEngagement(TSharedPtr<FJsonObject> Json);
+	/** Applies a live-config body. bFromCache drops `maintenance.on`: only a live answer may lock. */
+	void ReadLiveConfig(TSharedPtr<FJsonObject> Json, bool bFromCache);
+	/** The published floor, or 0 when no blob has ever been read. */
+	int32 MinBuildFloor() const { return LiveConfig.MinClientBuild; }
 	FString ApiBase() const;
 	bool HeartbeatTick(float DeltaTime);
 	bool PaymentPollTick(float DeltaTime);
@@ -459,6 +554,22 @@ private:
 	int32 PendingOrderPolls = 0;
 	FDone PendingOrderDone;
 	FTSTicker::FDelegateHandle PaymentPollHandle;
+
+	// ---- live config state. One blob, one timestamp, two latches. No timer.
+	FCampusLiveConfig LiveConfig;
+	/** FPlatformTime::Seconds() when the last 200 or 304 landed; 0 = never fetched this app run. A
+	 *  failure deliberately does NOT stamp this, so the next resume tries again. */
+	double LiveConfigFetchedAt = 0.0;
+	bool bLiveConfigInFlight = false;
+	/** A call came back 503 MAINTENANCE. Cleared by the next 2xx, and by a blob that says it is over. */
+	bool bMaintenanceFromCall = false;
+	FString CallMaintenanceMessage;
+	/** A sign-in answered 426 CLIENT_TOO_OLD: the update screen is owed even before a blob lands. */
+	bool bClientTooOld = false;
+	/** The resume hook (FCoreDelegates). Taken off in Deinitialize or it fires into a dead subsystem. */
+	FDelegateHandle ForegroundHandle;
+	/** How stale a blob may be before a resume refetches it (design: ten minutes). */
+	static constexpr double LiveConfigMaxAgeSeconds = 600.0;
 
 	/** Set by Send() when a protected route answered 403 AGE_CONFIRM_REQUIRED and the local tick was absent. */
 	bool bAgeConfirmRequired = false;
