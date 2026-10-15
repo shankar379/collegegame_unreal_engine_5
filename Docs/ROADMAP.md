@@ -4,8 +4,8 @@ Started 2026-10-15. Items are ticked as they are finished, verified and pushed. 
 
 ## 1. Verify today's work
 
-- [ ] Full review of all of today's changes (game, backend, admin) for bugs and security issues — backend findings fixed (`103f0fd`); game findings being fixed
-- [ ] Tidy-up: split `CampusLobbyUI.cpp` and `CampusBackend.cpp` into smaller files, no behaviour change
+- [x] Full review of all of today's changes (game, backend, admin) for bugs and security issues — backend fixes `103f0fd`, game fixes `9e3c18b`
+- [x] Tidy-up: split `CampusLobbyUI.cpp` and `CampusBackend.cpp` into smaller files, no behaviour change (`9e3c18b`)
 - [x] Small fix: anti-cheat bans also go into the ban history (backend `103f0fd`)
 - [x] Small fix: tests get their own database, so the random matchmaker failure stops (436/436, `103f0fd`)
 - [ ] Build the APK and test on the phone, with screenshots (select map, wardrobe, decor, maintenance/update, announcements, terms) **(you: plug in the phone)**
