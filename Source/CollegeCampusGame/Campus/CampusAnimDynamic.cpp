@@ -147,8 +147,9 @@ void UCampusAnimInstance::UpdateDynamic(float DeltaSeconds, const ACampusCharact
 	// Run lean: real lean poses from the sample, scaled by how hard we turn.
 	{
 		const float Moving = FMath::GetMappedRangeValueClamped(FVector2f(200.f, 450.f), FVector2f(0.f, 1.f), Speed);
-		const float Target = bGround && !Movement->IsCrouching() && !bSliding ? FMath::Clamp(VelocityYawRate / 300.f, -0.6f, 0.6f) * Moving : 0.f;
-		LeanAlpha = FMath::FInterpTo(LeanAlpha, Target, DeltaSeconds, 6.f);
+		const float Target = bGround && !Movement->IsCrouching() && !bSliding ? FMath::Clamp(VelocityYawRate / 400.f, -0.45f, 0.45f) * Moving : 0.f;
+		// Ease in slower than out: a quick flick of the stick shouldn't throw the body over, but it straightens fast.
+		LeanAlpha = FMath::FInterpTo(LeanAlpha, Target, DeltaSeconds, FMath::Abs(Target) > FMath::Abs(LeanAlpha) ? 4.f : 7.f);
 		if (FMath::Abs(LeanAlpha) > 0.01f)
 		{
 			const int32 Base = Lean_Run_Base;
@@ -453,6 +454,24 @@ void FCampusAnimInstanceProxy::ApplyLean(FPoseContext& Output)
 		}
 	}
 
+	// Component-space rotation of a bone, walking its parent chain.
+	auto ComponentRotation = [&Output, &Bones](FCompactPoseBoneIndex Index)
+	{
+		FQuat Rotation = FQuat::Identity;
+		for (; Index.IsValid(); Index = Bones.GetParentBoneIndex(Index))
+		{
+			Rotation = Output.Pose[Index].GetRotation() * Rotation;
+		}
+		return Rotation;
+	};
+	auto FindBone = [&Bones](const TCHAR* Name)
+	{
+		const int32 MeshIndex = Bones.GetPoseBoneIndexForBoneName(FName(Name));
+		return MeshIndex != INDEX_NONE ? Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(MeshIndex)) : FCompactPoseBoneIndex(INDEX_NONE);
+	};
+	const FCompactPoseBoneIndex Head = FindBone(TEXT("head"));
+	const FQuat HeadBefore = Head.IsValid() ? ComponentRotation(Head) : FQuat::Identity;
+
 	FPoseContext BasePose(this);
 	FPoseContext SidePose(this);
 	SamplePose(LeanBase, BasePose);
@@ -469,7 +488,33 @@ void FCampusAnimInstanceProxy::ApplyLean(FPoseContext& Output)
 		FTransform& Bone = Output.Pose[Index];
 		const FQuat Delta = FQuat::Slerp(FQuat::Identity, Side.GetRotation() * Base.GetRotation().Inverse(), Weight);
 		Bone.SetRotation((Delta * Bone.GetRotation()).GetNormalized());
-		Bone.AddToTranslation((Side.GetTranslation() - Base.GetTranslation()) * Weight);
+		// Rotation only: the clip's pelvis translation shoved the hips sideways out from under the capsule, which
+		// read as the character being dragged toward the turn.
+	}
+
+	// Keep the eyes level: runners bank the torso into a turn but hold the head upright. Without this the head
+	// rides the banked spine and looks like it is falling over. Most of the correction goes on the neck, the rest
+	// on the head, so it bends instead of snapping at one joint.
+	if (Head.IsValid())
+	{
+		const FQuat Correction = FQuat::Slerp(FQuat::Identity, HeadBefore * ComponentRotation(Head).Inverse(), 0.85f);
+		const FCompactPoseBoneIndex Neck = Bones.GetParentBoneIndex(Head);
+		const TPair<FCompactPoseBoneIndex, float> Joints[] = { { Neck, 0.6f }, { Head, 1.f } };
+		FQuat Applied = FQuat::Identity;
+		for (const TPair<FCompactPoseBoneIndex, float>& Joint : Joints)
+		{
+			if (!Joint.Key.IsValid())
+			{
+				continue;
+			}
+			// Remaining component-space correction, re-expressed in this joint's parent space.
+			const FQuat Step = FQuat::Slerp(FQuat::Identity, Correction * Applied.Inverse(), Joint.Value);
+			const FCompactPoseBoneIndex Parent = Bones.GetParentBoneIndex(Joint.Key);
+			const FQuat ParentRotation = Parent.IsValid() ? ComponentRotation(Parent) : FQuat::Identity;
+			FTransform& Bone = Output.Pose[Joint.Key];
+			Bone.SetRotation((ParentRotation.Inverse() * Step * ParentRotation * Bone.GetRotation()).GetNormalized());
+			Applied = Step * Applied;
+		}
 	}
 }
 
