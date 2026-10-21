@@ -45,8 +45,9 @@ namespace
 	// GAME_PLAN 1.3
 	const FTeamDef Teams[] = { { 1, TEXT("Solo") }, { 2, TEXT("Duo") }, { 4, TEXT("Squad") } };
 
-	/** The left-hand menu. Every tab lands on a screen that exists. */
-	enum class ELobbyTab : uint8 { Store, Missions, Character, Wardrobe, Vault, Weapons, Events };
+	/** The left-hand menu and the bottom bar (the Free Fire lobby: STORE / PASS / MISSIONS / EVENTS down
+	 *  the left, VAULT / WEAPON / PRESET / LAB along the bottom). CHARACTER is the profile plate's tap. */
+	enum class ELobbyTab : uint8 { Store, Missions, Character, Wardrobe, Vault, Weapons, Events, Pass, Preset, Lab };
 	struct FTabDef
 	{
 		ELobbyTab Tab;
@@ -54,17 +55,18 @@ namespace
 		CampusAngular::EGlyph Glyph;
 	};
 	const FTabDef Tabs[] = {
-		{ ELobbyTab::Store,     TEXT("STORE"),     CampusAngular::EGlyph::Coin },
-		{ ELobbyTab::Missions,  TEXT("MISSIONS"),  CampusAngular::EGlyph::Chevron },
-		{ ELobbyTab::Character, TEXT("CHARACTER"), CampusAngular::EGlyph::Friends },
-		// Directly under CHARACTER, because they are the same subject: CHARACTER is who you are,
-		// WARDROBE is what you are wearing. The lobby decor sheet hangs off the wardrobe rather than
-		// taking a seventh row of its own. A HANGER, not the trophy it used to borrow: the closet's
-		// own DECOR rail wears Trophy, and one mark must mean one thing.
-		{ ELobbyTab::Wardrobe,  TEXT("WARDROBE"),  CampusAngular::EGlyph::Hanger },
-		{ ELobbyTab::Vault,     TEXT("VAULT"),     CampusAngular::EGlyph::Gem },
-		{ ELobbyTab::Weapons,   TEXT("WEAPONS"),   CampusAngular::EGlyph::Rank },
-		{ ELobbyTab::Events,    TEXT("EVENTS"),    CampusAngular::EGlyph::Crown },
+		{ ELobbyTab::Store,     TEXT("STORE"),       CampusAngular::EGlyph::Coin },
+		{ ELobbyTab::Pass,      TEXT("CAMPUS PASS"), CampusAngular::EGlyph::Trophy },
+		{ ELobbyTab::Missions,  TEXT("MISSIONS"),    CampusAngular::EGlyph::Chevron },
+		// EVENTS also carries the daily reward that VAULT used to: lit, and opening it, while one waits.
+		{ ELobbyTab::Events,    TEXT("EVENTS"),      CampusAngular::EGlyph::Crown },
+	};
+	/** The bottom bar. VAULT = what you own (the closet), WEAPON = the guns, PRESET / LAB = coming soon. */
+	const FTabDef BottomTabs[] = {
+		{ ELobbyTab::Vault,     TEXT("VAULT"),  CampusAngular::EGlyph::Hanger },
+		{ ELobbyTab::Weapons,   TEXT("WEAPON"), CampusAngular::EGlyph::Rank },
+		{ ELobbyTab::Preset,    TEXT("PRESET"), CampusAngular::EGlyph::Tick },
+		{ ELobbyTab::Lab,       TEXT("LAB"),    CampusAngular::EGlyph::Target },
 	};
 }
 
@@ -158,20 +160,17 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildTopBar()
 			]
 		];
 
+	// THE FREE FIRE TOP BAR: the profile plate, then the currency ON THE SAME ROW right beside it.
+	// Diamonds only (real money buys Diamonds, Diamonds buy everything - backend migration 030); the "+"
+	// opens the store on the Diamonds tab. Room Cards are bought with Diamonds and shown in Custom Rooms.
 	return SNew(SHorizontalBox).Visibility(EVisibility::SelfHitTestInvisible)
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top)[Identity]
-		+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer).Visibility(EVisibility::HitTestInvisible)]
-		// Coin (Room Cards) and gem (Diamonds) counters, each with a "+" to the store.
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(6.f, 2.f, 0.f, 0.f)
-		[
-			CampusStyle::Counter(CampusAngular::EGlyph::Coin, CardGold, FText::AsNumber(Api ? Api->RoomCards : 0),
-				FOnClicked::CreateLambda([this]() { StoreTab = EStoreTab::Packs; Show(EScreen::Store); return FReply::Handled(); }))
-		]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(10.f, 2.f, 0.f, 0.f)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(12.f, 0.f, 0.f, 0.f)
 		[
 			CampusStyle::Counter(CampusAngular::EGlyph::Gem, Diamond, FText::AsNumber(Api ? Api->Diamonds : 0),
 				FOnClicked::CreateLambda([this]() { StoreTab = EStoreTab::Packs; Show(EScreen::Store); return FReply::Handled(); }))
 		]
+		+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer).Visibility(EVisibility::HitTestInvisible)]
 		// Friends, mail, settings gear - the Free Fire corner cluster.
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(18.f, 0.f, 0.f, 0.f)
 		[
@@ -263,8 +262,14 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMenuColumn()
 		case ELobbyTab::Wardrobe:
 			Action = FOnClicked::CreateLambda([this]() { OpenWardrobe(); return FReply::Handled(); });
 			break;
-		case ELobbyTab::Vault:     Action = OpenScreen(EScreen::Daily); bHighlighted = bDailyReady; break;
-		case ELobbyTab::Events:    Action = OpenScreen(EScreen::Event); break;
+		case ELobbyTab::Vault:     Action = FOnClicked::CreateLambda([this]() { OpenWardrobe(); return FReply::Handled(); }); break;
+		// the daily reward rides on EVENTS now: it opens first, and lights the tab, while one is waiting
+		case ELobbyTab::Events:    Action = OpenScreen(bDailyReady ? EScreen::Daily : EScreen::Event); bHighlighted = bDailyReady; break;
+		case ELobbyTab::Pass:
+		case ELobbyTab::Preset:
+		case ELobbyTab::Lab:
+			Action = FOnClicked::CreateLambda([this, Label = FString(Def.Label)]() { Toast(Label + TEXT(": coming soon")); return FReply::Handled(); });
+			break;
 		case ELobbyTab::Missions:
 			Action = OpenScreen(EScreen::Missions);
 			Badge = MissionsReady;
@@ -299,6 +304,42 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMenuColumn()
 		];
 	}
 	return Column;
+}
+
+/** VAULT / WEAPON / PRESET / LAB along the bottom-left, the Free Fire bottom bar. */
+TSharedRef<SWidget> SCampusLobbyWidget::BuildBottomBar()
+{
+	TSharedRef<SHorizontalBox> Row = SNew(SHorizontalBox).Visibility(EVisibility::SelfHitTestInvisible);
+	for (const FTabDef& Def : BottomTabs)
+	{
+		FOnClicked Action;
+		switch (Def.Tab)
+		{
+		case ELobbyTab::Vault:
+			Action = FOnClicked::CreateLambda([this]() { OpenWardrobe(); return FReply::Handled(); });
+			break;
+		case ELobbyTab::Weapons:
+			Action = FOnClicked::CreateLambda([this]()
+			{
+				StoreTab = EStoreTab::Guns;
+				if (UCampusBackend* Api2 = Backend())
+				{
+					Busy(TEXT("Opening weapons..."));
+					Api2->LoadStore([this](bool bOk, const FString& Error) { Done(bOk, Error, [this]() { Show(EScreen::Store); }); });
+				}
+				return FReply::Handled();
+			});
+			break;
+		default:
+			Action = FOnClicked::CreateLambda([this, Label = FString(Def.Label)]() { Toast(Label + TEXT(": coming soon")); return FReply::Handled(); });
+			break;
+		}
+		Row->AddSlot().AutoWidth().Padding(0.f, 0.f, 6.f, 0.f)
+		[
+			SNew(SBox).WidthOverride(150.f)[CampusStyle::MenuTab(FText::FromString(Def.Label), Def.Glyph, Action, false)]
+		];
+	}
+	return Row;
 }
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildNamePlate(const FCampusPartyMember& Member)
@@ -755,9 +796,15 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 					// above the mode chips. Anchored to the BOTTOM rather than the top on purpose - the
 					// notice stack owns the top-right corner, and a permanent list under transient cards
 					// is the one arrangement that would annoy twice.
-					+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 276.f) // clears START + mode plate + SOLO/DUO/SQUAD pills
+					// Free Fire puts the online friends down the right edge UNDER the top-right cluster: so does this.
+					+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(0.f, 150.f, 0.f, 0.f)
 					[
 						SAssignNew(FriendsStripBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
+					]
+					// Bottom-left: VAULT / WEAPON / PRESET / LAB.
+					+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 4.f)
+					[
+						BuildBottomBar()
 					]
 					// Slanted menu tabs down the left, with the weekend board under them.
 					+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(0.f, 20.f, 0.f, 0.f)

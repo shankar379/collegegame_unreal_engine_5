@@ -763,67 +763,28 @@ ACampusBRPlane::ACampusBRPlane()
 	SetReplicateMovement(false);
 	SetCanBeDamaged(false);
 
-	// A low-poly cargo plane out of three engine primitives, nose along +X because that is the axis
-	// Launch points down the flight line. Fourteen components, no collision, no shadows, four flat
-	// unlit materials - it is seen from 300 m below, on a phone, for forty-five seconds.
-	//
-	// The ROOT is a bare scene component on purpose. A passenger attaches to the root, and a root that
-	// was itself a scaled mesh would hand its 16 x 2.6 x 2.6 scale to whoever boarded.
 	Hull = CreateDefaultSubobject<USceneComponent>(TEXT("Hull"));
 	SetRootComponent(Hull);
-
-	UStaticMesh* const Cube = CampusBRArt::Cube();
-	UStaticMesh* const Cylinder = CampusBRArt::Cylinder();
-	UMaterialInterface* const Shell = CampusBRArt::Shell();
-	UMaterialInterface* const Trim = CampusBRArt::Trim();
-	UMaterialInterface* const Metal = CampusBRArt::Metal();
-
-	auto MakePart = [this](const TCHAR* Name, UStaticMesh* Mesh, UMaterialInterface* Material,
-		const FVector& Where, const FRotator& Turn, const FVector& Size) -> UStaticMeshComponent*
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> BodyAsset(TEXT("/Game/CampusVehicles/Transport/SM_TransportBody.SM_TransportBody"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> RampAsset(TEXT("/Game/CampusVehicles/Transport/SM_TransportRamp.SM_TransportRamp"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> PropAsset(TEXT("/Game/CampusVehicles/Transport/SM_TransportPropeller.SM_TransportPropeller"));
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> SkinAsset(TEXT("/Game/CampusVehicles/Transport/MI_Transport_Default.MI_Transport_Default"));
+	EventLivery = SkinAsset.Object;
+	auto Part = [this](const TCHAR* Name, UStaticMesh* Mesh, FVector Position)
 	{
-		UStaticMeshComponent* Part = CreateDefaultSubobject<UStaticMeshComponent>(Name);
-		Part->SetupAttachment(Hull);
-		CampusBRArt::Dress(Part, Mesh, Material, Where, Turn, Size);
-		return Part;
+		UStaticMeshComponent* Component = CreateDefaultSubobject<UStaticMeshComponent>(Name);
+		Component->SetupAttachment(Hull);
+		CampusBRArt::Dress(Component, Mesh, nullptr, Position, FRotator::ZeroRotator, FVector::OneVector);
+		Component->SetCanEverAffectNavigation(false);
+		return Component;
 	};
+	Fuselage = Part(TEXT("Fuselage"), BodyAsset.Object, FVector::ZeroVector);
+	Nose = Part(TEXT("RearRamp"), RampAsset.Object, FVector(-800.f, 0.f, -150.f));
+	BladeLeftA = Part(TEXT("PropInnerLeft"), PropAsset.Object, FVector(460.f, -600.f, 110.f));
+	BladeLeftB = Part(TEXT("PropOuterLeft"), PropAsset.Object, FVector(460.f, -1200.f, 110.f));
+	BladeRightA = Part(TEXT("PropInnerRight"), PropAsset.Object, FVector(460.f, 600.f, 110.f));
+	BladeRightB = Part(TEXT("PropOuterRight"), PropAsset.Object, FVector(460.f, 1200.f, 110.f));
 
-	// The parts list, in centimetres, nose at +X. A cylinder's long axis is its local Z, which is what
-	// the -90 pitch on the fuselage and the engines is for.
-	//
-	// 16 m fuselage, 2.6 m across - a cargo plane's 6:1.
-	Fuselage = MakePart(TEXT("Fuselage"), Cylinder, Shell,
-		FVector::ZeroVector, FRotator(-90.f, 0.f, 0.f), FVector(2.6f, 2.6f, 16.f));
-	// A sphere stretched along the flight axis, capping the front.
-	Nose = MakePart(TEXT("Nose"), CampusBRArt::Sphere(), Shell,
-		FVector(790.f, 0.f, 0.f), FRotator::ZeroRotator, FVector(3.2f, 2.6f, 2.4f));
-	// High wings, 18 m tip to tip, 3 degrees of dihedral so they are not a plank.
-	WingLeft = MakePart(TEXT("WingLeft"), Cube, Trim,
-		FVector(100.f, 555.f, 110.f), FRotator(0.f, 0.f, 3.f), FVector(3.2f, 8.5f, 0.35f));
-	WingRight = MakePart(TEXT("WingRight"), Cube, Trim,
-		FVector(100.f, -555.f, 110.f), FRotator(0.f, 0.f, -3.f), FVector(3.2f, 8.5f, 0.35f));
-	// The tail: the one part that says "aircraft" from directly below.
-	Fin = MakePart(TEXT("Fin"), Cube, Trim,
-		FVector(-720.f, 0.f, 310.f), FRotator::ZeroRotator, FVector(2.6f, 0.3f, 3.6f));
-	StabiliserLeft = MakePart(TEXT("StabiliserLeft"), Cube, Trim,
-		FVector(-700.f, 195.f, 60.f), FRotator::ZeroRotator, FVector(1.8f, 3.2f, 0.3f));
-	StabiliserRight = MakePart(TEXT("StabiliserRight"), Cube, Trim,
-		FVector(-700.f, -195.f, 60.f), FRotator::ZeroRotator, FVector(1.8f, 3.2f, 0.3f));
-	// Two engines, 2.8 m nacelles poking forward of the wing's leading edge.
-	NacelleLeft = MakePart(TEXT("NacelleLeft"), Cylinder, Metal,
-		FVector(230.f, 420.f, 110.f), FRotator(-90.f, 0.f, 0.f), FVector(1.f, 1.f, 2.8f));
-	NacelleRight = MakePart(TEXT("NacelleRight"), Cylinder, Metal,
-		FVector(230.f, -420.f, 110.f), FRotator(-90.f, 0.f, 0.f), FVector(1.f, 1.f, 2.8f));
-	// 4.2 m propellers: two crossed slabs each, hung off the HULL and not off the nacelle, because the
-	// nacelle is a scaled cylinder and a child of it would inherit that scale and shear. Each slab's
-	// long axis is its local Y, so rolling it about local X sweeps a disc across the flight axis.
-	BladeLeftA = MakePart(TEXT("BladeLeftA"), Cube, Metal,
-		FVector(380.f, 420.f, 110.f), FRotator::ZeroRotator, FVector(0.3f, 4.2f, 0.08f));
-	BladeLeftB = MakePart(TEXT("BladeLeftB"), Cube, Metal,
-		FVector(380.f, 420.f, 110.f), FRotator(0.f, 0.f, 90.f), FVector(0.3f, 4.2f, 0.08f));
-	BladeRightA = MakePart(TEXT("BladeRightA"), Cube, Metal,
-		FVector(380.f, -420.f, 110.f), FRotator::ZeroRotator, FVector(0.3f, 4.2f, 0.08f));
-	BladeRightB = MakePart(TEXT("BladeRightB"), Cube, Metal,
-		FVector(380.f, -420.f, 110.f), FRotator(0.f, 0.f, 90.f), FVector(0.3f, 4.2f, 0.08f));
 }
 
 void ACampusBRPlane::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -833,12 +794,14 @@ void ACampusBRPlane::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	DOREPLIFETIME(ACampusBRPlane, Finish);
 	DOREPLIFETIME(ACampusBRPlane, LaunchTime);
 	DOREPLIFETIME(ACampusBRPlane, FlightSeconds);
+	DOREPLIFETIME(ACampusBRPlane, EventLivery);
 }
 
 void ACampusBRPlane::BeginPlay()
 {
 	Super::BeginPlay();
 	CampusBRDive::LivePlanes.AddUnique(this);
+	OnRep_EventLivery();
 	// Nothing to see until Launch has handed it a line. Done HERE and not in the constructor because
 	// SetupAttachment does not fill AttachChildren until the components register, so a propagating
 	// SetVisibility in the constructor would hide the root and leave every part of the plane on screen.
@@ -1015,6 +978,22 @@ void ACampusBRPlane::EjectAll()
 	}
 }
 
+void ACampusBRPlane::SetEventLivery(UMaterialInterface* Material)
+{
+	if (!HasAuthority() || !Material) return;
+	EventLivery = Material;
+	OnRep_EventLivery();
+	ForceNetUpdate();
+}
+
+void ACampusBRPlane::OnRep_EventLivery()
+{
+	if (!EventLivery) return;
+	// Slot names survive Blender reordering; the cabin and engines keep their materials.
+	if (Fuselage) Fuselage->SetMaterialByName(TEXT("Exterior_Replaceable"), EventLivery);
+	if (Nose) Nose->SetMaterialByName(TEXT("Exterior_Replaceable"), EventLivery);
+}
+
 void ACampusBRPlane::SpinPropellers(float DeltaSeconds)
 {
 	if (GetNetMode() == NM_DedicatedServer)
@@ -1025,13 +1004,12 @@ void ACampusBRPlane::SpinPropellers(float DeltaSeconds)
 	// Roll about the blade's own X, which is the flight axis. The B blade keeps the 90 degrees it was
 	// built with, so each pair stays crossed and reads as one disc.
 	const FQuat Turn(FVector::XAxisVector, FMath::DegreesToRadians(PropAngle));
-	const FQuat Crossed(FVector::XAxisVector, FMath::DegreesToRadians(PropAngle + 90.f));
 	UStaticMeshComponent* const Pairs[4] = { BladeLeftA, BladeRightA, BladeLeftB, BladeRightB };
 	for (int32 Index = 0; Index < UE_ARRAY_COUNT(Pairs); ++Index)
 	{
 		if (UStaticMeshComponent* Blade = Pairs[Index])
 		{
-			Blade->SetRelativeRotation(Index < 2 ? Turn : Crossed);
+			Blade->SetRelativeRotation(Turn);
 		}
 	}
 }
@@ -1054,6 +1032,14 @@ void ACampusBRPlane::Tick(float DeltaSeconds)
 	// sideways down the line. With a cube nobody could tell; with a plane everybody can.
 	SetActorLocationAndRotation(FlightLocation(), Heading());
 	SpinPropellers(DeltaSeconds);
+	if (Nose && GetNetMode() != NM_DedicatedServer)
+	{
+		// Four-second hydraulic opening with zero velocity/acceleration at both ends.
+		// Server clock also gives late joiners the correct pose without replicating each frame.
+		const float T = FMath::Clamp((CampusBRServerTime(GetWorld()) - LaunchTime) / 4.f, 0.f, 1.f);
+		const float Smooth = T*T*T*(T*(T*6.f - 15.f) + 10.f);
+		Nose->SetRelativeRotation(FRotator(120.f * Smooth, 0.f, 0.f));
+	}
 	CampusBRDecor::SpawnForFlight(GetWorld(), this, int32(LaunchTime * 100.f));
 
 	if (!HasAuthority())

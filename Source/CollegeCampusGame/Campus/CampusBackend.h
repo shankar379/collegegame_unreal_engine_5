@@ -59,7 +59,7 @@ struct FCampusCosmetic
 	FString Rarity;
 };
 
-/** A pack or offer bought with money. */
+/** A Diamond pack (bought with money) or an offer (bought with Diamonds since backend migration 030). */
 struct FCampusOffer
 {
 	FString Id;
@@ -70,6 +70,8 @@ struct FCampusOffer
 	/** `image_key`, as on FCampusGun: the console's own picture for this pack or bundle. */
 	FString ImageKey;
 	float PriceInr = 0.f;
+	/** Offers: what they cost in Diamonds (the sale price when one is running). 0 on a Diamond pack. */
+	int32 PriceDiamonds = 0;
 };
 
 struct FCampusRoom
@@ -612,6 +614,8 @@ public:
 	// ---- store
 	void LoadStore(FDone Done);
 	void BuyGun(const FString& Id, FDone Done);
+	/** Any Diamond-priced item: a gun, an offer, a cosmetic (POST /store/items/:id/buy). BuyGun is this. */
+	void BuyItem(const FString& Id, FDone Done);
 	void UpgradeGun(const FString& Id, FDone Done);
 	void SellGun(const FString& Id, FDone Done);
 	void EquipGun(const FString& Id, FDone Done);

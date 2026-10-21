@@ -418,6 +418,13 @@ void ACampusCharacter::Tick(float DeltaSeconds)
 	CameraBoom->TargetArmLength = FMath::Lerp(FMath::Lerp(DefaultArmLength, AimArmLength, CamAim), DiveArm, DiveCamera);
 	CameraBoom->SocketOffset = FVector(0.f, FMath::Lerp(HipSide, AimSide, CamAim) * (1.f - DiveCamera),
 		FMath::Lerp(0.f, AimUp, CamAim));
+	// The passenger remains attached below the hull for a safe jump, while the camera orbits the
+	// aircraft centre far enough out to show its 40 m wingspan and event livery.
+	const bool bAboardTransport = Cast<ACampusBRPlane>(GetAttachParentActor()) != nullptr;
+	PlaneCamera = FMath::FInterpConstantTo(PlaneCamera, bAboardTransport ? 1.f : 0.f, DeltaSeconds, 2.f);
+	CameraBoom->TargetArmLength = FMath::Lerp(CameraBoom->TargetArmLength, 5500.f, PlaneCamera);
+	CameraBoom->SocketOffset *= 1.f - PlaneCamera;
+	PivotHeight += 650.f * PlaneCamera;
 	CameraBoom->SetRelativeLocation(FVector(0.f, 0.f, PivotHeight));
 
 	// Free look: released offset swings back the shortest way (three.js: x *= exp(-14 dt), snap < 0.002 rad).

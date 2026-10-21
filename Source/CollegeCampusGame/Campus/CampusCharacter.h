@@ -676,6 +676,8 @@ private:
 	/** 0..1 eased: the drop camera is out (freefall or canopy). Eased over ~0.5 s so the pull-back at
 	 *  the moment the chute opens is a move, not a cut. */
 	float DiveCamera = 0.f;
+	/** Exterior transport orbit; kept separate so jumping restores the existing dive camera. */
+	float PlaneCamera = 0.f;
 	/** The dive boom's own length (cm), eased between the freefall and the canopy values. */
 	float DiveArm = 0.f;
 	/** Camera pivot height above the feet, eased toward the stance's (cm); < 0 until the first frame. */

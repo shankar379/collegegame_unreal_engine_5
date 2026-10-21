@@ -91,6 +91,12 @@ void UCampusBackend::ReadStore(TSharedPtr<FJsonObject> Json)
 				Offer.Perks = Strings(Item, TEXT("perks"));
 				Offer.ImageKey = Str(Item, TEXT("image_key"));
 				Offer.PriceInr = float(Num(Item, TEXT("price_inr")));
+				// what to charge, worked out by the server (a running sale included): never computed here
+				Offer.PriceDiamonds = int32(Num(Item, TEXT("effective_price_diamonds")));
+				if (Offer.PriceDiamonds <= 0)
+				{
+					Offer.PriceDiamonds = int32(Num(Item, TEXT("price_diamonds")));
+				}
 				NoteGoogleId(Item, Offer.Id);
 			}
 		}
@@ -112,6 +118,11 @@ void UCampusBackend::LoadStore(FDone Done)
 }
 
 void UCampusBackend::BuyGun(const FString& Id, FDone Done)
+{
+	BuyItem(Id, MoveTemp(Done));
+}
+
+void UCampusBackend::BuyItem(const FString& Id, FDone Done)
 {
 	Request(TEXT("POST"), FString::Printf(TEXT("/store/items/%s/buy"), *Id), nullptr, true, true, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
 	{

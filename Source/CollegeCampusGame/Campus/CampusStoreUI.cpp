@@ -1,7 +1,8 @@
-// The store screen, Free Fire shaped: a left tab rail (DIAMONDS / GUNS / OFFERS), a wallet strip across the
+﻿// The store screen, Free Fire shaped: a left tab rail (DIAMONDS / GUNS / OFFERS), a wallet strip across the
 // top, and a wrapping grid of angular cards.
 //
-// Two currencies, two completely different buy paths, and the screen never blurs them:
+// ONE THING IS SOLD FOR MONEY: DIAMONDS (backend migration 030). Everything else - guns, offers, Room Cards -
+// is bought with Diamonds. Two currencies, two completely different buy paths, and the screen never blurs them:
 //   * DIAMONDS are bought with real money through Google Play. The price on a pack card is always Play's own
 //     localized PriceText (QueryProducts), never a number we worked out here. Where billing is not usable -
 //     a sideloaded APK, an emulator, a desktop PIE session - the card says so in words instead of offering a
@@ -840,7 +841,37 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStorePackTile(const FCampusOffer& P
 
 	// Price: Play's string, or honest silence. We never print a rupee figure of our own next to a Play product.
 	TSharedRef<SWidget> Buy = SNullWidget::NullWidget;
-	if (!bCanBuy)
+	if (Pack.PriceDiamonds > 0)
+	{
+		// AN OFFER: bought with Diamonds through the backend, exactly like a gun - never a Play product.
+		const int32 Price = Pack.PriceDiamonds;
+		const bool bAfford = Api && Api->Diamonds >= Price;
+		const FString Id = Pack.Id;
+		const FString Name = Pack.Name;
+		Buy = bAfford
+			? CampusStyle::Button(FText::FromString(FString::Printf(TEXT("%d DIAMONDS"), Price)),
+				FOnClicked::CreateLambda([this, Id, Name]()
+				{
+					if (UCampusBackend* A = Backend())
+					{
+						Busy(TEXT("Buying..."));
+						A->BuyItem(Id, [this, Name](bool bOk, const FString& Error)
+						{
+							Done(bOk, Error, [this, Name]() { Toast(Name + TEXT(" is yours!")); });
+						});
+					}
+					return FReply::Handled();
+				}), EButton::Go, 17, FVector2D(236.f, 52.f))
+			: CampusStyle::Button(FText::FromString(FString::Printf(TEXT("BUY DIAMONDS  (%d)"), Price)),
+				FOnClicked::CreateLambda([this]()
+				{
+					StoreTab = EStoreTab::Packs;
+					Toast(TEXT("Top up Diamonds, then come back for the offer."));
+					Refresh();
+					return FReply::Handled();
+				}), EButton::Dark, 15, FVector2D(236.f, 52.f));
+	}
+	else if (!bCanBuy)
 	{
 		Buy = SNew(SBox).WidthOverride(236.f)
 			[
@@ -981,7 +1012,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStoreDiamondGrid()
 	if (Packs.Num() == 0)
 	{
 		// A cold or offline catalogue still shows the shelf, priced by Play.
-		const TCHAR* Ids[] = { TEXT("pack_diamonds_250"), TEXT("pack_diamonds_550"), TEXT("pack_diamonds_3000") };
+		const TCHAR* Ids[] = { TEXT("pack_diamonds_300_offer"), TEXT("pack_diamonds_250"), TEXT("pack_diamonds_550"), TEXT("pack_diamonds_3000") };
 		for (const TCHAR* Id : Ids)
 		{
 			FCampusOffer Pack;
@@ -1011,7 +1042,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStoreDiamondGrid()
 	return Grid;
 }
 
-/** OFFERS: the bundles, same money path, described by the backend. */
+/** OFFERS: the bundles, bought with Diamonds (migration 030), described by the backend. */
 TSharedRef<SWidget> SCampusLobbyWidget::BuildStoreOfferGrid()
 {
 	const UCampusBackend* Api = Backend();
@@ -1151,11 +1182,11 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStoreV2()
 	{
 	case EStoreTab::Packs:
 		Body = BuildStoreDiamondGrid();
-		Footnote = LOCTEXT("FootDia", "Prices come from Google Play in your own currency. Diamonds are credited by our server, not by the app.");
+		Footnote = LOCTEXT("FootDia", "Diamonds are the only thing sold for money. Prices come from Google Play in your own currency; Diamonds are credited by our server, not by the app.");
 		break;
 	case EStoreTab::Offers:
 		Body = BuildStoreOfferGrid();
-		Footnote = LOCTEXT("FootOff", "Bundles are one-time buys. Anything already owned is skipped automatically.");
+		Footnote = LOCTEXT("FootOff", "Offers are bought with Diamonds. A bundle with a gun in it is a one-time buy.");
 		break;
 	default:
 		Body = BuildStoreGunGrid();
