@@ -1,0 +1,25 @@
+{
+  "SM_TransportBody": {
+    "triangles": 2700,
+    "slots": [
+      "Exterior_Replaceable",
+      "Interior",
+      "Mechanical"
+    ],
+    "lod_setup": "Run verify_transport_editor.py in the editor"
+  },
+  "SM_TransportRamp": {
+    "triangles": 12,
+    "slots": [
+      "Exterior_Replaceable"
+    ],
+    "lod_setup": "Run verify_transport_editor.py in the editor"
+  },
+  "SM_TransportPropeller": {
+    "triangles": 48,
+    "slots": [
+      "Mechanical"
+    ],
+    "lod_setup": "Run verify_transport_editor.py in the editor"
+  }
+}

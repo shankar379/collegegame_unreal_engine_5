@@ -174,10 +174,6 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildGunCard(int32 Index)
 					[Id](UCampusBackend* A, UCampusBackend::FDone D) { A->BuyGun(Id, D); }, TEXT("Buying..."), Gun.Name + TEXT(" is yours!"))), EButton::Accent, 16, FVector2D(170.f, 50.f))
 			];
 		}
-		if (Gun.PriceInr > 0.f)
-		{
-			Actions->AddSlot().AutoWidth()[MoneyButton(Id, Gun.Name, Gun.PriceInr, FVector2D(130.f, 50.f))];
-		}
 	}
 	else
 	{

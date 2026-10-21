@@ -16,3 +16,8 @@ Build/
 *.suo
 Plugins/*/Binaries/
 Plugins/*/Intermediate/
+
+# Python bytecode caches (machine-generated)
+__pycache__/
+*.pyc
+*.blend1

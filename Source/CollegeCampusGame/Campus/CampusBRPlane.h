@@ -4,8 +4,8 @@
 // Four actors, one phase of the match:
 //   ACampusBRWaitingArea - a floating fenced slab at the map edge where the lobby gathers.
 //   ACampusBRPlane       - flies one straight line across the map at altitude, carrying the drops.
-//                          Built out of engine basic shapes in the constructor: no asset to generate,
-//                          nothing extra to cook, fourteen components and no collision.
+//                          Blender transport with three LODs, event liveries and a rigid rear ramp;
+//                          six mesh components and no physics simulation.
 //   ACampusBRDrop        - ONE diver's deployment. Owned by that diver's controller so the phone can
 //                          send its JUMP, and it is the only home of the dive state: the plane keeps
 //                          a list of drops, never a second copy of their state.
@@ -273,7 +273,16 @@ public:
 	/** Where the aircraft is this frame, unclamped - it flies on past the end of the line and leaves. */
 	FVector GetRouteLocation() const { return FlightLocation(); }
 
+	/** Server/event Blueprint: choose a cooked material instance; replicated to every passenger. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Plane|Appearance")
+	void SetEventLivery(UMaterialInterface* Material);
+
 private:
+	UFUNCTION()
+	void OnRep_EventLivery();
+	UPROPERTY(EditDefaultsOnly, ReplicatedUsing=OnRep_EventLivery, Category="Plane|Appearance")
+	TObjectPtr<UMaterialInterface> EventLivery;
+
 	/** Server: everyone still aboard leaves now. */
 	void EjectAll();
 
@@ -296,26 +305,12 @@ private:
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<UStaticMeshComponent> Nose;
 
-	UPROPERTY(VisibleAnywhere, Category="Components")
-	TObjectPtr<UStaticMeshComponent> WingLeft;
 
-	UPROPERTY(VisibleAnywhere, Category="Components")
-	TObjectPtr<UStaticMeshComponent> WingRight;
 
-	UPROPERTY(VisibleAnywhere, Category="Components")
-	TObjectPtr<UStaticMeshComponent> Fin;
 
-	UPROPERTY(VisibleAnywhere, Category="Components")
-	TObjectPtr<UStaticMeshComponent> StabiliserLeft;
 
-	UPROPERTY(VisibleAnywhere, Category="Components")
-	TObjectPtr<UStaticMeshComponent> StabiliserRight;
 
-	UPROPERTY(VisibleAnywhere, Category="Components")
-	TObjectPtr<UStaticMeshComponent> NacelleLeft;
 
-	UPROPERTY(VisibleAnywhere, Category="Components")
-	TObjectPtr<UStaticMeshComponent> NacelleRight;
 
 	/** Two crossed blades per engine, spun about the flight axis in Tick. */
 	UPROPERTY(VisibleAnywhere, Category="Components")

@@ -323,6 +323,7 @@ private:
 	void FillRegion(const TSharedPtr<SBox>& Slot, uint32& Stamp, uint32 Now, TFunctionRef<TSharedRef<SWidget>()> Build);
 	TSharedRef<SWidget> BuildTopBar();
 	TSharedRef<SWidget> BuildMenuColumn();
+	TSharedRef<SWidget> BuildBottomBar();
 	TSharedRef<SWidget> BuildSquadRow();
 	TSharedRef<SWidget> BuildNamePlate(const FCampusPartyMember& Member);
 	TSharedRef<SWidget> BuildInvitePlate();
