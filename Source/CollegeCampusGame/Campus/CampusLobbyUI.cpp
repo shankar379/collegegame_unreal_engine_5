@@ -757,6 +757,7 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	case EScreen::Daily: Body = BuildDaily(); break;
 	case EScreen::Settings: Body = BuildSettings(); break;
 	case EScreen::Missions: Body = BuildMissions(); break;
+	case EScreen::Pass: Body = BuildPass(); break;   // Campus/CampusPassUI.cpp
 	case EScreen::Streak: Body = BuildStreak(); break;
 	case EScreen::AdultConfirm: Body = BuildAdultConfirm(); break;
 	case EScreen::CollegePick: Body = BuildCollegePick(); break;

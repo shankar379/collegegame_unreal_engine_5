@@ -147,6 +147,16 @@ namespace CampusApi
 		Out.Diamonds = int32(Num(Json, TEXT("diamonds")));
 		Out.RoomCards = int32(Num(Json, TEXT("room_cards")));
 		Out.bTitle = Bool(Json, TEXT("title"));
+		Out.Xp = int32(Num(Json, TEXT("xp")));
+		Out.PassPoints = int32(Num(Json, TEXT("pass_points")));
+		const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
+		if (Json.IsValid() && Json->TryGetArrayField(TEXT("items"), Items))
+		{
+			for (const TSharedPtr<FJsonValue>& Item : *Items)
+			{
+				Out.Items.Add(Item->AsString());
+			}
+		}
 		return Out;
 	}
 

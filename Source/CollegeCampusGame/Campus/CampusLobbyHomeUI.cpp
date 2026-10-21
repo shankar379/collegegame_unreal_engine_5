@@ -266,6 +266,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMenuColumn()
 		// the daily reward rides on EVENTS now: it opens first, and lights the tab, while one is waiting
 		case ELobbyTab::Events:    Action = OpenScreen(bDailyReady ? EScreen::Daily : EScreen::Event); bHighlighted = bDailyReady; break;
 		case ELobbyTab::Pass:
+			Action = FOnClicked::CreateLambda([this]() { OpenPass(); return FReply::Handled(); });
+			break;
 		case ELobbyTab::Preset:
 		case ELobbyTab::Lab:
 			Action = FOnClicked::CreateLambda([this, Label = FString(Def.Label)]() { Toast(Label + TEXT(": coming soon")); return FReply::Handled(); });
