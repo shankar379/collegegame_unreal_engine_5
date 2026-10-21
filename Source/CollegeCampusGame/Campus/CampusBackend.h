@@ -123,10 +123,43 @@ struct FCampusReward
 	int32 Diamonds = 0;
 	int32 RoomCards = 0;
 	bool bTitle = false;
+	/** migration 031: what missions pay now (XP + Campus Pass points), and the items a pass level gives */
+	int32 Xp = 0;
+	int32 PassPoints = 0;
+	TArray<FString> Items;
 
-	bool IsEmpty() const { return Diamonds == 0 && RoomCards == 0 && !bTitle; }
+	bool IsEmpty() const { return Diamonds == 0 && RoomCards == 0 && !bTitle && Xp == 0 && PassPoints == 0 && Items.Num() == 0; }
 	/** "50 DIAMONDS + 1 CARD" - already uppercase for the display face. */
 	FString Describe() const;
+};
+
+/** One level of the CAMPUS PASS: a FREE and a PREMIUM reward. State: claimable | claimed | locked | locked_premium */
+struct FCampusPassLevel
+{
+	int32 Level = 0;
+	FCampusReward Free;
+	FCampusReward Premium;
+	FString FreeState;
+	FString PremiumState;
+};
+
+/** GET /v1/pass: the running season and this player's place in it (migration 031). */
+struct FCampusPass
+{
+	bool bValid = false;      // a season is running and the server answered
+	FString SeasonName;
+	FDateTime EndsAt;
+	int32 MaxLevel = 30;
+	int32 PointsPerLevel = 100;
+	int32 PremiumPrice = 499;
+	int32 Points = 0;
+	int32 Level = 0;
+	int32 PointsIntoLevel = 0;
+	bool bPremium = false;
+	int32 Claimable = 0;
+	TArray<FCampusPassLevel> Levels;
+
+	float LevelFraction() const { return PointsPerLevel > 0 ? FMath::Clamp(float(PointsIntoLevel) / float(PointsPerLevel), 0.f, 1.f) : 0.f; }
 };
 
 struct FCampusMission
@@ -509,6 +542,16 @@ public:
 	/** Re-reads the cached response from the save, for an instant first paint. Safe before any network call. */
 	void LoadEngagementFromCache();
 	void ClaimMission(const FString& PeriodId, const FString& MissionId, FDone Done);
+
+	// ---- CAMPUS PASS (migration 031) ----
+	/** GET /pass -> Pass */
+	void LoadPass(FDone Done);
+	/** POST /pass/premium: the season's Premium pass, paid in Diamonds */
+	void BuyPassPremium(FDone Done);
+	/** POST /pass/claim {level, track}: one level's reward on one track ("free" / "premium") */
+	void ClaimPass(int32 PassLevel, const FString& Track, FDone Done);
+	FCampusPass Pass;
+	void ReadPass(TSharedPtr<FJsonObject> Json);
 	void ClaimStreak(FDone Done);
 	/** A settled weekend's reward (last_weekend.unclaimed_reward). */
 	void ClaimPeriodReward(const FString& PeriodId, FDone Done);

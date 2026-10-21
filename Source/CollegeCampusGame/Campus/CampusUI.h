@@ -265,7 +265,9 @@ private:
 		Matchmaking,
 		// migration 012 / 013: the friends list, the invite picker opened from a "+ INVITE" plate, the
 		// stacked invite tray, the full-screen profile, and the player-of-the-match screen.
-		Friends, FriendPick, InviteTray, Profile, Summary };
+		Friends, FriendPick, InviteTray, Profile, Summary,
+		/** lobby v2: the CAMPUS PASS season track (Campus/CampusPassUI.cpp) */
+		Pass };
 	enum class EStoreTab : uint8 { Guns, Offers, Packs };
 	enum class EMissionTab : uint8 { Daily, Weekly, Weekend };
 	enum class EFriendTab : uint8 { Friends, Add, Requests };
@@ -478,6 +480,9 @@ private:
 	/** The banner for a settled weekend's unclaimed reward. */
 	TSharedRef<SWidget> BuildClaimBanner();
 	TSharedRef<SWidget> BuildMissions();
+	TSharedRef<SWidget> BuildPass();
+	/** open the Campus Pass: one read, then the screen */
+	void OpenPass();
 	TSharedRef<SWidget> BuildMissionCard(const FCampusMission& Mission, const FString& PeriodId);
 	TSharedRef<SWidget> BuildStreak();
 	TSharedRef<SWidget> BuildAdultConfirm();

@@ -43,7 +43,108 @@ FString FCampusReward::Describe() const
 	{
 		Parts.Add(TEXT("A TITLE"));
 	}
+	for (const FString& Item : Items)
+	{
+		Parts.Add(Item.ToUpper());
+	}
+	if (Xp > 0)
+	{
+		Parts.Add(FString::Printf(TEXT("%d XP"), Xp));
+	}
+	if (PassPoints > 0)
+	{
+		Parts.Add(FString::Printf(TEXT("%d PASS PTS"), PassPoints));
+	}
 	return Parts.Num() ? FString::Join(Parts, TEXT(" + ")) : FString();
+}
+
+// -------------------------------------------------------------------------------------------------
+// CAMPUS PASS (migration 031)
+
+void UCampusBackend::ReadPass(TSharedPtr<FJsonObject> Json)
+{
+	FCampusPass Out;
+	const TSharedPtr<FJsonObject> Season = Obj(Json, TEXT("season"));
+	if (!Json.IsValid() || !Season.IsValid())
+	{
+		Pass = Out; // between seasons: bValid stays false and the screen says so
+		return;
+	}
+	Out.bValid = true;
+	Out.SeasonName = Str(Season, TEXT("name"));
+	Out.EndsAt = Stamp(Season, TEXT("ends_at"));
+	Out.MaxLevel = int32(Num(Season, TEXT("max_level")));
+	Out.PointsPerLevel = int32(Num(Season, TEXT("points_per_level")));
+	Out.PremiumPrice = int32(Num(Season, TEXT("premium_price_diamonds")));
+	Out.Points = int32(Num(Json, TEXT("points")));
+	Out.Level = int32(Num(Json, TEXT("level")));
+	Out.PointsIntoLevel = int32(Num(Json, TEXT("points_into_level")));
+	Out.bPremium = Bool(Json, TEXT("premium"));
+	Out.Claimable = int32(Num(Json, TEXT("claimable")));
+	const TArray<TSharedPtr<FJsonValue>>* Levels = nullptr;
+	if (Json->TryGetArrayField(TEXT("levels"), Levels))
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *Levels)
+		{
+			const TSharedPtr<FJsonObject> Item = Value->AsObject();
+			FCampusPassLevel& Row = Out.Levels.AddDefaulted_GetRef();
+			Row.Level = int32(Num(Item, TEXT("level")));
+			const TSharedPtr<FJsonObject> Free = Obj(Item, TEXT("free"));
+			const TSharedPtr<FJsonObject> Prem = Obj(Item, TEXT("premium"));
+			Row.Free = ReadReward(Obj(Free, TEXT("reward")));
+			Row.FreeState = Str(Free, TEXT("state"));
+			Row.Premium = ReadReward(Obj(Prem, TEXT("reward")));
+			Row.PremiumState = Str(Prem, TEXT("state"));
+		}
+	}
+	Pass = MoveTemp(Out);
+}
+
+void UCampusBackend::LoadPass(FDone Done)
+{
+	Request(TEXT("GET"), TEXT("/pass"), nullptr, true, false, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		if (Status != 200)
+		{
+			Done(false, ErrorText(Status, Json));
+			return;
+		}
+		ReadPass(Json);
+		Done(true, FString());
+	});
+}
+
+void UCampusBackend::BuyPassPremium(FDone Done)
+{
+	Request(TEXT("POST"), TEXT("/pass/premium"), nullptr, true, true, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		if (Status != 201)
+		{
+			Done(false, ErrorText(Status, Json));
+			return;
+		}
+		ReadWallet(Obj(Json, TEXT("wallet")));
+		ReadPass(Obj(Json, TEXT("pass")));
+		Done(true, FString());
+	});
+}
+
+void UCampusBackend::ClaimPass(int32 PassLevel, const FString& Track, FDone Done)
+{
+	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
+	Body->SetNumberField(TEXT("level"), PassLevel);
+	Body->SetStringField(TEXT("track"), Track);
+	Request(TEXT("POST"), TEXT("/pass/claim"), Body, true, true, [this, Done](int32 Status, TSharedPtr<FJsonObject> Json)
+	{
+		if (Status != 200)
+		{
+			Done(false, ErrorText(Status, Json));
+			return;
+		}
+		ReadWallet(Obj(Json, TEXT("wallet")));
+		ReadPass(Obj(Json, TEXT("pass")));
+		Done(true, FString());
+	});
 }
 
 int32 FCampusMissionPanel::ClaimableCount() const
