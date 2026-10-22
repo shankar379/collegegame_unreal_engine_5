@@ -222,6 +222,42 @@ void UCampusBackend::SaveCosmetics(const FString& OutfitId, FDone Done)
 	});
 }
 
+void UCampusBackend::LoadRank(FDone Done)
+{
+	CallApi(TEXT("GET"), TEXT("/me/rank"), nullptr, false,
+		[this, Done](bool bOk, const FString& Error, TSharedPtr<FJsonObject> Json)
+	{
+		if (bOk && Json.IsValid())
+		{
+			auto Read = [](const TSharedPtr<FJsonObject>& Row, FCampusRank& Out)
+			{
+				if (!Row.IsValid())
+				{
+					return;
+				}
+				Out.TierId = Str(Row, TEXT("tier_id"));
+				Out.Label = Str(Row, TEXT("label"));
+				Out.Rp = int32(Num(Row, TEXT("rp")));
+				Out.Progress = float(Num(Row, TEXT("progress")));
+				Out.ToNext = int32(Num(Row, TEXT("to_next")));
+				Out.Matches = int32(Num(Row, TEXT("matches")));
+				Out.Wins = int32(Num(Row, TEXT("wins")));
+			};
+			const TSharedPtr<FJsonObject> Season = Obj(Json, TEXT("season"));
+			Ranks.SeasonName = Str(Season, TEXT("name"));
+			Ranks.SeasonEnds = Stamp(Season, TEXT("ends_at"));
+			const TSharedPtr<FJsonObject> Ladders = Obj(Json, TEXT("ladders"));
+			Read(Obj(Ladders, TEXT("br")), Ranks.Br);
+			Read(Obj(Ladders, TEXT("clash")), Ranks.Clash);
+			Ranks.bLoaded = true;
+		}
+		if (Done)
+		{
+			Done(bOk, Error);
+		}
+	});
+}
+
 void UCampusBackend::SaveGunSkins(const TMap<FString, FString>& Skins, FDone Done)
 {
 	TSharedPtr<FJsonObject> Map = MakeShared<FJsonObject>();

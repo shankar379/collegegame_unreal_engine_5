@@ -90,20 +90,43 @@ void SCampusLobbyWidget::OpenWeapons(const FString& Gun)
 	{
 		return;
 	}
-	Busy(TEXT("Opening weapons..."));
-	Api->LoadStore([this, Gun](bool bOk, const FString& Error)
+	// The selection: the gun asked for, else the equipped one, else the first; shown in its worn skin.
+	auto Pick = [this, Gun]()
 	{
-		Done(bOk, Error, [this, Gun]()
+		const UCampusBackend* Live = Backend();
+		FString Id = Gun;
+		if (Id.IsEmpty() && Live)
 		{
-			const UCampusBackend* Live = Backend();
-			FString Pick = Gun;
-			if (Pick.IsEmpty() && Live)
+			Id = !Live->EquippedGun.IsEmpty() ? Live->EquippedGun : (Live->Guns.Num() > 0 ? Live->Guns[0].Id : FString());
+		}
+		const FString* Worn = Live ? Live->GunSkins.Find(Id) : nullptr;
+		WeaponsGun = Id;
+		WeaponsStyle = Worn ? CampusGunSkins::StyleFor(*Worn) : uint8(CampusGunSkins::None);
+	};
+	// INSTANT when the store is already in memory (the lobby prefetches it, see Show(Lobby)): the page opens
+	// on this tap, and a quiet refresh repaints it if prices or ownership moved. Only the very first open
+	// of a session with no store yet waits behind the busy overlay.
+	if (Api->Guns.Num() > 0)
+	{
+		Pick();
+		Show(EScreen::Weapons);
+		// WEAK: the backend outlives this widget, and the player may leave the lobby before the reply.
+		TWeakPtr<SWidget> Weak = AsWeak();
+		Api->LoadStore([this, Weak](bool bOk, const FString&)
+		{
+			if (Weak.IsValid() && bOk && Current == EScreen::Weapons)
 			{
-				Pick = !Live->EquippedGun.IsEmpty() ? Live->EquippedGun : (Live->Guns.Num() > 0 ? Live->Guns[0].Id : FString());
+				Refresh();
 			}
-			const FString* Worn = Live ? Live->GunSkins.Find(Pick) : nullptr;
-			WeaponsGun = Pick;
-			WeaponsStyle = Worn ? CampusGunSkins::StyleFor(*Worn) : uint8(CampusGunSkins::None);
+		});
+		return;
+	}
+	Busy(TEXT("Opening weapons..."));
+	Api->LoadStore([this, Pick](bool bOk, const FString& Error)
+	{
+		Done(bOk, Error, [this, Pick]()
+		{
+			Pick();
 			Show(EScreen::Weapons);
 		});
 	});

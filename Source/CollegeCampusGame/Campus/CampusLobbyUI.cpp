@@ -711,6 +711,41 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 		// closet is only where it is edited. Covers the resumed-session path that never calls
 		// AfterSignIn, and costs nothing on the way back from a match.
 		RefreshCosmetics();
+		// THE RANK, ON EVERY LOBBY VISIT (one cheap read): the badge on the Ranked card has to show the
+		// points the match that just ended moved. Latched per visit of this widget, weak like the rest.
+		if (!bRankAsked)
+		{
+			if (UCampusBackend* Api = Backend(); Api && Api->IsSignedIn())
+			{
+				bRankAsked = true;
+				TWeakPtr<SWidget> Weak = AsWeak();
+				Api->LoadRank([this, Weak](bool bOk, const FString&)
+				{
+					if (Weak.IsValid() && bOk && (Current == EScreen::Lobby || Current == EScreen::MapSelect))
+					{
+						Refresh();
+					}
+				});
+			}
+		}
+		// THE STORE, ONCE PER APP RUN, in the background: guns, skins, prices and the wallet are then in
+		// memory before anyone taps WEAPON or STORE, so those open on the tap instead of after a round trip
+		// through the tunnel. Weak for the same reason as RefreshCosmetics.
+		if (!bStorePrefetched)
+		{
+			if (UCampusBackend* Api = Backend(); Api && Api->IsSignedIn())
+			{
+				bStorePrefetched = true;
+				TWeakPtr<SWidget> Weak = AsWeak();
+				Api->LoadStore([this, Weak](bool bOk, const FString&)
+				{
+					if (Weak.IsValid() && bOk && Current == EScreen::Lobby)
+					{
+						Refresh(); // the Diamonds counter in the top bar
+					}
+				});
+			}
+		}
 		// GET /v1/live-config: maintenance, the minimum build and the announcements. On ENTRY, never
 		// in a Build function, and throttled inside the subsystem to once per app run plus one stale
 		// resume - the tunnel is metered at 20,000 requests a month.

@@ -542,8 +542,17 @@ void SCampusMatchWidget::Tick(const FGeometry& AllottedGeometry, const double In
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
 	const UWorld* World = Controller.IsValid() ? Controller->GetWorld() : nullptr;
 	const ACampusGameState* State = World ? World->GetGameState<ACampusGameState>() : nullptr;
-	const int32 Phase = State ? int32(State->Phase) : -1;
+	const int32 MatchPhase = State ? int32(State->Phase) : -1;
 	const bool bSettings = Controller.IsValid() && Controller->IsSettingsOpen();
+	const bool bBattleRoyaleMatch = CampusBR::IsBattleRoyale(World);
+	// MY SQUAD IS OUT (battle royale): the server writes SquadPlacement on every member the moment the
+	// squad's last player falls. That is when Free Fire / PUBG show "#32" - not minutes later when the
+	// last two bots finish the match. While a teammate is still up it stays 0 and the player spectates.
+	const ACampusPlayerState* Mine = Controller.IsValid() ? Controller->GetPlayerState<ACampusPlayerState>() : nullptr;
+	const bool bSquadOut = bBattleRoyaleMatch && Mine && Mine->SquadPlacement > 0;
+	// For THIS widget a squad that is out IS at the end of its match: the result screen is built once,
+	// and the real final whistle later is not a change (no rebuild, no restarted countdown).
+	const int32 Phase = bSquadOut ? int32(ECampusPhase::Ended) : MatchPhase;
 
 	// Rebuild only when the phase, the room's players, or the gear state change; rebuilding every
 	// frame makes it flicker (and allocates a screenful of widgets 60 times a second).
@@ -566,7 +575,7 @@ void SCampusMatchWidget::Tick(const FGeometry& AllottedGeometry, const double In
 	// A battle session has none of those - it gathers on the drop platform under SCampusBRHud's own
 	// banner (PLAYERS x / 50 and the session id) and the BACKEND decides when it starts - so in BR
 	// this widget draws nothing at all until the match ends.
-	const bool bBattleRoyale = CampusBR::IsBattleRoyale(World);
+	const bool bBattleRoyale = bBattleRoyaleMatch;
 	switch (Phase)
 	{
 	case int32(ECampusPhase::Waiting):

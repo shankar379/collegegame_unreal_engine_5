@@ -582,6 +582,9 @@ void SCampusBREnd::Tick(const FGeometry& AllottedGeometry, const double InCurren
 		bSettled = true;
 		Life = 0.f;
 		View.Read(Controller.Get());
+		OthersStillPlaying = CountOthersStillPlaying();
+		bHostingOthers = OthersStillPlaying > 0;
+		AutoLeaveLeft = bHostingOthers ? -1.f : AutoLeaveSeconds;
 		BuildScreen();
 		if (ACampusMatchPlayerController* PC = Controller.Get())
 		{
@@ -591,6 +594,31 @@ void SCampusBREnd::Tick(const FGeometry& AllottedGeometry, const double InCurren
 	if (!bSettled)
 	{
 		return;
+	}
+
+	// THE WAY OUT. A host whose last guests have finished gets the countdown back; a player reading the
+	// summary sheet is not pulled out from under it.
+	HostCheckIn -= InDeltaTime;
+	if (bHostingOthers && HostCheckIn <= 0.f)
+	{
+		HostCheckIn = 1.f;
+		OthersStillPlaying = CountOthersStillPlaying();
+		if (OthersStillPlaying == 0)
+		{
+			bHostingOthers = false;
+			bLeaveArmed = false;
+			AutoLeaveLeft = AutoLeaveSeconds;
+		}
+	}
+	if (AutoLeaveLeft > 0.f && !bSummaryOpen)
+	{
+		AutoLeaveLeft -= InDeltaTime;
+		if (AutoLeaveLeft <= 0.f)
+		{
+			AutoLeaveLeft = 0.f;
+			BackToLobby();
+			return;
+		}
 	}
 
 	// Panels: fade and slide up on a 60 ms stagger. Transform and opacity only.
@@ -1077,7 +1105,63 @@ TSharedRef<SWidget> SCampusBREnd::BuildPlates()
 
 // ---- bottom right: SHARE, MATCH SUMMARY, BACK TO LOBBY -------------------------------------------
 
+int32 SCampusBREnd::CountOthersStillPlaying() const
+{
+	// Only the HOST matters here: a client leaving drops itself, the host leaving drops everybody.
+	const ACampusMatchPlayerController* PC = Controller.Get();
+	const UWorld* World = PC ? PC->GetWorld() : nullptr;
+	if (!PC || !World || !PC->HasAuthority() || World->GetNetMode() == NM_Standalone)
+	{
+		return 0;
+	}
+	const AGameStateBase* State = World->GetGameState();
+	if (!State)
+	{
+		return 0;
+	}
+	int32 Count = 0;
+	for (const APlayerState* Each : State->PlayerArray)
+	{
+		const ACampusPlayerState* Player = Cast<ACampusPlayerState>(Each);
+		// A REAL player is one a player controller owns (on the host every player state is owned by its
+		// controller); a bot's is owned by its AI controller.
+		if (Player && Player != PC->PlayerState && Cast<APlayerController>(Player->GetOwner()) && Player->Placement == 0)
+		{
+			++Count;
+		}
+	}
+	return Count;
+}
+
+
 TSharedRef<SWidget> SCampusBREnd::BuildButtons()
+{
+	// The countdown line sits over the buttons: "BACK TO LOBBY IN 7", or, for a host with guests still
+	// playing, why there is no countdown.
+	TSharedRef<SWidget> Line = SNew(STextBlock)
+		.Font(CampusAngular::Display(16))
+		.Justification(ETextJustify::Right)
+		.ColorAndOpacity_Lambda([this]() { return bHostingOthers ? FSlateColor(CampusAngular::Accent) : FSlateColor(EndMuted); })
+		.Text_Lambda([this]()
+		{
+			if (bHostingOthers)
+			{
+				return bLeaveArmed
+					? LOCTEXT("EndHostArmed", "TAP AGAIN TO LEAVE - THEIR MATCH ENDS TOO")
+					: FText::Format(LOCTEXT("EndHosting", "YOU ARE HOSTING - {0} PLAYERS STILL IN THE MATCH"), FText::AsNumber(OthersStillPlaying));
+			}
+			if (AutoLeaveLeft > 0.f)
+			{
+				return FText::Format(LOCTEXT("EndAutoLeave", "BACK TO LOBBY IN {0}"), FText::AsNumber(FMath::CeilToInt(AutoLeaveLeft)));
+			}
+			return FText::GetEmpty();
+		});
+	return SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0.f, 0.f, 0.f, 10.f)[Line]
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)[BuildButtonRow()];
+}
+
+TSharedRef<SWidget> SCampusBREnd::BuildButtonRow()
 {
 	return SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
@@ -1221,6 +1305,13 @@ void SCampusBREnd::Share()
 
 void SCampusBREnd::BackToLobby()
 {
+	// A host with real players still fighting: the first tap only warns (the line above the button says
+	// what leaving does to them), the second one leaves.
+	if (bHostingOthers && !bLeaveArmed)
+	{
+		bLeaveArmed = true;
+		return;
+	}
 	if (ACampusMatchPlayerController* PC = Controller.Get())
 	{
 		// The existing path: bank the reward once (it is idempotent), then travel. The stage is torn

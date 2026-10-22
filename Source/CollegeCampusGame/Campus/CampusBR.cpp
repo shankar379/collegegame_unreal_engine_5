@@ -293,7 +293,7 @@ int32 UCampusBRQueue::GetCountdown() const
 	return FMath::Max(0, Match.CountdownSeconds - int32(Since));
 }
 
-void UCampusBRQueue::Join(int32 InTeamSize, bool bNightWanted, FName MapId, FDone Done)
+void UCampusBRQueue::Join(int32 InTeamSize, bool bNightWanted, FName MapId, bool bRankedWanted, FDone Done)
 {
 	UCampusBackend* Backend = Api();
 	if (!Backend || !Backend->IsSignedIn())
@@ -319,6 +319,7 @@ void UCampusBRQueue::Join(int32 InTeamSize, bool bNightWanted, FName MapId, FDon
 	}
 	TeamSize = FMath::Clamp(InTeamSize, 1, 4);
 	bNight = bNightWanted;
+	bRanked = bRankedWanted;
 	// Resolved HERE and not at the request, so a retry and the overlay both read the one answer. A map
 	// the API has no name for queues for the valley - a battle session is always somewhere.
 	const TCHAR* ApiMap = CampusBR::ApiMapFor(MapId);
@@ -349,6 +350,11 @@ void UCampusBRQueue::Join(int32 InTeamSize, bool bNightWanted, FName MapId, FDon
 		// standing in - and two players who picked different maps are never put in one session.
 		Body->SetStringField(TEXT("region"), BrRegion());
 		Body->SetStringField(TEXT("map"), Self->WantedMap);
+		// RANKED is a fourth queue dimension (migration 035): ranked players only meet ranked players.
+		if (Self->bRanked)
+		{
+			Body->SetBoolField(TEXT("ranked"), true);
+		}
 		// The matchmaker needs the puid UP FRONT: if it picks this phone as the host, the session object
 		// it hands every other player has to carry the identity they will dial. Empty = this phone can
 		// play but can never host (the phone allocator needs one reachable listen server).

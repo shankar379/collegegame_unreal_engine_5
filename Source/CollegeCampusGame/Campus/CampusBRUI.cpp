@@ -82,7 +82,15 @@ UCampusBRQueue* SCampusLobbyWidget::BRQueue() const
 
 bool SCampusLobbyWidget::IsBattleRoyaleSelected() const
 {
-	return FName(CampusCatalog::Mode(SelectedMode).Id) == FName(TEXT("BattleRoyale"));
+	// Ranked BR is the same fifty-player session from a different queue: everything that is true of
+	// battle royale (the queue overlay, the BR schedule, the team size) is true of it.
+	const FName Mode(CampusCatalog::Mode(SelectedMode).Id);
+	return Mode == FName(TEXT("BattleRoyale")) || Mode == FName(TEXT("RankedBR"));
+}
+
+bool SCampusLobbyWidget::IsRankedSelected() const
+{
+	return FName(CampusCatalog::Mode(SelectedMode).Id) == FName(TEXT("RankedBR"));
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -132,7 +140,7 @@ void SCampusLobbyWidget::StartBattleRoyale()
 	// looks dead for a second is a START the player taps twice. The reply often CARRIES the session, in
 	// which case the queue places us and EnterBRMatch travels before this screen is seen at all.
 	Show(EScreen::Matchmaking);
-	Queue->Join(Team, bNight, MapId, [this](bool bOk, const FString& Error)
+	Queue->Join(Team, bNight, MapId, IsRankedSelected(), [this](bool bOk, const FString& Error)
 	{
 		if (!bOk)
 		{

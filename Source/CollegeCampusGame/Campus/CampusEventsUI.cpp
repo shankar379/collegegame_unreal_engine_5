@@ -22,10 +22,12 @@
 
 #include "Campus/CampusAngular.h"
 #include "Campus/CampusBackend.h"
+#include "Campus/CampusFestiveArt.h"
 #include "Campus/CampusLobbyUIInternal.h"
 #include "Campus/CampusMapArt.h"
 #include "Campus/CampusPlayerControllers.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSafeZone.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SSpacer.h"
 #include "Widgets/SBoxPanel.h"
@@ -38,9 +40,6 @@ using namespace CampusStyle;
 
 namespace
 {
-	/** The lobby banner. Wide enough for a name and a clock, short enough to clear the top bar. */
-	constexpr float EventBannerWidth = 520.f;
-	constexpr float EventBannerHeight = 104.f;
 	/** The reward progress bar's drawn width inside the sheet. */
 	constexpr float EventBarWidth = 420.f;
 
@@ -76,6 +75,63 @@ namespace
 			];
 	}
 
+	/** "SUN 8 NOV": the festival day the way a poster prints it. Empty when the console set none. */
+	FText FestivalDayText(const FCampusEvent& Event)
+	{
+		if (Event.FestivalDay == FDateTime())
+		{
+			return FText::GetEmpty();
+		}
+		static const TCHAR* Days[] = { TEXT("MON"), TEXT("TUE"), TEXT("WED"), TEXT("THU"), TEXT("FRI"), TEXT("SAT"), TEXT("SUN") };
+		static const TCHAR* Months[] = { TEXT("JAN"), TEXT("FEB"), TEXT("MAR"), TEXT("APR"), TEXT("MAY"), TEXT("JUN"),
+			TEXT("JUL"), TEXT("AUG"), TEXT("SEP"), TEXT("OCT"), TEXT("NOV"), TEXT("DEC") };
+		const int32 Day = int32(Event.FestivalDay.GetDayOfWeek());
+		const int32 Month = FMath::Clamp(Event.FestivalDay.GetMonth(), 1, 12) - 1;
+		return FText::FromString(FString::Printf(TEXT("%s %d %s"), Days[FMath::Clamp(Day, 0, 6)], Event.FestivalDay.GetDay(), Months[Month]));
+	}
+
+	/** This event is drawn by the game (a theme and no uploaded banner): SCampusFestiveArt. */
+	bool IsFestive(const FCampusEvent& Event)
+	{
+		return Event.BannerKey.IsEmpty() && !Event.Theme.IsEmpty();
+	}
+
+	/** The accent an event's frame wears: the festival's own colour, else the game's. */
+	FLinearColor EventAccent(const FCampusEvent& Event)
+	{
+		return Event.Theme.IsEmpty() ? CampusAngular::Accent : SCampusFestiveArt::AccentFor(Event.Theme);
+	}
+
+	/** A festival plate: the drawn art underneath, a light scrim, the frame and the click on top. */
+	TSharedRef<SWidget> FestivePlate(const FCampusEvent& Event, float Intensity, bool bStrong, FMargin Padding,
+		FOnClicked OnClicked, TSharedRef<SWidget> Content)
+	{
+		const FLinearColor Frame = EventAccent(Event);
+		return SNew(SOverlay)
+			+ SOverlay::Slot()
+			[
+				SNew(SBox).Clipping(EWidgetClipping::ClipToBounds)
+				[
+					SNew(SCampusFestiveArt).Theme(Event.Theme).Intensity(Intensity)
+				]
+			]
+			+ SOverlay::Slot()
+			[
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Notched(16.f))
+				.Fill(FLinearColor(0.f, 0.f, 0.f, 0.18f))
+				.Border(bStrong ? Frame : Frame.CopyWithNewOpacity(0.55f))
+				.BorderWidth(bStrong ? 2.f : 1.f)
+				.AccentEdge(Frame)
+				.AccentEdgeWidth(bStrong ? 5.f : 3.f)
+				.ContentPadding(Padding)
+				.OnClicked(OnClicked)
+				[
+					Content
+				]
+			];
+	}
+
 	/** Every multiplier the event is running, as chips. Empty when it runs none. */
 	TSharedRef<SWidget> EventMultipliers(const FCampusEvent& Event)
 	{
@@ -98,88 +154,6 @@ namespace
 		}
 		return Row;
 	}
-}
-
-// -------------------------------------------------------------------------------------------------
-// The lobby banner
-
-TSharedRef<SWidget> SCampusLobbyWidget::BuildEventBanner()
-{
-	const UCampusBackend* Api = Backend();
-	const TArray<FCampusEvent> Shown = Api ? Api->VisibleEvents() : TArray<FCampusEvent>();
-	if (Shown.Num() == 0)
-	{
-		// NOTHING IS RUNNING, so there is nothing here: no placeholder, no "no events" card over the
-		// lobby. The EVENTS menu tab is where an empty state belongs.
-		return SNullWidget::NullWidget;
-	}
-	const FCampusEvent& Event = Shown[0];
-	const bool bLive = Api && Event.IsLiveAt(Api->Engagement.Now());
-	const int32 EventId = Event.Id;
-
-	TSharedRef<SVerticalBox> Text = SNew(SVerticalBox)
-		+ SVerticalBox::Slot().AutoHeight()
-		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 10.f, 0.f)
-			[
-				EventChip(bLive ? CampusAngular::EGlyph::Crown : CampusAngular::EGlyph::Clock,
-					bLive ? LOCTEXT("EventLive", "LIVE EVENT") : LOCTEXT("EventSoon", "STARTING SOON"),
-					bLive ? CampusAngular::Accent : CampusAngular::TextMuted)
-			]
-			+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
-			[
-				// The SERVER clock, like every other countdown in this game: an event that ends in two
-				// hours must not read differently on a phone whose owner moved the clock.
-				Countdown(bLive ? Event.EndsAt : Event.StartsAt,
-					bLive ? LOCTEXT("EventEndsIn", "ENDS IN") : LOCTEXT("EventStartsIn", "STARTS IN"),
-					14, bLive ? CampusAngular::Accent : CampusAngular::TextMuted)
-			]
-		]
-		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
-		[
-			SNew(STextBlock)
-			.Text(FText::FromString(Event.Label.ToUpper()))
-			.Font(CampusAngular::Display(26))
-			.ColorAndOpacity(FLinearColor::White)
-			.ShadowOffset(FVector2D(2.f, 2.f))
-			.ShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.85f))
-			.Clipping(EWidgetClipping::ClipToBounds)
-		];
-	if (Event.HasMultiplier())
-	{
-		Text->AddSlot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)[EventMultipliers(Event)];
-	}
-
-	return SNew(SBox).WidthOverride(EventBannerWidth).HeightOverride(EventBannerHeight)
-		[
-			SNew(SCampusArtPlate)
-			.Shape(FCampusShape::Notched(16.f))
-			// THE CONSOLE'S BANNER, and no packaged fallback: an event is published with its own art
-			// or with none, so the plate's own dusk gradient is what an art-less event wears.
-			.RemoteKey(Event.BannerKey)
-			.FocusY(0.45f)
-			.ScrimStrength(0.55f)
-			.Border(bLive ? CampusAngular::Accent : CampusAngular::Hairline)
-			.BorderWidth(bLive ? 2.f : 1.f)
-			.AccentEdge(bLive ? CampusAngular::Accent : FLinearColor::Transparent)
-			.AccentEdgeWidth(bLive ? 5.f : 0.f)
-			.ContentPadding(FMargin(18.f, 10.f, 16.f, 10.f))
-			.OnClicked(FOnClicked::CreateLambda([this, EventId]()
-			{
-				EventShownId = EventId;
-				Show(EScreen::Event);
-				return FReply::Handled();
-			}))
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)[Text]
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(10.f, 0.f, 0.f, 0.f)
-				[
-					SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Chevron).Size(20.f).Color(CampusAngular::Accent)
-				]
-			]
-		];
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -365,6 +339,9 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildEventRewardRow(const FCampusEventRe
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildEvent()
 {
+	// FREE FIRE'S EVENTS SCREEN: the events down the left (LIVE / SOON), the selected one as a tall poster
+	// in the middle (its art, the name, the dates, Event Details and Event Time), and its rewards on the
+	// right, each with what it takes and where the player stands.
 	const UCampusBackend* Api = Backend();
 	const TArray<FCampusEvent> Shown = Api ? Api->VisibleEvents() : TArray<FCampusEvent>();
 	const FCampusEvent* Event = Shown.FindByPredicate([this](const FCampusEvent& Row) { return Row.Id == EventShownId; });
@@ -387,90 +364,156 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildEvent()
 		return Dialog(LOCTEXT("EventsTitle", "EVENTS"), Empty, 780.f, true, EScreen::Lobby);
 	}
 
-	const bool bLive = Api && Event->IsLiveAt(Api->Engagement.Now());
+	const FDateTime Now = Api ? Api->Engagement.Now() : FDateTime::UtcNow();
+	const bool bLive = Event->IsLiveAt(Now);
+	const FLinearColor Theme = EventAccent(*Event);
 
-	// The head card: the console's banner with the name, the clock and the multipliers over it.
-	TSharedRef<SWidget> Head = SNew(SBox).HeightOverride(150.f)
-		[
-			SNew(SCampusArtPlate)
-			.Shape(FCampusShape::Notched(16.f))
-			.RemoteKey(Event->BannerKey)
-			.FocusY(0.45f)
-			.ScrimStrength(0.5f)
-			.Border(bLive ? CampusAngular::Accent : CampusAngular::Hairline)
-			.BorderWidth(bLive ? 2.f : 1.f)
-			.ContentPadding(FMargin(22.f, 16.f))
-			[
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot().AutoHeight()
-				[
-					SNew(STextBlock)
-					.Text(FText::FromString(Event->Label.ToUpper()))
-					.Font(CampusAngular::Display(34))
-					.ColorAndOpacity(FLinearColor::White)
-					.ShadowOffset(FVector2D(3.f, 3.f))
-					.ShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.85f))
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 10.f, 0.f)
-					[
-						Countdown(bLive ? Event->EndsAt : Event->StartsAt,
-							bLive ? LOCTEXT("EventEndsIn", "ENDS IN") : LOCTEXT("EventStartsIn", "STARTS IN"),
-							16, bLive ? CampusAngular::Accent : CampusAngular::TextMuted)
-					]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[EventMultipliers(*Event)]
-				]
-			]
-		];
-
-	TSharedRef<SVerticalBox> Body = SNew(SVerticalBox)
-		+ SVerticalBox::Slot().AutoHeight()[Head];
-
-	// More than one event in the window: pills to move between them. One event needs no chooser.
-	if (Shown.Num() > 1)
+	// ---- LEFT: every live and upcoming event, one tab each
+	TSharedRef<SVerticalBox> Rail = SNew(SVerticalBox);
+	for (const FCampusEvent& Row : Shown)
 	{
-		TSharedRef<SHorizontalBox> Picker = SNew(SHorizontalBox);
-		for (const FCampusEvent& Row : Shown)
-		{
-			const int32 RowId = Row.Id;
-			Picker->AddSlot().AutoWidth().Padding(0.f, 0.f, 8.f, 0.f)
+		const int32 RowId = Row.Id;
+		const bool bOn = RowId == EventShownId;
+		const bool bRowLive = Row.IsLiveAt(Now);
+		const FLinearColor RowColor = EventAccent(Row);
+		Rail->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
+		[
+			SNew(SBox).WidthOverride(250.f).MinDesiredHeight(70.f)
 			[
-				CampusStyle::Pill(FText::FromString(Row.Label.ToUpper()), EventShownId == RowId,
-					FOnClicked::CreateLambda([this, RowId]()
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Tab(12.f, 12.f))
+				.Fill(bOn ? FLinearColor(RowColor.R * 0.30f, RowColor.G * 0.18f, RowColor.B * 0.10f, 0.96f) : FLinearColor(0.02f, 0.03f, 0.04f, 0.88f))
+				.Border(bOn ? RowColor : CampusAngular::Hairline)
+				.BorderWidth(bOn ? 2.f : 1.f)
+				.AccentEdge(bOn ? RowColor : FLinearColor::Transparent)
+				.AccentEdgeWidth(bOn ? 5.f : 0.f)
+				.ContentPadding(FMargin(16.f, 8.f, 10.f, 8.f))
+				.OnClicked(FOnClicked::CreateLambda([this, RowId]()
+				{
+					if (EventShownId != RowId)
 					{
-						if (EventShownId == RowId)
-						{
-							return FReply::Handled();
-						}
 						EventShownId = RowId;
 						EventProgress.Reset();
 						bEventProgressAsked = false;
 						RefreshEventProgress();
 						Refresh();
-						return FReply::Handled();
-					}), FVector2D(200.f, 46.f))
-			];
-		}
-		Body->AddSlot().AutoHeight().Padding(0.f, 12.f, 0.f, 0.f)[Picker];
+					}
+					return FReply::Handled();
+				}))
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(Row.Label.ToUpper()))
+						.Font(CampusAngular::Display(18))
+						.ColorAndOpacity(bOn ? FLinearColor::White : FLinearColor(1.f, 1.f, 1.f, 0.82f))
+						.AutoWrapText(true)
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Top).Padding(6.f, 0.f, 0.f, 0.f)
+					[
+						SNew(SCampusAngularPanel)
+						.Shape(FCampusShape::Slanted(6.f))
+						.Fill(bRowLive ? RowColor : FLinearColor(0.f, 0.f, 0.f, 0.6f))
+						.Border(RowColor)
+						.BorderWidth(1.f)
+						.ContentPadding(FMargin(7.f, 1.f))
+						[
+							SNew(STextBlock)
+							.Text(bRowLive ? LOCTEXT("TabLive", "LIVE") : LOCTEXT("TabSoon", "SOON"))
+							.Font(CampusAngular::Display(11))
+							.ColorAndOpacity(bRowLive ? FLinearColor::Black : RowColor)
+						]
+					]
+				]
+			]
+		];
 	}
 
-	Body->AddSlot().AutoHeight().Padding(0.f, 14.f, 0.f, 6.f)
-	[
-		SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-		[
-			Label(LOCTEXT("EventRewards", "REWARDS"), 20, FLinearColor::White)
-		]
-		+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer).Size(FVector2D(1.f, 1.f))]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-		[
-			Label(bLive ? LOCTEXT("EventRated", "RATED MATCHES COUNT") : LOCTEXT("EventNotStarted", "NOT STARTED YET"),
-				13, Muted)
-		]
-	];
+	// ---- CENTRE: the poster
+	static const TCHAR* Months[] = { TEXT("JAN"), TEXT("FEB"), TEXT("MAR"), TEXT("APR"), TEXT("MAY"), TEXT("JUN"),
+		TEXT("JUL"), TEXT("AUG"), TEXT("SEP"), TEXT("OCT"), TEXT("NOV"), TEXT("DEC") };
+	// The window in the phone's own time zone, ending on the last minute it is open.
+	const FTimespan Zone = FDateTime::Now() - FDateTime::UtcNow();
+	const FDateTime LocalStart = Event->StartsAt + Zone;
+	const FDateTime LocalLast = Event->EndsAt + Zone - FTimespan::FromMinutes(1.0);
+	const FText Range = LocalStart.GetMonth() == LocalLast.GetMonth()
+		? FText::FromString(FString::Printf(TEXT("%d - %d %s"), LocalStart.GetDay(), LocalLast.GetDay(), Months[LocalLast.GetMonth() - 1]))
+		: FText::FromString(FString::Printf(TEXT("%d %s - %d %s"), LocalStart.GetDay(), Months[LocalStart.GetMonth() - 1],
+			LocalLast.GetDay(), Months[LocalLast.GetMonth() - 1]));
+	const FText Window = FText::FromString(FString::Printf(TEXT("%s  -  %s"),
+		*LocalStart.ToString(TEXT("%Y-%m-%d %H:%M")), *LocalLast.ToString(TEXT("%Y-%m-%d %H:%M"))));
+	const FText Details = Event->Tagline.IsEmpty() ? LOCTEXT("EventDetailsDefault", "Play rated matches during the event and claim the rewards.")
+		: FText::FromString(Event->Tagline);
+	const FText Day = FestivalDayText(*Event);
 
+	TSharedRef<SWidget> PosterText = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().FillHeight(1.f)[SNew(SSpacer)]
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(Event->Label.ToUpper()))
+			.Font(CampusAngular::Display(44))
+			.ColorAndOpacity(FLinearColor::White)
+			.ShadowOffset(FVector2D(3.f, 3.f))
+			.ShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.9f))
+			.AutoWrapText(true)
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 8.f, 0.f)
+			[
+				SNew(SCampusAngularPanel).Shape(FCampusShape::Slanted(8.f)).Fill(FLinearColor::White).ContentPadding(FMargin(12.f, 2.f))
+				[
+					SNew(STextBlock).Text(Range).Font(CampusAngular::Display(15)).ColorAndOpacity(FLinearColor::Black)
+				]
+			]
+			+ SHorizontalBox::Slot().AutoWidth()
+			[
+				Day.IsEmpty() ? SNullWidget::NullWidget : EventChip(CampusAngular::EGlyph::Crown, Day, Theme)
+			]
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 14.f, 0.f, 0.f)
+		[
+			SNew(SCampusAngularPanel)
+			.Shape(FCampusShape::Notched(8.f))
+			.Fill(FLinearColor(0.f, 0.f, 0.f, 0.62f))
+			.AccentEdge(Theme)
+			.AccentEdgeWidth(3.f)
+			.ContentPadding(FMargin(12.f, 8.f))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()[Label(LOCTEXT("EventDetails", "Event Details"), 15, FLinearColor::White)]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 6.f)
+				[
+					SNew(STextBlock).Text(Details).Font(CampusAngular::Body(14)).ColorAndOpacity(Theme).AutoWrapText(true)
+				]
+				+ SVerticalBox::Slot().AutoHeight()[Label(LOCTEXT("EventTime", "Event Time"), 15, FLinearColor::White)]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+				[
+					SNew(STextBlock).Text(Window).Font(CampusAngular::Numeric(14)).ColorAndOpacity(Theme)
+				]
+			]
+		];
+	TSharedRef<SWidget> Poster = SNew(SBox).WidthOverride(430.f)
+		[
+			IsFestive(*Event)
+				? FestivePlate(*Event, 1.f, true, FMargin(20.f, 16.f), FOnClicked::CreateLambda([]() { return FReply::Handled(); }), PosterText)
+				: StaticCastSharedRef<SWidget>(SNew(SCampusArtPlate)
+					.Shape(FCampusShape::Notched(16.f))
+					.RemoteKey(Event->BannerKey)
+					.FocusY(0.4f)
+					.ScrimStrength(0.45f)
+					.Border(Theme)
+					.BorderWidth(2.f)
+					.ContentPadding(FMargin(20.f, 16.f))
+					[
+						PosterText
+					])
+		];
+
+	// ---- RIGHT: the clock, the boosts, and the rewards
 	TSharedRef<SVerticalBox> Rows = SNew(SVerticalBox);
 	if (EventProgress.IsValid() && EventProgress->EventId == EventShownId && EventProgress->Rewards.Num() > 0)
 	{
@@ -478,6 +521,11 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildEvent()
 		{
 			Rows->AddSlot().AutoHeight().Padding(0.f, 4.f)[BuildEventRewardRow(Reward)];
 		}
+	}
+	else if (!bLive && Event->Rewards.Num() == 0)
+	{
+		// An announced festival whose rewards are still being planned: say they are coming, not "none".
+		Rows->AddSlot().AutoHeight()[Label(LOCTEXT("EventRewardsSoon", "REWARDS WILL BE REVEALED BEFORE IT STARTS."), 17, Muted)];
 	}
 	else if (bEventProgressLoading)
 	{
@@ -507,12 +555,71 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildEvent()
 			]
 		];
 	}
-	Body->AddSlot().FillHeight(1.f)
-	[
-		SNew(SScrollBox) + SScrollBox::Slot()[Rows]
-	];
+	TSharedRef<SWidget> Right = SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 8.f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 12.f, 0.f)
+			[
+				Countdown(bLive ? Event->EndsAt : Event->StartsAt,
+					bLive ? LOCTEXT("EventEndsIn", "ENDS IN") : LOCTEXT("EventStartsIn", "STARTS IN"), 18, Theme)
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[EventMultipliers(*Event)]
+			+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer)]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				Label(bLive ? LOCTEXT("EventRated", "RATED MATCHES COUNT") : LOCTEXT("EventNotStarted", "NOT STARTED YET"), 13, Muted)
+			]
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
+		[
+			Label(LOCTEXT("EventRewards", "REWARDS"), 20, FLinearColor::White)
+		]
+		+ SVerticalBox::Slot().FillHeight(1.f)
+		[
+			SNew(SScrollBox) + SScrollBox::Slot()[Rows]
+		];
 
-	return Dialog(LOCTEXT("EventsTitle", "EVENTS"), Body, 880.f, true, EScreen::Lobby);
+	return SNew(SOverlay)
+		+ SOverlay::Slot()[Backdrop(0.84f)]
+		+ SOverlay::Slot()
+		[
+			SNew(SSafeZone).Padding(FMargin(24.f, 18.f))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 14.f, 0.f)
+					[
+						SNew(SCampusAngularPanel).Shape(FCampusShape::Slanted(10.f)).Fill(Theme)
+						[
+							SNew(SBox).WidthOverride(14.f).HeightOverride(32.f)
+						]
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						Label(LOCTEXT("EventsTitle", "EVENTS"), 32, FLinearColor::White)
+					]
+					+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer)]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						CampusStyle::IconButton(CampusAngular::EGlyph::Close,
+							FOnClicked::CreateLambda([this]() { Show(EScreen::Lobby); return FReply::Handled(); }), 62.f)
+					]
+				]
+				+ SVerticalBox::Slot().FillHeight(1.f).Padding(0.f, 14.f, 0.f, 0.f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 18.f, 0.f)
+					[
+						SNew(SScrollBox) + SScrollBox::Slot()[Rail]
+					]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 18.f, 0.f)[Poster]
+					+ SHorizontalBox::Slot().FillWidth(1.f)[Right]
+				]
+			]
+		];
 }
 
 #undef LOCTEXT_NAMESPACE

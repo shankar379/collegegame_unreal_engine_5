@@ -61,6 +61,34 @@ struct FCampusCosmetic
 	FString ForGun;
 };
 
+/** One ranked ladder as GET /v1/me/rank answers it (backend migration 035). */
+struct FCampusRank
+{
+	/** "fresher" ... "gold_medalist", or "campus_legend" for the season's top Gold Medalists. */
+	FString TierId = TEXT("fresher");
+	/** "Senior II", "Gold Medalist", "Campus Legend". */
+	FString Label = TEXT("Fresher I");
+	int32 Rp = 0;
+	/** 0..1 inside the division: the bar (the owner's "level 2.5"). */
+	float Progress = 0.f;
+	/** RP to the next division; 0 at the top. */
+	int32 ToNext = 0;
+	int32 Matches = 0;
+	int32 Wins = 0;
+};
+
+/** Both ladders for the current season. */
+struct FCampusRanks
+{
+	bool bLoaded = false;
+	FString SeasonName;
+	FDateTime SeasonEnds = FDateTime();
+	/** Ranked Battle Royale. */
+	FCampusRank Br;
+	/** Ranked 4v4. */
+	FCampusRank Clash;
+};
+
 /** A gun skin for sale (backend migration 032): a cosmetic that paints every gun of one type. */
 struct FCampusGunSkinItem
 {
@@ -374,6 +402,14 @@ struct FCampusEvent
 	float XpMultiplier = 1.f;
 	float PointsMultiplier = 1.f;
 	TArray<FCampusEventReward> Rewards;
+	/** migration 034: the festive look to draw when there is no banner art ("diwali", "christmas", ...). */
+	FString Theme;
+	/** One line under the name ("Festival of Lights - light up the campus"). */
+	FString Tagline;
+	/** The festival day itself (midnight UTC of that date), FDateTime() when the console set none. */
+	FDateTime FestivalDay = FDateTime();
+	/** From when the lobby lists it as upcoming; FDateTime() = the blob's horizon_days. */
+	FDateTime AnnounceAt = FDateTime();
 
 	bool IsLiveAt(const FDateTime& Now) const { return StartsAt <= Now && EndsAt > Now; }
 	bool HasMultiplier() const { return XpMultiplier != 1.f || PointsMultiplier != 1.f; }
@@ -686,6 +722,9 @@ public:
 	 *  On success the response is mirrored into the save, so the next launch paints before the network
 	 *  answers. A failure is not fatal: the player keeps the starter outfit and whatever the save holds. */
 	void LoadCosmetics(FDone Done);
+	/** GET /v1/me/rank: both ladders this season, into Ranks. Cheap; called on every lobby visit so the
+	 *  tier badge shows the rank points the last match just moved. */
+	void LoadRank(FDone Done);
 	/** PUT /me/cosmetics {equipped:{outfit:id}}. Idempotent - a double tap is one equip. */
 	void SaveCosmetics(const FString& OutfitId, FDone Done);
 	/** PUT /me/gunskins {skins:{gun:skin|null}}: a FULL REPLACE of every gun's skin. Mirrors the answer
@@ -794,6 +833,8 @@ public:
 	bool bAdultConfirmed = false;
 	/** Streak, missions and the weekend board. Valid once bLoaded; painted from cache before that. */
 	FCampusEngagement Engagement;
+	/** Ranked tiers (migration 035), valid once Ranks.bLoaded. */
+	FCampusRanks Ranks;
 	/** Last error worth showing (e.g. "Could not reach the server"). */
 	FString LastError;
 	/** Set when the last claim was refused by the daily reward cap (429), so the UI can say so kindly. */

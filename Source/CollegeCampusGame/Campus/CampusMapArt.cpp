@@ -30,6 +30,13 @@ namespace CampusCatalog
 	const int32 NumMaps = UE_ARRAY_COUNT(Maps);
 
 	const FModeEntry Modes[] = {
+		// RANKED (backend migration 035): the same fifty-player session, its own queue, rank points on the result.
+		{ TEXT("RankedBR"), TEXT("Ranked Battle Royale"), { TEXT("VarsityValley"), nullptr }, TEXT("mode_br"),
+			TEXT("The same fifty-player drop, but every match counts: your placement, your kills and your damage earn "
+			     "or cost Rank Points. Climb Fresher, Sophomore, Junior, Senior, Topper, Dean's List and Gold Medalist; "
+			     "the season's top 100 are Campus Legends. Ranked players only meet ranked players.\n\n"
+			     "Just for fun: friendly matches between players and colleges. No cash prizes, no betting."),
+			nullptr, true },
 		{ TEXT("TeamClash"), TEXT("Team Clash"), { TEXT("Classic"), TEXT("CampusMap") }, TEXT("mode_clash"),
 			TEXT("Two squads, one campus. You pick the map, how many rounds (4-7) and how long each one runs; every "
 			     "round is played and the squad that wins the most takes the match. Everyone respawns between rounds. "

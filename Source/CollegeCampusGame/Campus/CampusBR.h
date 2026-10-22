@@ -180,7 +180,9 @@ public:
 	 *  THE MAP IS PART OF THE QUEUE, not a preference: the server runs one queue per mode x region x map
 	 *  (api/src/lib/battlesession/maps.js), because a session's host has already opened its level by the
 	 *  time anybody else is placed into it. */
-	void Join(int32 TeamSize, bool bNightWanted, FName MapId, FDone Done);
+	void Join(int32 TeamSize, bool bNightWanted, FName MapId, bool bRankedWanted, FDone Done);
+	/** The last Join asked for the RANKED queue (backend migration 035). */
+	bool IsRanked() const { return bRanked; }
 	/** DELETE /v1/br/queue. Leaves for the WHOLE TEAM (the ticket is the party). Safe to call when not
 	 *  queued; it just resets. A member only resets locally - the server refuses them by design. */
 	void Leave(FDone Done = nullptr);
@@ -282,6 +284,8 @@ private:
 	/** The API's name for the map this ticket is queued on ("real" / "campus"), resolved once in Join
 	 *  from the catalogue id the lobby picked. The valley until a map is asked for. */
 	FString WantedMap = TEXT("real");
+	/** Ranked BR: its own queue and sessions on the server, rank points on the result. */
+	bool bRanked = false;
 	int32 EtaSeconds = 0;
 	int32 Found = 0;
 	int32 TotalSlots = 50;

@@ -245,6 +245,8 @@ private:
 	TSharedRef<SWidget> BuildSquadResults();
 	TSharedRef<SWidget> BuildPlates();
 	TSharedRef<SWidget> BuildButtons();
+	/** SHARE / MATCH SUMMARY / BACK TO LOBBY, under the countdown line BuildButtons puts over them. */
+	TSharedRef<SWidget> BuildButtonRow();
 	TSharedRef<SWidget> BuildSummary();
 
 	/** One "KILLS   12" row in the left panel. */
@@ -289,6 +291,21 @@ private:
 	/** How long the backdrop holds before the results land. Long enough for one net update at a bad
 	 *  ping, short enough that nobody reads it as a hang. */
 	static constexpr float SettleSeconds = 0.45f;
+
+	/** BACK TO LOBBY BY ITSELF, the Free Fire way: this many seconds after the results land, unless the
+	 *  player is reading the summary sheet. */
+	static constexpr float AutoLeaveSeconds = 10.f;
+	/** Seconds left before the automatic return; < 0 = no automatic return (see bHostingOthers). */
+	float AutoLeaveLeft = -1.f;
+	/** THIS PHONE IS THE MATCH HOST and other real players are still in it: leaving would end their match,
+	 *  so there is no automatic return and BACK TO LOBBY asks twice. Re-checked every second. */
+	bool bHostingOthers = false;
+	int32 OthersStillPlaying = 0;
+	float HostCheckIn = 0.f;
+	/** The host tapped BACK TO LOBBY once while others were playing; the second tap leaves. */
+	bool bLeaveArmed = false;
+	/** Real (not bot) players other than me who are still alive in this match - 0 when I am a client. */
+	int32 CountOthersStillPlaying() const;
 
 	TArray<FEntrance> Entrances;
 	/** The three title pieces, animated imperatively in Tick (never rebuilt). */

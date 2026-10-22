@@ -98,6 +98,26 @@ void UCampusBackend::ReadEventsKey(const TSharedPtr<FJsonObject>& Key, FCampusEv
 		// THE KEY, NOT THE URL. `banner_url` is in the blob too, but the version is in the `content`
 		// key - so the key is what the picture cache can hold immutably, and the url cannot be.
 		Event.BannerKey = Str(Row, TEXT("banner_key"));
+		// migration 034: the festival dressing. Each absent on an older server, which reads as "none".
+		Event.Theme = Str(Row, TEXT("theme")).ToLower();
+		Event.Tagline = Str(Row, TEXT("tagline"));
+		Event.AnnounceAt = Stamp(Row, TEXT("announce_at"));
+		{
+			// "YYYY-MM-DD": a calendar date, not an instant - parsed as that day, never shifted by a zone.
+			const FString Day = Str(Row, TEXT("festival_day"));
+			int32 Year = 0, Month = 0, Date = 0;
+			TArray<FString> Parts;
+			if (Day.ParseIntoArray(Parts, TEXT("-")) == 3)
+			{
+				Year = FCString::Atoi(*Parts[0]);
+				Month = FCString::Atoi(*Parts[1]);
+				Date = FCString::Atoi(*Parts[2]);
+			}
+			if (FDateTime::Validate(Year, Month, Date, 0, 0, 0, 0))
+			{
+				Event.FestivalDay = FDateTime(Year, Month, Date);
+			}
+		}
 		const TSharedPtr<FJsonObject> Modifiers = Obj(Row, TEXT("modifiers"));
 		// Absent means 1.0 by the admin schema's own account; a published 0 would be a trap.
 		if (const double Xp = Num(Modifiers, TEXT("xp_multiplier")); Xp > 0.0)
@@ -159,9 +179,12 @@ TArray<FCampusEvent> UCampusBackend::VisibleEvents() const
 		{
 			continue;   // over: the blob keeps it until the console next publishes, the lobby does not
 		}
-		if (Event.StartsAt > Horizon)
+		// Further out than the horizon is hidden - unless the console ANNOUNCED it early (migration 034:
+		// a festival is listed as upcoming from announce_at, weeks ahead).
+		const bool bAnnounced = Event.AnnounceAt != FDateTime() && Event.AnnounceAt <= Now;
+		if (Event.StartsAt > Horizon && !bAnnounced)
 		{
-			continue;   // further out than the console asked us to show
+			continue;
 		}
 		Out.Add(Event);
 	}
