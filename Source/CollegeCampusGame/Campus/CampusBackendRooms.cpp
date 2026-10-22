@@ -20,11 +20,12 @@ using namespace CampusApi;
 // ---------------------------------------------------------------------------------------------
 // Rooms
 
-void UCampusBackend::CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds, int32 Minutes, const FString& EosPuid, FRoomDone Done)
+void UCampusBackend::CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds, int32 Minutes, bool bUnlimitedAmmo, const FString& EosPuid, FRoomDone Done)
 {
 	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
 	Body->SetNumberField(TEXT("rounds"), Rounds);
 	Body->SetNumberField(TEXT("round_minutes"), Minutes);
+	Body->SetBoolField(TEXT("unlimited_ammo"), bUnlimitedAmmo);
 	// THE API'S OWN NAME FOR THE MAP, which the caller has already resolved (CampusBR::ApiMapFor, and
 	// routes/rooms.js MAPS is the enum): "classic", "campus" or "real". It used to be folded here, from
 	// the catalogue id, into one of two values - which recorded a Campus Grounds room as the college.

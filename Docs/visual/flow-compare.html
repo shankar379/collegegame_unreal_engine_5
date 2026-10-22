@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Match Flow Compare</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #16181d; --muted: #5d6370; --line: #dde1e7;
+    --three: #1f7a5a; --three-bg: #e4f4ed; --ue: #3b5bdb; --ue-bg: #e7ecfd;
+    --same: #2f7d32; --diff: #b3261e; --diff-bg: #fdecea; --warn-bg: #fff6dd; --warn: #8a5a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111317; --card: #1a1d23; --ink: #eceef2; --muted: #9aa1ad; --line: #2c3139;
+      --three: #5fd3a5; --three-bg: #15302a; --ue: #8ea6ff; --ue-bg: #1c2445;
+      --same: #7bd47f; --diff: #ff8a80; --diff-bg: #3a1c1a; --warn-bg: #3a2f12; --warn: #f2c56b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111317; --card: #1a1d23; --ink: #eceef2; --muted: #9aa1ad; --line: #2c3139;
+    --three: #5fd3a5; --three-bg: #15302a; --ue: #8ea6ff; --ue-bg: #1c2445;
+    --same: #7bd47f; --diff: #ff8a80; --diff-bg: #3a1c1a; --warn-bg: #3a2f12; --warn: #f2c56b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 28px 16px 60px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 34px 0 10px; }
+  p.lead { color: var(--muted); margin: 0 0 18px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 13px; color: var(--muted); }
+  .chip { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .chip.three { background: var(--three-bg); color: var(--three); }
+  .chip.ue { background: var(--ue-bg); color: var(--ue); }
+  .chip.same { color: var(--same); border: 1px solid var(--same); }
+  .chip.diff { background: var(--diff-bg); color: var(--diff); }
+  .flow { display: grid; grid-template-columns: 34px 1fr 1fr; gap: 0 12px; }
+  .flow .head { font-weight: 700; padding: 8px 12px; border-radius: 10px 10px 0 0; }
+  .flow .head.three { background: var(--three-bg); color: var(--three); }
+  .flow .head.ue { background: var(--ue-bg); color: var(--ue); }
+  .num { font-weight: 700; color: var(--muted); text-align: center; padding-top: 12px; }
+  .cell { background: var(--card); border: 1px solid var(--line); border-top: none; padding: 10px 12px; }
+  .cell b { display: block; }
+  .cell small { color: var(--muted); }
+  .cell.diff { box-shadow: inset 4px 0 0 var(--diff); }
+  .step-title { grid-column: 2 / 4; font-weight: 700; padding: 14px 0 4px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 13px; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td.diff { color: var(--diff); font-weight: 600; }
+  td.same { color: var(--same); font-weight: 600; }
+  .note { background: var(--warn-bg); color: var(--warn); border-radius: 10px; padding: 12px 14px; margin-top: 14px; }
+  .wrap { overflow-x: auto; }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  @media (max-width: 720px) {
+    .flow { grid-template-columns: 1fr; }
+    .num, .flow .head { display: none; }
+    .step-title { grid-column: 1; }
+    .cell::before { display: block; font-size: 11px; font-weight: 700; letter-spacing: .04em; margin-bottom: 2px; }
+    .cell.t::before { content: "THREE.JS"; color: var(--three); }
+    .cell.u::before { content: "UNREAL"; color: var(--ue); }
+    .cell { border-top: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lobby → match → lobby, both games</h1>
+  <p class="lead">Checked against the code on 2026-10-22. Three.js: <code>src/game/br.js</code>, <code>game.js brTick</code>, <code>net.js matchmake</code>.
+    Unreal: <code>campuscombat-backend/api/src/lib/battlesession</code>, <code>CampusBRGameMode</code>, <code>CampusBRPlane</code>.</p>
+  <div class="legend">
+    <span class="chip three">Three.js (web)</span>
+    <span class="chip ue">Unreal (Android)</span>
+    <span class="chip same">same</span>
+    <span class="chip diff">different (beyond the player count)</span>
+  </div>
+
+  <h2>The battle royale flow, step by step</h2>
+  <div class="flow">
+    <div></div><div class="head three">Three.js — 15 in a match</div><div class="head ue">Unreal — 50 in a match</div>
+
+    <div class="step-title">1 · Lobby: pick mode and form the team <span class="chip same">same</span></div>
+    <div class="num">1</div>
+    <div class="cell t"><b>SOLO · DUO · SQUAD</b>Team of 1 / 2 / 4. Friends join by invite or squad link; members press READY.</div>
+    <div class="cell u"><b>SOLO · DUO · SQUAD</b>Team of 1 / 2 / 4. Party via <code>/v1/party</code> invites; members press READY.</div>
+
+    <div class="step-title">2 · START: find a session or make one <span class="chip diff">different</span></div>
+    <div class="num">2</div>
+    <div class="cell t diff"><b>Matchmaking in the browser</b>Leader reserves every member's seat (<code>rooms/{code}/squad</code>), then joins the oldest filling session of that mode + map with room, or opens a new one. Firebase only, no server.</div>
+    <div class="cell u diff"><b>Matchmaking on the server</b>Leader queues the whole team (<code>POST /v1/br/queue</code>); Postgres places it in the oldest open session with room for all of them, or opens one. A team is never split.</div>
+
+    <div class="step-title">3 · Waiting area: everyone gathers <span class="chip diff">different</span></div>
+    <div class="num">3</div>
+    <div class="cell t diff"><b>Island, up to 15 real players</b>Fills for 30 s, plus up to 30 s more for a reserved squadmate still loading. Starts at once if 15 are in.</div>
+    <div class="cell u diff"><b>Platform, up to 8 real players</b>The host phone caps humans at 8. Seals at ≥ 2 humans + 12 s, or anyone + 25 s. Never waits for 50 humans.</div>
+
+    <div class="step-title">4 · Fill with bots and count down <span class="chip diff">different</span></div>
+    <div class="num">4</div>
+    <div class="cell t diff"><b>Bots fill to 15 · countdown 5 s</b>The line-up is written once for every game (<code>rooms/{code}/setup</code>), so everyone has the same teams and bots.</div>
+    <div class="cell u diff"><b>Bots fill to 50 · countdown 10 s</b><code>bs.sealed</code> to every phone. Bots far from humans are "virtual" and only become real when someone comes near.</div>
+
+    <div class="step-title">5 · Plane and jump <span class="chip same">same (as of today)</span></div>
+    <div class="num">5</div>
+    <div class="cell t"><b>Plane → jump together</b>When one squad member jumps, the rest jump too. Chase camera shows the map.</div>
+    <div class="cell u"><b>Plane → jump together</b><code>DropWithSquad</code> (added today): one press drops the whole squad, 2.5 m apart.</div>
+
+    <div class="step-title">6 · Match: loot, zone, fight <span class="chip same">same</span></div>
+    <div class="num">6</div>
+    <div class="cell t"><b>Bots loot, zone and fall damage</b>Bots start with fists, pick up guns, run to the safe zone and take fall and zone damage.</div>
+    <div class="cell u"><b>Bots loot, zone and fall damage</b>Bots that appear in the first 60 s start empty-handed and loot (<code>TickLoot</code>, added today). Zone and fall damage hit bots too.</div>
+
+    <div class="step-title">7 · Death and spectating <span class="chip diff">different</span></div>
+    <div class="num">7</div>
+    <div class="cell t diff"><b>Watches anyone alive</b>Teammates first, but ◀ ▶ also cycles to enemies (<code>spectate.js</code>).</div>
+    <div class="cell u"><b>Teammates only</b>Camera moves to the next living teammate; NEXT TEAMMATE button (added today). Never an enemy.</div>
+
+    <div class="step-title">8 · Win and back to the lobby <span class="chip same">same</span></div>
+    <div class="num">8</div>
+    <div class="cell t"><b>Last team standing wins</b>Result screen with placement, then back to the lobby; the squad stays together.</div>
+    <div class="cell u"><b>Last team standing wins</b>Result screen (CAMPUS KING / #place), BACK TO LOBBY, result posted to <code>/v1/br/:code/result</code>.</div>
+  </div>
+
+  <h2>Rooms and sessions are separate</h2>
+  <div class="wrap">
+  <table>
+    <tr><th></th><th>Battle royale SESSION (START button)</th><th>Custom ROOM (room code)</th></tr>
+    <tr><td>How you get in</td><td>Team up in the lobby (solo / duo / squad), press START: you join a random open session or a new one is made. Your team always lands in the same session.</td><td>The creator spends a Room Card, gets a code, invites friends and enemies. Nobody random gets in.</td></tr>
+    <tr><td>Players</td><td>Three.js 15 · Unreal 50 (bots fill the empty places)</td><td>8 real players: 4 vs 4</td></tr>
+    <tr><td>Rounds</td><td>One match, last team standing</td><td>Creator picks 4–7 rounds. ALL are played; most round wins takes it (6–1 after 7 = team A). A tie at the end plays one deciding round.</td></tr>
+    <tr><td>Round time</td><td>Zone closes the match</td><td>Three.js 4–7 min · Unreal 3 / 5 / 7 / 10 min</td></tr>
+    <tr><td>Unlimited ammo</td><td>No</td><td>Creator's switch, both games (Unreal: added today, recorded unrated)</td></tr>
+    <tr><td>Cost</td><td>Free</td><td>1 Room Card</td></tr>
+  </table>
+  </div>
+  <div class="note"><b>Fixed today:</b> three.js rooms used to stop as soon as a team won more than half the rounds
+    (4–0 ended a 7-round match). They now play every round, like Unreal. Unreal rooms gained the unlimited-ammo switch
+    three.js already had. One difference left: the round-time choices (three.js 4–7 min, Unreal 3/5/7/10).</div>
+
+  <h2>The lobby, side by side</h2>
+  <div class="wrap">
+  <table>
+    <tr><th>Where</th><th>Three.js</th><th>Unreal</th><th></th></tr>
+    <tr><td>Top left</td><td>Avatar, name, level + XP bar</td><td>Avatar, name, GUEST/ACCOUNT tag, level + XP bar</td><td class="same">same</td></tr>
+    <tr><td>Top bar currency</td><td>Diamonds beside the profile, "+" tops up</td><td>Diamonds beside the profile, "+" opens the Diamonds tab</td><td class="same">same</td></tr>
+    <tr><td>Top right</td><td>Room Cards, full screen, settings</td><td>Friends (with request count), mail, settings</td><td class="diff">different</td></tr>
+    <tr><td>Left rail</td><td>STORE, CAMPUS PASS, MISSIONS, EVENTS, REJOIN</td><td>STORE, CAMPUS PASS, MISSIONS (claim count), EVENTS (+ daily reward)</td><td class="same">same</td></tr>
+    <tr><td>Bottom bar</td><td>VAULT, WEAPON, PRESET, LAB</td><td>VAULT (wardrobe), WEAPON, PRESET, LAB</td><td class="same">same</td></tr>
+    <tr><td>WEAPON button</td><td>Full WEAPONS page: list, 3D gun, skins, EQUIP, Show in Lobby</td><td>Full WEAPONS page (added today): list, 3D gun on the lobby scene, 4 skins with abilities, BUY / EQUIP</td><td class="same">same (Show in Lobby still to add)</td></tr>
+    <tr><td>Centre</td><td>Squad line-up, drag to turn, + INVITE plates</td><td>Squad line-up, drag to turn, + INVITE plates</td><td class="same">same</td></tr>
+    <tr><td>Bottom right</td><td>Mode card (BR / Rooms / Practice), SOLO-DUO-SQUAD, map, START</td><td>Mode select, SOLO-DUO-SQUAD, map, START (leader starts)</td><td class="same">same</td></tr>
+    <tr><td>Gun skins</td><td>One ROYAL skin per gun, sold as its own gun</td><td>Four skins per gun (Royal, Neon Hex, Arctic Circuit, Gold Relic), each two ups and one down</td><td class="diff">Unreal is ahead</td></tr>
+  </table>
+  </div>
+
+  <h2>Mode by mode</h2>
+  <div class="wrap">
+  <table>
+    <tr><th>Mode</th><th>Three.js</th><th>Unreal</th><th></th></tr>
+    <tr><td>Solo</td><td>1 vs 14 (15 teams of 1)</td><td>1 vs 49 (50 teams of 1)</td><td class="same">count only</td></tr>
+    <tr><td>Duo</td><td>8 teams of 2 (15 players: the last team has 1)</td><td>25 teams of 2</td><td class="same">count only</td></tr>
+    <tr><td>Squad</td><td>4 teams of 4 (15 players: the last team has 3)</td><td>13 teams of 4 (the last has 2)</td><td class="same">count only</td></tr>
+    <tr><td>Custom room</td><td>4 vs 4, needs a Room Card</td><td>4 vs 4 custom room, needs a Room Card</td><td class="same">same</td></tr>
+  </table>
+  </div>
+
+  <h2>Everything that differs beyond the count</h2>
+  <div class="wrap">
+  <table>
+    <tr><th>What</th><th>Three.js</th><th>Unreal</th></tr>
+    <tr><td>Real players per match</td><td>up to 15</td><td>up to 8 (the host is a phone)</td></tr>
+    <tr><td>Fill window</td><td>30 s (+30 s for a loading squadmate)</td><td>12 s once 2 humans are in, 25 s at most</td></tr>
+    <tr><td>Countdown after the fill</td><td>5 s</td><td>10 s</td></tr>
+    <tr><td>Who matches players</td><td>each browser, through Firebase</td><td>the backend (Postgres + Redis)</td></tr>
+    <tr><td>Spectating</td><td>anyone alive, teammates first</td><td>teammates only</td></tr>
+  </table>
+  </div>
+  <div class="note"><b>To make the count the only difference:</b> pick one fill window and one countdown for both games
+    (10 s countdown matches what you asked for), and switch three.js spectating to teammates only. The 8-human cap in
+    Unreal stays until matches run on a dedicated server instead of a phone.</div>
+</main>
+</body>
+</html>

@@ -6,6 +6,9 @@
 #include "Campus/CampusZipline.h"
 #include "EngineUtils.h"
 #include "Campus/CampusFx.h"
+#include "Campus/CampusGunSkins.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Engine/Texture.h"
 #include "Campus/CampusBRGameMode.h"
 #include "Campus/CampusBRPlane.h"
 #include "Campus/CampusBackend.h"
@@ -230,6 +233,8 @@ void ACampusCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	// Same reason: the gun in someone's hands is drawn (and sounds) differently on every phone, and the
 	// owner's own HUD paints both slots from these two values.
 	DOREPLIFETIME(ACampusCharacter, WeaponSlots);
+	DOREPLIFETIME(ACampusCharacter, bNoGun);
+	DOREPLIFETIME(ACampusCharacter, GunSkinStyles);
 	DOREPLIFETIME(ACampusCharacter, CurrentSlot);
 	// NOT SkipOwner: the owner's own body is drawn in third person, so their phone needs the index too.
 	DOREPLIFETIME(ACampusCharacter, OutfitIndex);
@@ -1141,7 +1146,10 @@ void ACampusCharacter::Reload()
 	}
 	const int32 Taken = FMath::Min(MagazineSize - AmmoInMag, AmmoReserve);
 	AmmoInMag += Taken;
-	AmmoReserve -= Taken;
+	if (!IsUnlimitedAmmoRoom())
+	{
+		AmmoReserve -= Taken;
+	}
 	ServerReload();
 }
 
@@ -1186,13 +1194,23 @@ void ACampusCharacter::ServerReload_Implementation()
 	ServerReloadEndTime = Now + ReloadSeconds * 0.8f;
 	const int32 Taken = FMath::Min(MagazineSize - ServerAmmoInMag, ServerAmmoReserve);
 	ServerAmmoInMag += Taken;
-	ServerAmmoReserve -= Taken;
+	if (!IsUnlimitedAmmoRoom())
+	{
+		ServerAmmoReserve -= Taken; // an unlimited-ammo room refills the magazine and keeps the reserve
+	}
 	MulticastUpperBody(true);
+}
+
+bool ACampusCharacter::IsUnlimitedAmmoRoom() const
+{
+	const UWorld* World = GetWorld();
+	const ACampusGameState* State = World ? World->GetGameState<ACampusGameState>() : nullptr;
+	return State && State->bUnlimitedAmmo;
 }
 
 void ACampusCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVector_NetQuantizeNormal Direction)
 {
-	if (bDead || !bArmed)
+	if (bDead || !bArmed || bNoGun)
 	{
 		return;
 	}
@@ -1560,6 +1578,12 @@ FVector ACampusCharacter::GunPoint() const
 {
 	if (Gun && Gun->IsVisible())
 	{
+		// Weapon Library V3 meshes carry their own "Muzzle" socket: each gun's real barrel tip.
+		static const FName MuzzleSocket(TEXT("Muzzle"));
+		if (Gun->DoesSocketExist(MuzzleSocket))
+		{
+			return Gun->GetSocketLocation(MuzzleSocket);
+		}
 		const FTransform& GunTransform = Gun->GetComponentTransform();
 		return GunTransform.TransformPosition(FVector(0.f, CampusGun::MuzzleForward, CampusGun::MuzzleUp));
 	}
@@ -2568,7 +2592,12 @@ void ACampusCharacter::ApplyWeapon()
 	const int32 Slot = FMath::Clamp(int32(CurrentSlot), 0, 1);
 	const uint8 Level = WeaponLevels.IsValidIndex(Slot) ? WeaponLevels[Slot] : 0;
 	// Base row off the floor; store bonuses only for a gun the loadout brought in (level 2 and up).
-	CurrentDef = CampusWeapons::WithMods(CampusWeapons::FindOrStarter(GetWeaponId(Slot)), CampusWeapons::ModsForLevel(GetWeaponId(Slot), Level));
+	// ...plus the abilities of the skin this player wears on this gun TYPE (migration 032), looted guns
+	// included. Summed with the level and clamped once inside WithMods, so the hard cap always holds.
+	const FName InHand = GetWeaponId(Slot);
+	const FCampusWeaponMods Mods = CampusGunSkins::Add(CampusWeapons::ModsForLevel(InHand, Level),
+		CampusGunSkins::ModsFor(GunSkinStyleFor(CampusWeapons::FindOrStarter(InHand).Id)));
+	CurrentDef = CampusWeapons::WithMods(CampusWeapons::FindOrStarter(InHand), Mods);
 
 	Damage = CurrentDef.Damage;
 	FireInterval = 60.f / FMath::Max(CurrentDef.Rpm, 1.f);
@@ -2590,7 +2619,13 @@ void ACampusCharacter::ApplyWeapon()
 	// The per-gun low-poly mesh when it is cooked, else the shared rifle at this gun's scale and tint.
 	if (Gun)
 	{
+		// Weapon Library V3 first (real size, own sockets, skinnable), then the low-poly set, then the rifle.
 		UStaticMesh* GunMesh = LoadObject<UStaticMesh>(nullptr, *CampusWeapons::MeshPathFor(CurrentDef.Id), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		const bool bLibraryV3 = GunMesh != nullptr;
+		if (!GunMesh)
+		{
+			GunMesh = LoadObject<UStaticMesh>(nullptr, *CampusWeapons::LowPolyMeshPathFor(CurrentDef.Id), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		}
 		if (!GunMesh)
 		{
 			GunMesh = LoadObject<UStaticMesh>(nullptr, CampusWeapons::RifleMeshPath());
@@ -2598,12 +2633,74 @@ void ACampusCharacter::ApplyWeapon()
 		if (GunMesh && Gun->GetStaticMesh() != GunMesh)
 		{
 			Gun->SetStaticMesh(GunMesh);
+			GunSkinMaterial = nullptr; // a new mesh brings its own material; paint it again below
 		}
-		Gun->SetRelativeScale3D(FVector(CurrentDef.MeshScale));
+		// A V3 gun is modelled at its real size; MeshScale only ever existed to tell rifle copies apart.
+		Gun->SetRelativeScale3D(FVector(bLibraryV3 ? 1.f : CurrentDef.MeshScale));
+		ApplyGunSkin(bLibraryV3);
 		// A no-op on materials without the parameter; the tint is how the guns read apart until then.
 		Gun->SetVectorParameterValueOnMaterials(TEXT("Tint"), FVector(CurrentDef.Tint.R, CurrentDef.Tint.G, CurrentDef.Tint.B));
 		Gun->SetVectorParameterValueOnMaterials(TEXT("Color"), FVector(CurrentDef.Tint.R, CurrentDef.Tint.G, CurrentDef.Tint.B));
+		Gun->SetHiddenInGame(bNoGun);
 	}
+}
+
+uint8 ACampusCharacter::GunSkinStyleFor(FName GunId) const
+{
+	const int32 Row = CampusWeapons::All().IndexOfByPredicate([GunId](const FCampusWeaponDef& Def) { return Def.Id == GunId; });
+	return GunSkinStyles.IsValidIndex(Row) ? GunSkinStyles[Row] : uint8(CampusGunSkins::None);
+}
+
+void ACampusCharacter::ApplyGunSkin(bool bSkinnable)
+{
+	// A mesh that is not V3 has nothing to paint: the factory finish (the skin's mods still apply).
+	CampusGunSkins::Paint(Gun, bSkinnable ? GunSkinStyleFor(CampusWeapons::FindOrStarter(CurrentDef.Id).Id) : uint8(CampusGunSkins::None),
+		GunSkinMaterial);
+}
+
+void ACampusCharacter::ServerSetGunSkins_Implementation(const TArray<uint8>& Styles)
+{
+	// Bounded by the table this build ships, and every value must be a style it knows.
+	if (Styles.Num() > CampusWeapons::All().Num())
+	{
+		return;
+	}
+	for (const uint8 Style : Styles)
+	{
+		if (Style >= CampusGunSkins::Count)
+		{
+			return;
+		}
+	}
+	if (Styles == GunSkinStyles)
+	{
+		return; // the common case: re-sent on every spawn - never dirty a replicated property for it
+	}
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	if (Now - LastGunSkinChangeTime < OutfitChangeCooldown)
+	{
+		return;
+	}
+	LastGunSkinChangeTime = Now;
+	GunSkinStyles = Styles;
+	ApplyWeapon(); // the host draws this gun too, and OnRep does not fire on the machine that set it
+}
+
+void ACampusCharacter::StripWeapons()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+	WeaponSlots.Init(NAME_None, 2);
+	WeaponLevels.Init(0, 2);
+	CurrentSlot = 0;
+	ServerAmmoInMag = 0;
+	ServerAmmoReserve = 0;
+	AmmoInMag = 0;
+	AmmoReserve = 0;
+	bNoGun = true;
+	ApplyWeapon();
 }
 
 void ACampusCharacter::OnRep_Weapons()
@@ -2644,6 +2741,12 @@ void ACampusCharacter::GiveWeapon(FName WeaponId, int32 Slot)
 	}
 	Target = FMath::Clamp(Target, 0, 1);
 	const FCampusWeaponDef& Def = CampusWeapons::FindOrStarter(WeaponId);
+	if (bNoGun)
+	{
+		// The first gun of an empty-handed bot goes into the hand, whatever slot was asked for.
+		bNoGun = false;
+		Target = int32(CurrentSlot);
+	}
 	WeaponSlots[Target] = WeaponId;
 	WeaponLevels[Target] = 0; // loot and the starter are base guns; the loadout sets its own level
 	if (Target == int32(CurrentSlot))
@@ -2780,6 +2883,29 @@ void ACampusCharacter::ApplyBackendLoadout()
 		else
 		{
 			ServerSetOutfit(uint8(WantedIndex));
+		}
+	}
+
+	// ---- the gun skins, from the save (mirrored from GET /me/cosmetics), one style per table row.
+	if (Profile && Profile->GunSkins.Num() > 0)
+	{
+		const TArray<FCampusWeaponDef>& Rows = CampusWeapons::All();
+		TArray<uint8> Styles;
+		Styles.Init(uint8(CampusGunSkins::None), Rows.Num());
+		for (int32 Row = 0; Row < Rows.Num(); ++Row)
+		{
+			if (const FName* SkinId = Profile->GunSkins.Find(Rows[Row].Id))
+			{
+				Styles[Row] = CampusGunSkins::StyleFor(SkinId->ToString());
+			}
+		}
+		if (HasAuthority())
+		{
+			ServerSetGunSkins_Implementation(Styles);
+		}
+		else
+		{
+			ServerSetGunSkins(Styles);
 		}
 	}
 

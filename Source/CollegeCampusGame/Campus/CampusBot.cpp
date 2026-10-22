@@ -15,6 +15,20 @@
 #include "AITypes.h"
 #include "UObject/UnrealType.h"
 #include "Campus/CampusShotTrace.h"
+#include "Campus/CampusLoot.h"
+#include "Campus/CampusWeapons.h"
+
+/** Empty-handed bots (battle royale): how they find a gun. */
+namespace CampusBotLoot
+{
+	/** Ground guns further than this are not worth the walk (60 m). */
+	constexpr float ScanRange = 6000.f;
+	constexpr float ScanSeconds = 0.5f;
+	/** Close enough to take it: inside ACampusPickup::ServerTake's own reach check. */
+	constexpr float TakeDistance = 200.f;
+	/** Nothing found in this long: it "found" a common gun in a building. Never unarmed all match. */
+	constexpr float GiveUpSeconds = 35.f;
+}
 
 namespace CampusBotTuning
 {
@@ -48,8 +62,10 @@ namespace CampusBotTuning
 		float SettleSeconds;
 	};
 
-	constexpr FSkill Easy   = { 8000.f, 4.5f, 0.09f, 0.55f, 170.f, 2, 4, 0.85f, 1.70f, 0.25f, 0.45f, 2.2f };
-	constexpr FSkill Normal = { 11000.f, 2.4f, 0.05f, 0.33f, 320.f, 4, 7, 0.45f, 0.95f, 0.60f, 0.30f, 1.4f };
+	// Burst pauses lengthened 2026-10-22 (owner: "bots fire a lot - a little slower"): shorter bursts,
+	// longer breaths between them, aim unchanged.
+	constexpr FSkill Easy   = { 8000.f, 4.5f, 0.09f, 0.55f, 170.f, 2, 3, 1.10f, 2.00f, 0.25f, 0.45f, 2.2f };
+	constexpr FSkill Normal = { 11000.f, 2.4f, 0.05f, 0.33f, 320.f, 3, 5, 0.70f, 1.40f, 0.60f, 0.30f, 1.4f };
 
 	const FSkill& Of(ECampusBotSkill Skill)
 	{
@@ -262,11 +278,13 @@ namespace CampusBotTuning
 			if (Now >= GNextTimeFind)
 			{
 				GNextTimeFind = Now + 5.f;
-				for (TActorIterator<ACampusDayNight> It(World); It; ++It)
+				// The first one is the one (a level has at most one day/night actor). Not a for-with-break:
+				// clang on Android rejects a loop whose increment can never run (-Wunreachable-code-loop-increment).
+				TActorIterator<ACampusDayNight> It(World);
+				if (It)
 				{
 					Time = *It;
 					GTime = *It;
-					break;
 				}
 			}
 		}
@@ -645,6 +663,13 @@ void ACampusBotController::Tick(float DeltaSeconds)
 		SetStick(Self, FVector2D::ZeroVector);
 		return;
 	}
+	// Empty hands come first: no gun, no fight - go and get one.
+	if (Self->HasNoGun())
+	{
+		TickLoot(Self);
+		return;
+	}
+	UnarmedSince = -1.f;
 	TickSenses(Self);
 
 	switch (State)
@@ -1165,6 +1190,68 @@ void ACampusBotController::TickCover(ACampusCharacter* Self)
 	}
 	Self->ServerSetAiming_Implementation(false);
 	// Path following (or the stick fallback in MoveToPoint) is already carrying it to the cover point.
+}
+
+void ACampusBotController::TickLoot(ACampusCharacter* Self)
+{
+	UWorld* World = GetWorld();
+	const float Now = World->GetTimeSeconds();
+	if (UnarmedSince < 0.f)
+	{
+		UnarmedSince = Now;
+		LootTarget.Reset();
+		NextLootScanTime = 0.f;
+	}
+	if (Now - UnarmedSince > CampusBotLoot::GiveUpSeconds)
+	{
+		Self->GiveWeapon(CampusWeapons::RandomOfTier(1), 0);
+		return;
+	}
+	const FVector Here = Self->GetActorLocation();
+	// Re-pick twice a second: the gun it was walking to may have been taken by someone faster.
+	if (Now >= NextLootScanTime || !LootTarget.IsValid())
+	{
+		NextLootScanTime = Now + CampusBotLoot::ScanSeconds;
+		ACampusPickup* Best = nullptr;
+		float BestDist = FMath::Square(CampusBotLoot::ScanRange);
+		for (const TWeakObjectPtr<ACampusPickup>& Each : ACampusPickup::All())
+		{
+			ACampusPickup* Pickup = Each.Get();
+			if (!Pickup || Pickup->GetWorld() != World || Pickup->GetKind() != ECampusPickupKind::Weapon)
+			{
+				continue;
+			}
+			const float Dist = FVector::DistSquared(Here, Pickup->GetActorLocation());
+			if (Dist < BestDist)
+			{
+				BestDist = Dist;
+				Best = Pickup;
+			}
+		}
+		LootTarget = Best;
+	}
+	ACampusPickup* Goal = LootTarget.Get();
+	if (!Goal)
+	{
+		TickRoam(Self); // nothing in reach: wander (toward the zone) until a gun turns up
+		return;
+	}
+	const FVector Where = Goal->GetActorLocation();
+	if (FVector::DistSquared2D(Here, Where) < FMath::Square(CampusBotLoot::TakeDistance))
+	{
+		SetStick(Self, FVector2D::ZeroVector);
+		if (!Goal->ServerTake(Self))
+		{
+			LootTarget.Reset(); // refused (taken, out of reach in height): look again next scan
+		}
+		return;
+	}
+	const FVector Direction = (Where - Here).GetSafeNormal2D();
+	if (!Direction.IsNearlyZero())
+	{
+		SetControlRotation(FMath::RInterpConstantTo(GetControlRotation(), Direction.Rotation(), World->GetDeltaSeconds(), 240.f));
+	}
+	MoveToPoint(Self, Where);
 }
 
 void ACampusBotController::TickRoam(ACampusCharacter* Self)

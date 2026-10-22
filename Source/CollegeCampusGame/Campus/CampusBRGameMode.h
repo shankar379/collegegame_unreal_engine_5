@@ -169,6 +169,10 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 
+	/** Server: an eliminated player moves their camera to the next squadmate still standing. Only their
+	 *  OWN squad, never an enemy - spectating is for watching your team, not scouting theirs. */
+	void SpectateNextMate(APlayerController* Player);
+
 	/** THE ONE SEAM THE BACKEND PULLS (Docs/BATTLE_SESSION_DESIGN.md §4). It closes joins, fills the
 	 *  remaining slots with bots exactly as the old local timeout did, and starts the countdown to the
 	 *  plane. Bound to UCampusBRQueue::OnSessionSealed on the host, so wiring the real event is a few
@@ -309,6 +313,8 @@ private:
 	/** Session team id -> squad number, so every phone on one ticket gets the same squad. */
 	TMap<FString, int32> SquadByKey;
 	float MatchStartTime = 0.f;
+	/** Bots promoted this soon after the plane leaves start empty-handed and must loot a gun. */
+	static constexpr float BotsLootWindowSeconds = 60.f;
 	float NextVirtualTime = 0.f;
 	int32 NextPlacement = 0;
 	/** Set by SealSession: joins are refused and the countdown owns the clock. */

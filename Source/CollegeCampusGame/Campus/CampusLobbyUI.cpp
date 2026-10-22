@@ -740,6 +740,21 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 		Controller->FocusProfile(true);
 	}
 
+	// THE WEAPONS PAGE OWNS THE 3D SCENE while it is up: the gun on the stage, the line-up hidden. On the
+	// way in (and on every repaint, which may have swapped the gun or the skin - ShowWeaponStage only
+	// reloads what changed); and on the way to ANY other screen the stage goes and the squad comes back.
+	if (Controller.IsValid())
+	{
+		if (Screen == EScreen::Weapons)
+		{
+			Controller->ShowWeaponStage(FName(*WeaponsGun), WeaponsStyle);
+		}
+		else
+		{
+			Controller->HideWeaponStage();
+		}
+	}
+
 	TSharedRef<SWidget> Body = SNullWidget::NullWidget;
 	switch (Screen)
 	{
@@ -770,6 +785,7 @@ void SCampusLobbyWidget::Show(EScreen Screen)
 	case EScreen::InviteTray: Body = BuildInviteTray(); break;
 	case EScreen::Profile: Body = BuildProfile(); break;
 	case EScreen::Summary: Body = BuildSummary(); break;
+	case EScreen::Weapons: Body = BuildWeapons(); break;   // CampusWeaponsUI.cpp
 	}
 
 	// An invite that lands while the Store is open, or while the profile page is up, MUST still be

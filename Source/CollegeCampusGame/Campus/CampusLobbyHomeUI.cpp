@@ -255,7 +255,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMenuColumn()
 		switch (Def.Tab)
 		{
 		case ELobbyTab::Store:     Action = OpenStore(EStoreTab::Packs); break;   // STORE lands on DIAMONDS; OFFERS can be empty
-		case ELobbyTab::Weapons:   Action = OpenStore(EStoreTab::Guns); break;
+		case ELobbyTab::Weapons:   Action = FOnClicked::CreateLambda([this]() { OpenWeapons(); return FReply::Handled(); }); break;
 		case ELobbyTab::Character: Action = OpenScreen(EScreen::Account); break;
 		// Not OpenScreen: the closet asks for the owned list on the way in (once per app run), and
 		// that is exactly the kind of round trip Show() exists to keep out of a Build function.
@@ -321,16 +321,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildBottomBar()
 			Action = FOnClicked::CreateLambda([this]() { OpenWardrobe(); return FReply::Handled(); });
 			break;
 		case ELobbyTab::Weapons:
-			Action = FOnClicked::CreateLambda([this]()
-			{
-				StoreTab = EStoreTab::Guns;
-				if (UCampusBackend* Api2 = Backend())
-				{
-					Busy(TEXT("Opening weapons..."));
-					Api2->LoadStore([this](bool bOk, const FString& Error) { Done(bOk, Error, [this]() { Show(EScreen::Store); }); });
-				}
-				return FReply::Handled();
-			});
+			// THE WEAPONS PAGE (CampusWeaponsUI.cpp): every gun, its skins and their abilities, a 3D gun.
+			Action = FOnClicked::CreateLambda([this]() { OpenWeapons(); return FReply::Handled(); });
 			break;
 		default:
 			Action = FOnClicked::CreateLambda([this, Label = FString(Def.Label)]() { Toast(Label + TEXT(": coming soon")); return FReply::Handled(); });

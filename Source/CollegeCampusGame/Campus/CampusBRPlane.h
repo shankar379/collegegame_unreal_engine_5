@@ -160,6 +160,10 @@ public:
 	/** Server: leave the plane now (the button, or the auto-eject at the end of the line). */
 	void Drop();
 
+	/** Server: a player's own JUMP press. Drops this diver AND every squadmate still aboard the same
+	 *  plane, side by side, so a squad lands together (the auto-eject still drops one by one). */
+	void DropWithSquad();
+
 	/** Server: open the chute (the button, or automatically near the ground). */
 	void OpenChute();
 

@@ -114,6 +114,23 @@ void UCampusBackend::LoadCosmetics(FDone Done)
 			}
 		}
 
+		// gun_skins (migration 032): same ABSENT-IS-NOT-EMPTY rule as decor - an older server simply
+		// does not send it, and that must not strip the skins the save already holds.
+		const TSharedPtr<FJsonObject>* SkinsField = nullptr;
+		const bool bHasSkins = Json.IsValid() && Json->TryGetObjectField(TEXT("gun_skins"), SkinsField) && SkinsField;
+		if (bHasSkins)
+		{
+			GunSkins.Reset();
+			for (const auto& Pair : (*SkinsField)->Values)
+			{
+				FString Item;
+				if (Pair.Value.IsValid() && Pair.Value->TryGetString(Item) && !Item.IsEmpty())
+				{
+					GunSkins.Add(FString(*Pair.Key), Item); // FString(*Key): see the decor note above
+				}
+			}
+		}
+
 		const TArray<TSharedPtr<FJsonValue>>* List = nullptr;
 		if (Json.IsValid() && Json->TryGetArrayField(TEXT("owned"), List))
 		{
@@ -131,6 +148,7 @@ void UCampusBackend::LoadCosmetics(FDone Done)
 				Owned.Kind = Str(Item, TEXT("kind"));
 				Owned.Slot = Str(Item, TEXT("slot"));
 				Owned.Rarity = Str(Item, TEXT("rarity"));
+				Owned.ForGun = Str(Item, TEXT("for_gun"));
 			}
 		}
 		bCosmeticsLoaded = true;
@@ -154,6 +172,14 @@ void UCampusBackend::LoadCosmetics(FDone Done)
 				{
 					Profile->OutfitPresets[Index] = CosmeticPresets[Index].IsEmpty()
 						? NAME_None : FName(*CosmeticPresets[Index]);
+				}
+			}
+			if (bHasSkins)
+			{
+				Profile->GunSkins.Reset();
+				for (const TPair<FString, FString>& Pair : GunSkins)
+				{
+					Profile->GunSkins.Add(FName(*Pair.Key), FName(*Pair.Value));
 				}
 			}
 			if (bHasDecor)
@@ -188,6 +214,54 @@ void UCampusBackend::SaveCosmetics(const FString& OutfitId, FDone Done)
 			// an id is not argued with; fall back to what we asked for when it says nothing.
 			const FString Confirmed = Str(Obj(Json, TEXT("equipped")), TEXT("outfit"));
 			EquippedOutfit = Confirmed.IsEmpty() ? OutfitId : Confirmed;
+		}
+		if (Done)
+		{
+			Done(bOk, Error);
+		}
+	});
+}
+
+void UCampusBackend::SaveGunSkins(const TMap<FString, FString>& Skins, FDone Done)
+{
+	TSharedPtr<FJsonObject> Map = MakeShared<FJsonObject>();
+	for (const TPair<FString, FString>& Pair : Skins)
+	{
+		if (Pair.Value.IsEmpty())
+		{
+			Map->SetField(Pair.Key, MakeShared<FJsonValueNull>());
+		}
+		else
+		{
+			Map->SetStringField(Pair.Key, Pair.Value);
+		}
+	}
+	TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
+	Body->SetObjectField(TEXT("skins"), Map);
+	CallApi(TEXT("PUT"), TEXT("/me/gunskins"), Body, true,
+		[this, Done](bool bOk, const FString& Error, TSharedPtr<FJsonObject> Json)
+	{
+		const TSharedPtr<FJsonObject> Confirmed = Obj(Json, TEXT("gun_skins"));
+		if (bOk && Confirmed.IsValid())
+		{
+			GunSkins.Reset();
+			for (const auto& Pair : Confirmed->Values)
+			{
+				FString Item;
+				if (Pair.Value.IsValid() && Pair.Value->TryGetString(Item) && !Item.IsEmpty())
+				{
+					GunSkins.Add(FString(*Pair.Key), Item);
+				}
+			}
+			if (UCampusSave* Profile = Save())
+			{
+				Profile->GunSkins.Reset();
+				for (const TPair<FString, FString>& Pair : GunSkins)
+				{
+					Profile->GunSkins.Add(FName(*Pair.Key), FName(*Pair.Value));
+				}
+				Profile->Persist();
+			}
 		}
 		if (Done)
 		{

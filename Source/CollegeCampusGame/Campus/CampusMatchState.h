@@ -168,6 +168,11 @@ public:
 	UPROPERTY(Replicated)
 	int32 RoundMinutes = 5;
 
+	/** Custom room, host's practice switch ("?UnlimitedAmmo=1", backend rooms.unlimited_ammo): reloads
+	 *  never spend reserve ammo. The result is still reported; the backend records it unrated. */
+	UPROPERTY(Replicated)
+	bool bUnlimitedAmmo = false;
+
 	/** The extra round played when the picked rounds end in a tie. */
 	UPROPERTY(Replicated)
 	bool bDecider = false;

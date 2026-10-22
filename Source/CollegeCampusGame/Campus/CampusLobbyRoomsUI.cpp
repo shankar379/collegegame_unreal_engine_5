@@ -97,6 +97,20 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildRooms()
 		];
 	}
 
+	// The host's practice switch (backend migration 033): unlimited ammo, recorded unrated.
+	const bool bUnlimitedAmmo = Save && Save->bRoomUnlimitedAmmo;
+	RoundRow->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(22.f, 0.f, 10.f, 0.f)[Label(LOCTEXT("AmmoLabel", "Ammo"), 17, Muted)];
+	RoundRow->AddSlot().AutoWidth().Padding(3.f, 0.f)
+	[
+		Button(bUnlimitedAmmo ? LOCTEXT("AmmoUnlimited", "UNLIMITED") : LOCTEXT("AmmoNormal", "NORMAL"),
+			FOnClicked::CreateLambda([this]()
+			{
+				if (UCampusSave* S = Profile()) { S->bRoomUnlimitedAmmo = !S->bRoomUnlimitedAmmo; S->Persist(); }
+				Refresh();
+				return FReply::Handled();
+			}), bUnlimitedAmmo ? EButton::Accent : EButton::Dark, 16, FVector2D(128.f, 46.f))
+	];
+
 	TSharedRef<SWidget> Body = SNew(SVerticalBox)
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 8.f)[Label(FText::FromString(Mode), 20, FLinearColor::White)]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f)
@@ -112,7 +126,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildRooms()
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f)
 		[
 			Option(LOCTEXT("Create", "Create Custom Room"),
-				FText::FromString(FString::Printf(TEXT("%d rounds x %d min, all played  ·  1 Room Card (you have %d)"), PickedRounds, PickedMinutes, Cards)),
+				FText::FromString(FString::Printf(TEXT("%d rounds x %d min, all played%s  ·  1 Room Card (you have %d)"), PickedRounds, PickedMinutes,
+					bUnlimitedAmmo ? TEXT("  ·  unlimited ammo (practice, unrated)") : TEXT(""), Cards)),
 				Button(LOCTEXT("CreateBtn", "CREATE"), FOnClicked::CreateLambda([this]()
 				{
 					if (Controller.IsValid())

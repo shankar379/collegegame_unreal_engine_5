@@ -149,6 +149,7 @@ void ACampusMatchGameMode::InitGameState()
 		// 3 / 5 / 7 / 10 minutes each)
 		State->Rounds = FMath::Clamp(UGameplayStatics::GetIntOption(OptionsString, TEXT("Rounds"), 5), 4, 7);
 		State->RoundMinutes = FMath::Clamp(UGameplayStatics::GetIntOption(OptionsString, TEXT("Minutes"), 5), 3, 10);
+		State->bUnlimitedAmmo = UGameplayStatics::GetIntOption(OptionsString, TEXT("UnlimitedAmmo"), 0) != 0;
 		const FString MapOption = UGameplayStatics::ParseOption(OptionsString, TEXT("Map"));
 		const int32 TeamOption = UGameplayStatics::GetIntOption(OptionsString, TEXT("Team"), 4);
 		// "?Map=" carries a CATALOGUE id (CampusCatalog::Maps - "Classic", "CampusMap"), plus the legacy

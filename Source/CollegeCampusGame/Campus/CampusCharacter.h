@@ -156,6 +156,12 @@ public:
 	void NextWeapon() { SwitchWeapon(CurrentSlot == 0 ? 1 : 0); }
 	/** Server: put this gun in a slot. Slot < 0 fills an empty slot, else replaces the one in hand. */
 	void GiveWeapon(FName WeaponId, int32 Slot = -1);
+	/** Server, battle royale bots: empty hands until a gun is picked up off the ground (GiveWeapon
+	 *  arms again). Hides the gun and refuses every shot meanwhile. */
+	void StripWeapons();
+	bool HasNoGun() const { return bNoGun; }
+	/** Custom room with the host's unlimited-ammo switch on (ACampusGameState::bUnlimitedAmmo). */
+	bool IsUnlimitedAmmoRoom() const;
 	/** Owner: equip whatever gun AND OUTFIT the player's backend loadout says is equipped
 	 *  (/v1/me -> EquippedGun, /v1/me/cosmetics -> EquippedOutfit). */
 	void ApplyBackendLoadout();
@@ -333,6 +339,12 @@ private:
 	UFUNCTION(Server, Reliable)
 	void ServerSetOutfit(uint8 InOutfitIndex);
 
+	/** The owner's gun skins: one CampusGunSkins style per row of CampusWeapons::All() (0 = none).
+	 *  Numbers, not ids, for the same name-table reason as ServerSetOutfit; same INTERIM TRUST GAP
+	 *  (appearance only, so the worst a modded client can do is look gold) and the same cooldown. */
+	UFUNCTION(Server, Reliable)
+	void ServerSetGunSkins(const TArray<uint8>& Styles);
+
 	UFUNCTION()
 	void OnRep_Outfit();
 
@@ -341,6 +353,10 @@ private:
 
 	/** Copies the current slot's row into the combat fields, and rescales / tints the rifle mesh for it. */
 	void ApplyWeapon();
+	/** Paints (or clears) this player's skin for the gun in hand. bSkinnable: the mesh is Weapon Library V3. */
+	void ApplyGunSkin(bool bSkinnable);
+	/** The skin style this player wears on a gun type (CampusGunSkins), None when there is none. */
+	uint8 GunSkinStyleFor(FName GunId) const;
 	/** Server: the medkit's health, paid out over MedkitSeconds. */
 	void TickMedkit(float DeltaSeconds);
 	/** Server: adds this frame's honest travel to ACampusPlayerState::DistanceCm (result screen). */
@@ -750,6 +766,22 @@ private:
 	/** Store upgrade level per slot (0 / 1 = base). Ground loot is always 0: a floor gun has no bonuses. */
 	UPROPERTY(ReplicatedUsing=OnRep_Weapons)
 	TArray<uint8> WeaponLevels;
+
+	/** Empty-handed (StripWeapons) until GiveWeapon. Its own flag rather than "no slot filled", so a
+	 *  character whose slots have simply not replicated yet never flickers its gun off. */
+	UPROPERTY(ReplicatedUsing=OnRep_Weapons)
+	bool bNoGun = false;
+
+	/** Gun skins, one style per row of CampusWeapons::All() (CampusGunSkins). Empty = all factory. */
+	UPROPERTY(ReplicatedUsing=OnRep_Weapons)
+	TArray<uint8> GunSkinStyles;
+
+	/** SERVER ONLY. Last accepted ServerSetGunSkins, for its cooldown (OutfitChangeCooldown). */
+	float LastGunSkinChangeTime = -100.f;
+
+	/** The gun's own material instance once a skin has been painted on it (V3 meshes only). */
+	UPROPERTY(Transient)
+	TObjectPtr<class UMaterialInstanceDynamic> GunSkinMaterial;
 
 	/** The current gun's row with its store mods already folded in (ApplyWeapon rebuilds it). */
 	FCampusWeaponDef CurrentDef;

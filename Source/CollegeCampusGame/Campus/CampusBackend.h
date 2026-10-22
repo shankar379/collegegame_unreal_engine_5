@@ -57,6 +57,21 @@ struct FCampusCosmetic
 	/** Which equipment slot it fills ("outfit"); decor items carry none. */
 	FString Slot;
 	FString Rarity;
+	/** Gun skins only (backend migration 032): the gun id this skin fits. */
+	FString ForGun;
+};
+
+/** A gun skin for sale (backend migration 032): a cosmetic that paints every gun of one type. */
+struct FCampusGunSkinItem
+{
+	FString Id;
+	FString Name;
+	/** The gun id it fits. */
+	FString ForGun;
+	FString Rarity;
+	/** What it costs right now (a running sale already applied). */
+	int32 PriceDiamonds = 0;
+	bool bOwned = false;
 };
 
 /** A Diamond pack (bought with money) or an offer (bought with Diamonds since backend migration 030). */
@@ -673,6 +688,9 @@ public:
 	void LoadCosmetics(FDone Done);
 	/** PUT /me/cosmetics {equipped:{outfit:id}}. Idempotent - a double tap is one equip. */
 	void SaveCosmetics(const FString& OutfitId, FDone Done);
+	/** PUT /me/gunskins {skins:{gun:skin|null}}: a FULL REPLACE of every gun's skin. Mirrors the answer
+	 *  into GunSkins and the save, so the next match paints the gun the player just chose. */
+	void SaveGunSkins(const TMap<FString, FString>& Skins, FDone Done);
 	/** PUT /me/cosmetics/presets/:idx {slots:{outfit:id}}. Index is 0-based here, 1-based on the wire. */
 	void SavePreset(int32 Index, const FString& OutfitId, FDone Done);
 	/** PUT /me/lobby {decor:{anchor:id|null}}. EVERY anchor is sent, the bare ones as null, so the
@@ -720,7 +738,7 @@ public:
 	 *  caller resolves from its catalogue id with CampusBR::ApiMapFor; anything else is a 400.
 	 *  EosPuid is this phone's EOS ProductUserId when it can host over EOS P2P (internet play), so
 	 *  the API can hand it to joiners; pass it empty to be listed as a LAN room (ip:port). */
-	void CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds, int32 Minutes, const FString& EosPuid, FRoomDone Done);
+	void CreateRoom(const FString& Map, int32 TeamSize, int32 Rounds, int32 Minutes, bool bUnlimitedAmmo, const FString& EosPuid, FRoomDone Done);
 	void JoinRoom(const FString& Code, FRoomDone Done);
 	/** Called by the host's match: keeps the room listed and marks it playing once the match starts. */
 	void SetHostedRoomState(bool bPlaying, int32 PlayerCount);
@@ -753,6 +771,8 @@ public:
 	TArray<FCampusGun> Guns;
 	TArray<FCampusOffer> Offers;
 	TArray<FCampusOffer> Packs;
+	/** Every gun skin in the store (GET /store -> cosmetics with slot "gunskin"). */
+	TArray<FCampusGunSkinItem> GunSkinShop;
 	FString EquippedGun;
 	/** COSMETICS, valid once bCosmeticsLoaded. Until then the wardrobe shows the free starter alone -
 	 *  an "owned" list the phone invented would offer a player something the server will refuse. */
@@ -762,6 +782,8 @@ public:
 	TArray<FString> CosmeticPresets;
 	/** anchor id -> decor item id, for the anchors that carry one. */
 	TMap<FString, FString> LobbyDecor;
+	/** gun id -> skin item id (migration 032). A gun not in the map wears its factory finish. */
+	TMap<FString, FString> GunSkins;
 	bool bCosmeticsLoaded = false;
 	bool bPaymentsEnabled = false;
 	/** The curated college list, loaded on demand by the profile screen. */

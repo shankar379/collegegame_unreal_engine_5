@@ -112,9 +112,12 @@ namespace CampusWeapons
 	FCampusWeaponMods ModsForLevel(FName Id, int32 Level);
 	/** Base row + mods, clamped. Returns Base untouched when the cvar is off or the mods are empty. */
 	FCampusWeaponDef WithMods(const FCampusWeaponDef& Base, const FCampusWeaponMods& Mods);
-	/** The low-poly gun mesh for an id by convention (/Game/Weapons/Guns/SM_Gun_<id>); the caller falls
-	 *  back to the shared rifle when that asset is not cooked yet. */
+	/** The Weapon Library V3 mesh for an id (/Game/Weapons/LibraryV3/Meshes/SM_<id>): real-size, one
+	 *  piece, its own Grip / Muzzle sockets and the skinnable M_WeaponV3 material. The caller falls back
+	 *  to LowPolyMeshPathFor, then to the shared rifle, when that asset is not cooked into this build. */
 	FString MeshPathFor(FName Id);
+	/** The older low-poly gun (/Game/Weapons/Guns/SM_Gun_<id>), kept as the first fallback. */
+	FString LowPolyMeshPathFor(FName Id);
 	/** The shared fallback: the rifle every hand already holds. */
 	const TCHAR* RifleMeshPath();
 
