@@ -76,6 +76,7 @@ void ACampusGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME(ACampusGameState, BlueScore);
 	DOREPLIFETIME(ACampusGameState, Round);
 	DOREPLIFETIME(ACampusGameState, Rounds);
+	DOREPLIFETIME(ACampusGameState, bUnlimitedAmmo);
 	DOREPLIFETIME(ACampusGameState, RoundMinutes);
 	DOREPLIFETIME(ACampusGameState, bDecider);
 	DOREPLIFETIME(ACampusGameState, LastRoundWinner);

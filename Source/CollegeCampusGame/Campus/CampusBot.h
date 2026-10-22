@@ -29,6 +29,7 @@
 #include "CampusBot.generated.h"
 
 class ACampusCharacter;
+class ACampusPickup;
 
 /** Bots are meant to be beatable: both levels shoot late and wide compared with a human. */
 UENUM()
@@ -110,6 +111,10 @@ private:
 	/** Walks the last known position (carried on by the way the target was running) or a heard shot. */
 	void TickSearch(ACampusCharacter* Self);
 	void TickCover(ACampusCharacter* Self);
+	/** Empty-handed (battle royale, early in the match): walk to the nearest ground gun inside
+	 *  LootScanRange and take it; roam while there is none. Never engages - it has nothing to shoot.
+	 *  After LootGiveUpSeconds it "finds" a common gun, so a bot is never unarmed for a whole match. */
+	void TickLoot(ACampusCharacter* Self);
 	/** 1 Hz: AI update rate (20/10/4/2 Hz), replication frequency and anim tick, all by distance to the
 	 *  nearest human-controlled pawn. This is the whole performance story for a phone host. */
 	void TickBudget(ACampusCharacter* Self);
@@ -192,4 +197,9 @@ private:
 	/** Strafe direction while engaging, flipped now and then so bots do not line-dance in step. */
 	float StrafeSign = 1.f;
 	float NextStrafeTime = 0.f;
+	/** The ground gun an empty-handed bot is walking to, re-picked every LootScanSeconds. */
+	TWeakObjectPtr<ACampusPickup> LootTarget;
+	float NextLootScanTime = 0.f;
+	/** When this bot was first seen empty-handed (-1 = armed). */
+	float UnarmedSince = -1.f;
 };

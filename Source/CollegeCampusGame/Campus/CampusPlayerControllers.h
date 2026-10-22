@@ -51,6 +51,13 @@ public:
 	void ApplyLobbyOutfit();
 	void RefreshLobbyDecor();
 
+	/** WEAPONS PAGE: one real gun mesh (Weapon Library V3, painted with Style) floating in front of the
+	 *  podium camera, the line-up and decor hidden behind it. Calling it again swaps the gun or the skin
+	 *  in place; the drag (RotateDisplay) turns the gun instead of the squad while it is up. */
+	void ShowWeaponStage(FName GunId, uint8 Style);
+	void HideWeaponStage();
+	bool IsWeaponStageUp() const { return WeaponStage != nullptr; }
+
 	UCampusBackend* GetBackend() const;
 
 	/** Internet play (EOS P2P). Null-safe: when it is not configured the room stays on the LAN. */
@@ -123,6 +130,18 @@ private:
 	TObjectPtr<ACameraActor> ProfileCamera;
 	bool bProfileFocus = false;
 
+	/** The weapons page's gun (ShowWeaponStage). Null whenever the page is closed. */
+	UPROPERTY(Transient)
+	TObjectPtr<AActor> WeaponStage;
+	UPROPERTY(Transient)
+	TObjectPtr<class UStaticMeshComponent> WeaponStageMesh;
+	UPROPERTY(Transient)
+	TObjectPtr<class UMaterialInstanceDynamic> WeaponStageSkin;
+	FName WeaponStageGun;
+	float WeaponStageYaw = 0.f;
+	/** Places the stage in front of the podium camera at a distance that fits the gun's own size. */
+	void PlaceWeaponStage();
+
 	/** The eight decor anchors. Spawned once, after the floor height is known, and rebuilt in place. */
 	UPROPERTY(Transient)
 	TObjectPtr<class ACampusLobbyDecor> DecorSet;
@@ -144,6 +163,10 @@ public:
 
 	UFUNCTION(Server, Reliable)
 	void ServerSwitchTeam();
+
+	/** Battle royale, eliminated: watch the next squadmate still standing (own squad only). */
+	UFUNCTION(Server, Reliable)
+	void ServerSpectateNext();
 
 	/** Adds this match's reward to the profile (if not yet) and goes back to the lobby. */
 	void ClaimAndLeave();

@@ -90,6 +90,10 @@ struct FCampusBRView
 	/** My squad took it: BOOYAH! instead of a placement line. */
 	bool bWon = false;
 
+	/** Eliminated while the match goes on, camera on a squadmate (the only thing still drawn). */
+	bool bSpectating = false;
+	FString SpectatingName;
+
 	/** Reads one frame off the world. Safe to call with no BR actors at all. */
 	void Read(const APlayerController* Controller);
 	/** Any BR state found at all - the HUD draws nothing when this is false. */

@@ -709,6 +709,17 @@ bool ACampusBRGameMode::Promote(int32 Index)
 
 	Slot.bPhysical = true;
 	Slot.Controller = Made[0];
+	// A bot that appears in the first minute after the plane (promotion only runs while Playing, so
+	// MatchStartTime is set) has not had time to find anything yet: it starts empty-handed and has to
+	// pick a gun up off the ground like everybody else (ACampusBotController::TickLoot). Later ones
+	// arrive armed - the virtual bot they were "looted" off-screen.
+	if (ACampusCharacter* BotPawn = Made[0] ? Cast<ACampusCharacter>(Made[0]->GetPawn()) : nullptr)
+	{
+		if (MatchStartTime > 0.f && GetWorld()->GetTimeSeconds() - MatchStartTime < BotsLootWindowSeconds)
+		{
+			BotPawn->StripWeapons();
+		}
+	}
 	// THE SQUAD, on the bot's own player state: the bot's target picker, the client's squad markers
 	// and the scoreboard all read it from there, and a bot left on squad 0 would be friendly with
 	// nobody AND marked as nobody's teammate - which is exactly right, but only by accident.
@@ -1009,6 +1020,20 @@ void ACampusBRGameMode::Eliminate(int32 Index, const FString& KillerName)
 	{
 		if (APawn* Pawn = Controller->GetPawn())
 		{
+			// Dead squadmates who were watching this pawn move on to the next one still up, before the
+			// pawn goes: a destroyed view target leaves their camera frozen on an empty spot.
+			for (const FCampusBRCombatant& Each : Combatants)
+			{
+				APlayerController* Watcher = Cast<APlayerController>(Each.Controller.Get());
+				if (!Each.bAlive && Each.Squad == Slot.Squad && Watcher && Watcher != Controller
+					&& Watcher->GetViewTarget() == Pawn)
+				{
+					if (APawn* Next = LivingSquadmatePawn(Slot.Squad, Controller))
+					{
+						Watcher->SetViewTargetWithBlend(Next, 1.f);
+					}
+				}
+			}
 			Pawn->Destroy();
 		}
 		// Spectate a squadmate who is still up; with nobody left the win screen takes over and the
@@ -1059,6 +1084,33 @@ bool ACampusBRGameMode::HasLivingMember(int32 Squad) const
 		}
 	}
 	return false;
+}
+
+void ACampusBRGameMode::SpectateNextMate(APlayerController* Player)
+{
+	const int32 Index = IndexOf(Player);
+	if (!Combatants.IsValidIndex(Index) || Combatants[Index].bAlive)
+	{
+		return;
+	}
+	const int32 Squad = Combatants[Index].Squad;
+	TArray<APawn*> Mates;
+	for (const FCampusBRCombatant& Each : Combatants)
+	{
+		if (Each.bAlive && Each.Squad == Squad && Each.Controller.IsValid())
+		{
+			if (APawn* Pawn = Each.Controller->GetPawn())
+			{
+				Mates.Add(Pawn);
+			}
+		}
+	}
+	if (Mates.Num() > 0)
+	{
+		// Not found (-1) lands on the first mate; otherwise the one after the current view.
+		const int32 Current = Mates.IndexOfByKey(Player->GetViewTarget());
+		Player->SetViewTargetWithBlend(Mates[(Current + 1) % Mates.Num()], 0.5f);
+	}
 }
 
 APawn* ACampusBRGameMode::LivingSquadmatePawn(int32 Squad, const AController* Except) const

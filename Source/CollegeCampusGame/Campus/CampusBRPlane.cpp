@@ -1,6 +1,7 @@
 ﻿#include "Campus/CampusBRPlane.h"
 
 #include "Campus/CampusBRDecorChutes.h"
+#include "Campus/CampusBRGameMode.h"
 #include "Campus/CampusBRZone.h"
 #include "Campus/CampusCharacter.h"
 #include "CollisionQueryParams.h"
@@ -534,7 +535,7 @@ bool ACampusBRDrop::HandleJumpPressed()
 	{
 		if (State == ECampusBRDive::InPlane)
 		{
-			Drop();
+			DropWithSquad();
 		}
 		else
 		{
@@ -548,6 +549,37 @@ bool ACampusBRDrop::HandleJumpPressed()
 	return true;
 }
 
+void ACampusBRDrop::DropWithSquad()
+{
+	if (!HasAuthority() || State != ECampusBRDive::InPlane || !Diver)
+	{
+		return;
+	}
+	Drop();
+	const ACampusBRGameMode* Mode = GetWorld()->GetAuthGameMode<ACampusBRGameMode>();
+	const int32 Squad = Mode ? Mode->SquadOf(Diver->GetController()) : 0;
+	if (Squad == 0)
+	{
+		return;
+	}
+	// Side by side, 2.5 m apart across the flight line, so four divers never stack in one spot.
+	const FVector Across = Plane ? Plane->GetActorRightVector() : FVector::RightVector;
+	int32 Placed = 0;
+	for (const TWeakObjectPtr<ACampusBRDrop>& Each : CampusBRDive::LiveDrops)
+	{
+		ACampusBRDrop* Mate = Each.Get();
+		if (!Mate || Mate == this || Mate->State != ECampusBRDive::InPlane || !Mate->Diver || Mate->Plane != Plane
+			|| Mode->SquadOf(Mate->Diver->GetController()) != Squad)
+		{
+			continue;
+		}
+		Mate->Drop();
+		++Placed;
+		const float Side = (Placed % 2 == 1 ? 1.f : -1.f) * float((Placed + 1) / 2) * 250.f;
+		Mate->Diver->AddActorWorldOffset(Across * Side, false, nullptr, ETeleportType::TeleportPhysics);
+	}
+}
+
 void ACampusBRDrop::ServerJump_Implementation()
 {
 	if (State == ECampusBRDive::InPlane)
@@ -555,7 +587,7 @@ void ACampusBRDrop::ServerJump_Implementation()
 		// Re-checked here, not just on the phone: the gate is the server's rule, the UI only draws it.
 		if (CanDropNow())
 		{
-			Drop();
+			DropWithSquad();
 		}
 	}
 	else if (State == ECampusBRDive::Freefall)

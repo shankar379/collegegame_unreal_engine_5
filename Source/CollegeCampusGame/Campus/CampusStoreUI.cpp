@@ -559,6 +559,48 @@ void SCampusLobbyWidget::StoreEquipGun(int32 Index)
 	});
 }
 
+void SCampusLobbyWidget::StoreBuySkin(const FString& SkinId, const FString& Name)
+{
+	UCampusBackend* Api = Backend();
+	if (!Api)
+	{
+		return;
+	}
+	Busy(TEXT("Buying..."));
+	Api->BuyItem(SkinId, [this, Name](bool bOk, const FString& Error)
+	{
+		Done(bOk, Error, [this, Name]() { Toast(Name + TEXT(" unlocked! Tap EQUIP to wear it.")); });
+	});
+}
+
+TSharedRef<SWidget> SCampusLobbyWidget::BuildStoreSkinRow(const FString& GunId)
+{
+	// The skins themselves live on the WEAPONS page (CampusWeaponsUI.cpp): four per gun, each with its look
+	// and its abilities, on a 3D gun. The store card only says how many you have and takes you there.
+	const UCampusBackend* Api = Backend();
+	int32 Total = 0;
+	int32 Owned = 0;
+	if (Api)
+	{
+		for (const FCampusGunSkinItem& Skin : Api->GunSkinShop)
+		{
+			if (Skin.ForGun == GunId)
+			{
+				++Total;
+				Owned += Skin.bOwned ? 1 : 0;
+			}
+		}
+	}
+	if (Total == 0)
+	{
+		return SNullWidget::NullWidget;
+	}
+	return CampusStyle::Button(
+		FText::Format(LOCTEXT("SkinsView", "SKINS  {0}/{1}  -  VIEW"), FText::AsNumber(Owned), FText::AsNumber(Total)),
+		FOnClicked::CreateLambda([this, GunId]() { OpenWeapons(GunId); return FReply::Handled(); }),
+		EButton::Dark, 14, FVector2D(260.f, 42.f));
+}
+
 /** The left rail: three tabs, the selected one carrying the accent edge. */
 TSharedRef<SWidget> SCampusLobbyWidget::BuildStoreSideTabs()
 {
@@ -802,6 +844,8 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildStoreGunTile(int32 Index)
 					]
 				]
 				+ SVerticalBox::Slot().AutoHeight()[Bars]
+				// the Royal skin for this gun, if the store sells one
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 10.f, 0.f, 0.f)[BuildStoreSkinRow(Gun.Id)]
 				// price + action
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 12.f, 0.f, 0.f)
 				[

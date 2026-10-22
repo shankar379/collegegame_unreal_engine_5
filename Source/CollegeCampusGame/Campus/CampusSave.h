@@ -67,6 +67,11 @@ public:
 	UPROPERTY()
 	TMap<FName, FName> LobbyDecor;
 
+	/** GUN SKINS: gun id -> skin item id (backend migration 032). Mirrored from GET /me/cosmetics so a
+	 *  match paints the right gun even before (or without) the network. */
+	UPROPERTY()
+	TMap<FName, FName> GunSkins;
+
 	UPROPERTY()
 	FName EquippedGun = TEXT("Rifle");
 
@@ -116,6 +121,10 @@ public:
 
 	UPROPERTY()
 	int32 RoundMinutes = 5;
+
+	/** Custom Room choice (remembered): the host's unlimited-ammo practice switch. */
+	UPROPERTY()
+	bool bRoomUnlimitedAmmo = false;
 
 	// ---- backend session (UCampusBackend). The device id + secret ARE the guest account: lose them and the
 	// guest is gone, which is why the lobby keeps suggesting "Register to keep your progress".

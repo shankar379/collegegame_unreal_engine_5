@@ -419,8 +419,19 @@ const TCHAR* CampusWeapons::RifleMeshPath()
 
 FString CampusWeapons::MeshPathFor(FName Id)
 {
-	// The per-gun low-poly meshes land at /Game/Weapons/Guns/SM_Gun_<id>. Resolved by name at runtime on
-	// purpose: the guns appear as they are cooked, with no compile-time dependency on that work.
+	// Weapon Library V3 (Scripts/weapon_v3/import_weapon_library_v3.py). Resolved by name at runtime, like
+	// the low-poly set: a gun shows its V3 art the build it is cooked in, with no compile-time dependency.
+	if (Id.IsNone())
+	{
+		return FString(RifleMeshPath());
+	}
+	const FString Name = FString::Printf(TEXT("SM_%s"), *Id.ToString().ToLower());
+	return FString::Printf(TEXT("/Game/Weapons/LibraryV3/Meshes/%s.%s"), *Name, *Name);
+}
+
+FString CampusWeapons::LowPolyMeshPathFor(FName Id)
+{
+	// The per-gun low-poly meshes land at /Game/Weapons/Guns/SM_Gun_<id>.
 	if (Id.IsNone())
 	{
 		return FString(RifleMeshPath());

@@ -267,7 +267,10 @@ private:
 		// stacked invite tray, the full-screen profile, and the player-of-the-match screen.
 		Friends, FriendPick, InviteTray, Profile, Summary,
 		/** lobby v2: the CAMPUS PASS season track (Campus/CampusPassUI.cpp) */
-		Pass };
+		Pass,
+		/** The WEAPONS page (Campus/CampusWeaponsUI.cpp): every gun, its skins and their abilities, a 3D
+		 *  gun to turn, EQUIP / BUY. The three.js WEAPONS page, Free Fire's layout. */
+		Weapons };
 	enum class EStoreTab : uint8 { Guns, Offers, Packs };
 	enum class EMissionTab : uint8 { Daily, Weekly, Weekend };
 	enum class EFriendTab : uint8 { Friends, Add, Requests };
@@ -430,6 +433,23 @@ private:
 	void StoreBuyProduct(const FString& ProductId, const FString& ItemName);
 	void StoreBuyGun(int32 Index);
 	void StoreEquipGun(int32 Index);
+	/** Gun skins (backend migration 032): buy one (wearing it is the WEAPONS page's EQUIP). */
+	void StoreBuySkin(const FString& SkinId, const FString& Name);
+	/** "SKINS 1/4 - VIEW" under a gun card: opens the WEAPONS page on that gun. Null when it has none. */
+	TSharedRef<SWidget> BuildStoreSkinRow(const FString& GunId);
+
+	// ---- the WEAPONS page (Campus/CampusWeaponsUI.cpp)
+	/** Loads the store (guns, skins, prices) and opens the page on Gun (or the equipped gun). */
+	void OpenWeapons(const FString& Gun = FString());
+	TSharedRef<SWidget> BuildWeapons();
+	TSharedRef<SWidget> BuildWeaponsList();
+	TSharedRef<SWidget> BuildWeaponsAttributes();
+	TSharedRef<SWidget> BuildWeaponsSkins();
+	TSharedRef<SWidget> BuildWeaponsAction();
+	/** Picks a gun and/or a skin to look at, and puts it on the 3D stage. */
+	void WeaponsSelect(const FString& Gun, uint8 Style);
+	/** EQUIP: this gun as the loadout gun (when owned) and this skin on it. */
+	void WeaponsEquip();
 	UCampusPlayBilling* StoreBilling() const;
 
 	// ---- live config: maintenance, minimum version, announcements (Campus/CampusLiveConfigUI.cpp).
@@ -628,6 +648,9 @@ private:
 
 	EScreen Current = EScreen::Splash;
 	EStoreTab StoreTab = EStoreTab::Guns;
+	/** The WEAPONS page's selection: the gun id being looked at and the skin style shown on it. */
+	FString WeaponsGun;
+	uint8 WeaponsStyle = 0;
 	/** The Play price query has been asked for on this visit to the store. A build function must never
 	 *  start a round trip: when this one did, the reply repainted the store, the repaint asked again,
 	 *  and on a build Play answers with an empty catalogue the two fed each other without end. */

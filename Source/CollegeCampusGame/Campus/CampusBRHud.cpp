@@ -11,6 +11,7 @@
 #include "EngineUtils.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerState.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
 #include "UObject/UnrealType.h"
@@ -487,8 +488,19 @@ void FCampusBRView::Read(const APlayerController* PC)
 			bWon = int32(Mine) == int32(Winner);
 		}
 	}
-	bEnded = bEnded || Phase.Contains(TEXT("end")) || Phase.Contains(TEXT("over")) || Phase.Contains(TEXT("result"))
-		|| bHasPlacement;
+	const bool bMatchOver = bEnded || Phase.Contains(TEXT("end")) || Phase.Contains(TEXT("over")) || Phase.Contains(TEXT("result"));
+	bEnded = bMatchOver || bHasPlacement;
+	// SPECTATING: I am out (placed) but the match is still on and the camera is on a squadmate.
+	if (bHasPlacement && !bMatchOver)
+	{
+		const APawn* Watched = Cast<APawn>(PC->GetViewTarget());
+		if (Watched && Watched != Pawn)
+		{
+			bSpectating = true;
+			const APlayerState* WatchedState = Watched->GetPlayerState();
+			SpectatingName = WatchedState ? WatchedState->GetPlayerName() : FString();
+		}
+	}
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -620,7 +632,8 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 			// end-of-match surface; this HUD used to paint its own BOOYAH! card and the two stacked.
 			// Collapsing the whole widget - not just that card - also takes the ALIVE / KILLS chips,
 			// the squad list and the kill feed off the victory photo, which is the point of it.
-			return View.IsBattleRoyale() && !View.bEnded
+			// The one exception: eliminated but the match goes on - the spectate bar stays up.
+			return View.IsBattleRoyale() && (!View.bEnded || View.bSpectating)
 				? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed;
 		})
 		+ SOverlay::Slot()
@@ -798,6 +811,57 @@ void SCampusBRHud::Construct(const FArguments& InArgs)
 						.ColorAndOpacity(CampusAngular::Accent)
 						.ShadowOffset(FVector2D(4.f, 4.f))
 						.ShadowColorAndOpacity(BrShadow)
+					]
+				]
+				// ---- SPECTATING: whose camera this is, and NEXT TEAMMATE. Own squad only - the server
+				// (ACampusBRGameMode::SpectateNextMate) never hands out an enemy's view.
+				+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 36.f)
+				[
+					SNew(SVerticalBox)
+					.Visibility_Lambda([this]() { return View.bSpectating ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed; })
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 0.f, 0.f, 10.f)
+					[
+						SNew(STextBlock)
+						.Visibility(EVisibility::HitTestInvisible)
+						.Text_Lambda([this]()
+						{
+							return View.SpectatingName.IsEmpty()
+								? LOCTEXT("BrSpectating", "SPECTATING TEAMMATE")
+								: FText::Format(LOCTEXT("BrSpectatingName", "SPECTATING  {0}"), FText::FromString(View.SpectatingName));
+						})
+						.Font(CampusAngular::Display(22))
+						.ColorAndOpacity(FLinearColor::White)
+						.ShadowOffset(FVector2D(2.f, 2.f))
+						.ShadowColorAndOpacity(BrShadow)
+					]
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+					[
+						SNew(SBox).WidthOverride(300.f).HeightOverride(78.f)
+						[
+							SNew(SCampusAngularButton)
+							.Shape(FCampusShape::Clipped(16.f))
+							.Fill(FLinearColor(0.f, 0.f, 0.f, 0.6f))
+							.Border(FLinearColor::White)
+							.BorderWidth(2.f)
+							.ContentPadding(FMargin(0.f))
+							.OnClicked(FOnClicked::CreateLambda([this]()
+							{
+								if (ACampusMatchPlayerController* PC = Cast<ACampusMatchPlayerController>(Controller.Get()))
+								{
+									PC->ServerSpectateNext();
+								}
+								return FReply::Handled();
+							}))
+							[
+								SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
+								[
+									SNew(STextBlock)
+									.Text(LOCTEXT("BrSpectateNext", "NEXT TEAMMATE  >"))
+									.Font(CampusAngular::Display(24))
+									.ColorAndOpacity(FLinearColor::White)
+								]
+							]
+						]
 					]
 				]
 				// ---- THE PLANE, AND ONLY THE PLANE: one 200 x 200 JUMP, bottom centre, clear of both

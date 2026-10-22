@@ -31,6 +31,7 @@ void UCampusBackend::ReadStore(TSharedPtr<FJsonObject> Json)
 	Guns.Reset();
 	Offers.Reset();
 	Packs.Reset();
+	GunSkinShop.Reset();
 	GoogleProducts.Reset();
 	// Play Console id per catalogue item; the store uses it to price and buy through Google Play.
 	auto NoteGoogleId = [this](const TSharedPtr<FJsonObject>& Item, const FString& Id)
@@ -74,6 +75,29 @@ void UCampusBackend::ReadStore(TSharedPtr<FJsonObject> Json)
 			Gun.Accuracy = float(Num(Stats, TEXT("accuracy")));
 			Gun.Magazine = int32(Num(Stats, TEXT("mag")));
 			NoteGoogleId(Item, Gun.Id);
+		}
+	}
+	// Gun skins ride in the cosmetics list (migration 032); outfits are the wardrobe's business.
+	if (Json->TryGetArrayField(TEXT("cosmetics"), List))
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *List)
+		{
+			const TSharedPtr<FJsonObject> Item = Value->AsObject();
+			if (Str(Item, TEXT("slot")) != TEXT("gunskin") || Str(Item, TEXT("for_gun")).IsEmpty())
+			{
+				continue;
+			}
+			FCampusGunSkinItem& Skin = GunSkinShop.AddDefaulted_GetRef();
+			Skin.Id = Str(Item, TEXT("id"));
+			Skin.Name = Str(Item, TEXT("name"));
+			Skin.ForGun = Str(Item, TEXT("for_gun"));
+			Skin.Rarity = Str(Item, TEXT("rarity"));
+			Skin.PriceDiamonds = int32(Num(Item, TEXT("effective_price_diamonds")));
+			if (Skin.PriceDiamonds <= 0)
+			{
+				Skin.PriceDiamonds = int32(Num(Item, TEXT("price_diamonds")));
+			}
+			Skin.bOwned = Bool(Item, TEXT("owned"));
 		}
 	}
 	for (const TCHAR* Field : { TEXT("offers"), TEXT("packs") })

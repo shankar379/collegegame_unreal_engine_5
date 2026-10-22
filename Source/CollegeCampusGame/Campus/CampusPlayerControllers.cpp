@@ -6,6 +6,11 @@
 #include "Campus/CampusAnimInstance.h"
 #include "Campus/CampusBR.h"
 #include "Campus/CampusBREnd.h"
+#include "Campus/CampusBRGameMode.h"
+#include "Campus/CampusGunSkins.h"
+#include "Campus/CampusWeapons.h"
+#include "Components/StaticMeshComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Campus/CampusBRHud.h"
 #include "Campus/CampusBackend.h"
 #include "Campus/CampusEOS.h"
@@ -481,6 +486,13 @@ void ACampusLobbyPlayerController::EndPlay(const EEndPlayReason::Type EndPlayRea
 
 void ACampusLobbyPlayerController::RotateDisplay(float DeltaYaw)
 {
+	if (WeaponStage)
+	{
+		// The weapons page owns the drag: it turns the gun, the 360 degree look of three.js's turntable.
+		WeaponStageYaw = FRotator::NormalizeAxis(WeaponStageYaw + DeltaYaw);
+		PlaceWeaponStage();
+		return;
+	}
 	DisplayYaw = FRotator::NormalizeAxis(DisplayYaw + DeltaYaw);
 	for (int32 Index = 0; Index < Squad.Num(); ++Index)
 	{
@@ -492,6 +504,113 @@ void ACampusLobbyPlayerController::RotateDisplay(float DeltaYaw)
 			Member->SetActorRotation(FRotator(0.f, CampusLineUp::MeshYawOffset + DisplayYaw + CampusLineUp::SlotFacingYaw(Slot), 0.f));
 		}
 	}
+}
+
+void ACampusLobbyPlayerController::ShowWeaponStage(FName GunId, uint8 Style)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	if (!WeaponStage)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		WeaponStage = World->SpawnActor<AActor>(AActor::StaticClass(), FTransform::Identity, Params);
+		if (!WeaponStage)
+		{
+			return;
+		}
+		USceneComponent* Pivot = NewObject<USceneComponent>(WeaponStage, TEXT("Pivot"));
+		WeaponStage->SetRootComponent(Pivot);
+		Pivot->RegisterComponent();
+		WeaponStageMesh = NewObject<UStaticMeshComponent>(WeaponStage, TEXT("Gun"));
+		WeaponStageMesh->SetupAttachment(Pivot);
+		WeaponStageMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		WeaponStageMesh->SetCastShadow(false);
+		WeaponStageMesh->RegisterComponent();
+		WeaponStageYaw = 0.f;
+		// The gun is the whole picture: the line-up and the decor step out of it until the page closes.
+		for (ASkeletalMeshActor* Member : Squad)
+		{
+			if (Member)
+			{
+				Member->SetActorHiddenInGame(true);
+			}
+		}
+		if (DecorSet)
+		{
+			DecorSet->SetActorHiddenInGame(true);
+		}
+		if (PodiumCamera)
+		{
+			SetViewTargetWithBlend(PodiumCamera, 0.f);
+		}
+	}
+	if (GunId != WeaponStageGun)
+	{
+		WeaponStageGun = GunId;
+		// V3 first, then the low-poly set, then the rifle: the same order a match uses.
+		UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *CampusWeapons::MeshPathFor(GunId), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (!Mesh)
+		{
+			Mesh = LoadObject<UStaticMesh>(nullptr, *CampusWeapons::LowPolyMeshPathFor(GunId), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		}
+		if (!Mesh)
+		{
+			Mesh = LoadObject<UStaticMesh>(nullptr, CampusWeapons::RifleMeshPath());
+		}
+		WeaponStageMesh->SetStaticMesh(Mesh);
+		WeaponStageSkin = nullptr; // a new mesh, a new material to paint
+	}
+	CampusGunSkins::Paint(WeaponStageMesh, Style, WeaponStageSkin);
+	PlaceWeaponStage();
+}
+
+void ACampusLobbyPlayerController::PlaceWeaponStage()
+{
+	if (!WeaponStage || !WeaponStageMesh || !WeaponStageMesh->GetStaticMesh())
+	{
+		return;
+	}
+	const AActor* Eye = PodiumCamera ? static_cast<AActor*>(PodiumCamera) : GetViewTarget();
+	if (!Eye)
+	{
+		return;
+	}
+	const FBoxSphereBounds Local = WeaponStageMesh->GetStaticMesh()->GetBounds();
+	// Turn about the gun's own middle, not its grip (V3 meshes keep the grip at the origin).
+	WeaponStageMesh->SetRelativeLocation(-Local.Origin);
+	// Far enough that the whole gun fills about half of a 70 degree view, whatever its size.
+	const float Radius = FMath::Max(Local.SphereRadius, 10.f);
+	const float Distance = Radius / FMath::Tan(FMath::DegreesToRadians(35.f)) * 1.9f;
+	const FRotator Look = Eye->GetActorRotation();
+	const FVector Forward = Look.Vector();
+	const FVector Right = FRotationMatrix(Look).GetUnitAxis(EAxis::Y);
+	// A little right of centre and up: the list owns the left edge, the skins row the bottom.
+	WeaponStage->SetActorLocation(Eye->GetActorLocation() + Forward * Distance + Right * (Distance * 0.12f) + FVector(0.f, 0.f, Distance * 0.06f));
+	// Barrel (+Y) across the screen, muzzle to the right, then the player's drag on top.
+	WeaponStage->SetActorRotation(FRotator(0.f, Look.Yaw + WeaponStageYaw, 0.f));
+}
+
+void ACampusLobbyPlayerController::HideWeaponStage()
+{
+	if (!WeaponStage)
+	{
+		return;
+	}
+	WeaponStage->Destroy();
+	WeaponStage = nullptr;
+	WeaponStageMesh = nullptr;
+	WeaponStageSkin = nullptr;
+	WeaponStageGun = NAME_None;
+	if (DecorSet)
+	{
+		DecorSet->SetActorHiddenInGame(false);
+	}
+	// RebuildSquad shows every slot the squad size wants and hides the rest, exactly as on entry.
+	RebuildSquad();
 }
 
 void ACampusLobbyPlayerController::FocusProfile(bool bOn)
@@ -623,11 +742,12 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 	const int32 Team = bPartyLeader ? Social->GetServerParty().Mode : Profile->TeamSize;
 	const int32 Rounds = FMath::Clamp(Profile->MatchRounds, 4, 7);
 	const int32 Minutes = FMath::Clamp(Profile->RoundMinutes, 3, 10);
+	const bool bUnlimitedAmmo = Profile->bRoomUnlimitedAmmo;
 	TWeakObjectPtr<ACampusLobbyPlayerController> WeakThis(this);
 
 	// EosPuid empty = host on the LAN exactly as before. Non-empty = this phone is EOS-logged-in, the
 	// API lists the room as an EOS room, and the match listens on the EOS net driver instead.
-	auto Create = [WeakThis, Map, ApiMap, Level, Team, Rounds, Minutes, OnFailed](const FString& EosPuid)
+	auto Create = [WeakThis, Map, ApiMap, Level, Team, Rounds, Minutes, bUnlimitedAmmo, OnFailed](const FString& EosPuid)
 	{
 		ACampusLobbyPlayerController* Self = WeakThis.Get();
 		if (!Self)
@@ -641,7 +761,7 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 			return;
 		}
 		// the API issues the code (and takes the Room Card) first; then this phone opens the match and hosts it
-		Api->CreateRoom(ApiMap, Team, Rounds, Minutes, EosPuid, [WeakThis, Map, Level, Team, Rounds, Minutes, EosPuid, OnFailed](bool bOk, const FString& Error, const FCampusRoom& Room)
+		Api->CreateRoom(ApiMap, Team, Rounds, Minutes, bUnlimitedAmmo, EosPuid, [WeakThis, Map, Level, Team, Rounds, Minutes, bUnlimitedAmmo, EosPuid, OnFailed](bool bOk, const FString& Error, const FCampusRoom& Room)
 		{
 			ACampusLobbyPlayerController* Me = WeakThis.Get();
 			if (!Me)
@@ -656,7 +776,7 @@ void ACampusLobbyPlayerController::HostRoom(TFunction<void(const FString& Error)
 			// With no puid we tell the net driver to use plain IP sockets, so a LAN room is hosted on
 			// 7777 as it always was even when EOS is configured but this phone could not log in.
 			const TCHAR* Transport = EosPuid.IsEmpty() ? TEXT("?bUseIPSockets") : TEXT("");
-			const FString Options = FString::Printf(TEXT("listen%s?Map=%s?Team=%d?Room=%s?Rounds=%d?Minutes=%d"), Transport, *Map, Team, *Room.Code, Rounds, Minutes);
+			const FString Options = FString::Printf(TEXT("listen%s?Map=%s?Team=%d?Room=%s?Rounds=%d?Minutes=%d?UnlimitedAmmo=%d"), Transport, *Map, Team, *Room.Code, Rounds, Minutes, bUnlimitedAmmo ? 1 : 0);
 
 			// THE PARTY HAND-OFF. Tell the API which room this squad is playing, and every member's
 			// phone gets party.room_ready and joins by itself - nobody reads six characters aloud.
@@ -1209,6 +1329,14 @@ void ACampusMatchPlayerController::ServerSwitchTeam_Implementation()
 	if (ACampusMatchGameMode* GameMode = GetWorld()->GetAuthGameMode<ACampusMatchGameMode>())
 	{
 		GameMode->SwitchTeam(this);
+	}
+}
+
+void ACampusMatchPlayerController::ServerSpectateNext_Implementation()
+{
+	if (ACampusBRGameMode* GameMode = GetWorld()->GetAuthGameMode<ACampusBRGameMode>())
+	{
+		GameMode->SpectateNextMate(this);
 	}
 }
 
