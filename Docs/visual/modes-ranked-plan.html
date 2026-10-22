@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modes and Ranked Plan</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #17191e; --muted: #5f6672; --line: #dde1e7;
+    --accent: #c98400; --accent-bg: #fff2d4; --br: #2b5fd9; --br-bg: #e6edfd; --cl: #13805a; --cl-bg: #e0f4ec;
+    --new: #b3261e; --new-bg: #fdecea; --ok: #2f7d32; --tile: #20242c; --tile-ink: #f3f4f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101216; --card: #191c22; --ink: #eceef2; --muted: #9aa1ad; --line: #2c3139;
+      --accent: #f2b83c; --accent-bg: #3a2e12; --br: #8ea6ff; --br-bg: #1c2445; --cl: #5fd3a5; --cl-bg: #15302a;
+      --new: #ff8a80; --new-bg: #3a1c1a; --ok: #7bd47f; --tile: #0c0e12; --tile-ink: #f3f4f6;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101216; --card: #191c22; --ink: #eceef2; --muted: #9aa1ad; --line: #2c3139;
+    --accent: #f2b83c; --accent-bg: #3a2e12; --br: #8ea6ff; --br-bg: #1c2445; --cl: #5fd3a5; --cl-bg: #15302a;
+    --new: #ff8a80; --new-bg: #3a1c1a; --ok: #7bd47f; --tile: #0c0e12; --tile-ink: #f3f4f6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 28px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 19px; margin: 36px 0 12px; }
+  h3 { margin: 0 0 6px; font-size: 16px; }
+  .lead { color: var(--muted); margin: 0 0 18px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .have { background: var(--cl-bg); color: var(--ok); }
+  .new { background: var(--new-bg); color: var(--new); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  /* the mode grid wireframe: our own arrangement, not a copy */
+  .modes { display: grid; grid-template-columns: 1.15fr 1fr 1fr 1fr; grid-template-rows: 150px 150px 54px; gap: 10px; }
+  .tile { background: var(--tile); color: var(--tile-ink); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; justify-content: flex-end; position: relative; overflow: hidden; border: 2px solid transparent; }
+  .tile b { font-size: 18px; letter-spacing: .02em; }
+  .tile small { opacity: .75; }
+  .tile .tag { position: absolute; top: 10px; left: 12px; font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 6px; }
+  .t-br { background: linear-gradient(160deg, #1b2c5e, #0f1424); }
+  .t-cl { background: linear-gradient(160deg, #11483a, #0d1714); }
+  .t-rank { border-color: #f2b83c; }
+  .tag-br { background: #8ea6ff; color: #0b1020; }
+  .tag-cl { background: #5fd3a5; color: #06140f; }
+  .tag-rank { background: #f2b83c; color: #1a1200; }
+  .tall { grid-row: span 2; }
+  .split { grid-row: span 2; display: grid; grid-template-rows: 1fr 1fr; gap: 0; padding: 0; }
+  .split > div { padding: 12px 14px; display: flex; flex-direction: column; justify-content: flex-end; }
+  .split > div + div { border-top: 2px solid rgba(255,255,255,.18); }
+  .foot { grid-column: span 4; display: flex; gap: 10px; justify-content: flex-end; }
+  .foot span { background: var(--tile); color: var(--tile-ink); border-radius: 8px; padding: 12px 18px; font-weight: 700; }
+  .badge { width: 54px; height: 54px; border-radius: 12px; display: grid; place-items: center; font-weight: 900; font-size: 13px; color: #111; margin-bottom: 8px; }
+  /* tiers */
+  .tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tier { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; text-align: center; }
+  .tier .badge { margin: 0 auto 8px; }
+  .tier b { display: block; }
+  .tier small { color: var(--muted); }
+  /* flows */
+  .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; }
+  .step { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; flex: 1 1 150px; min-width: 150px; }
+  .step b { display: block; margin-bottom: 2px; }
+  .step small { color: var(--muted); }
+  .arrow { align-self: center; color: var(--muted); font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 13px; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  .wrap { overflow-x: auto; }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  @media (max-width: 760px) {
+    .two { grid-template-columns: 1fr; }
+    .modes { grid-template-columns: 1fr 1fr; grid-template-rows: auto; }
+    .tall, .split { grid-row: auto; min-height: 150px; }
+    .tile { min-height: 120px; }
+    .foot { grid-column: span 2; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Modes, maps and Ranked: the plan</h1>
+  <p class="lead">Campus Combat, 2026-10-22. What you asked for, what the game already has, what is new, and the order
+    to build it. The mode screen below is our own arrangement (Free Fire was only a reference for the structure).</p>
+
+  <h2>1 · What you asked for (my understanding)</h2>
+  <div class="two">
+    <div class="card">
+      <h3>50 players: battle royale</h3>
+      <ul>
+        <li>Solo, duo or squad. Press START, the server finds an open session or makes one, random players fill it,
+          then the plane flies and everyone jumps. Last team standing wins.</li>
+        <li><b>Classic BR</b> on two maps (Varsity Valley, Campus Grounds), just for fun.</li>
+        <li><b>Ranked BR:</b> the same match, but placement + kills earn rank points.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>4 vs 4: team fights</h3>
+      <ul>
+        <li><b>Classic 4v4</b> on several maps (Classic college, Campus Grounds, …), just for fun.</li>
+        <li><b>Ranked 4v4:</b> your team of 4 presses START, the server finds another team of 4 that chose ranked, and
+          the two fight. The winners rank up; how much depends on kills and damage.</li>
+        <li><b>Custom Room</b> stays as it is: a Room Card, a code, friends and enemies you invite.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>2 · What exists vs what is new</h2>
+  <div class="wrap">
+  <table>
+    <tr><th>Piece</th><th>Status</th><th>Where / what</th></tr>
+    <tr><td>Battle royale sessions (50, solo/duo/squad, fill, 10 s countdown, plane)</td><td><span class="pill have">have</span></td><td>backend <code>lib/battlesession</code>, Unreal <code>CampusBRGameMode</code></td></tr>
+    <tr><td>BR maps: Varsity Valley + Campus Grounds (server picks 70/30)</td><td><span class="pill have">have</span></td><td><code>game_modes</code>, <code>map_rotation</code> (migration 027)</td></tr>
+    <tr><td>Custom Room 4v4 (Room Card, code, rounds, unlimited ammo)</td><td><span class="pill have">have</span></td><td><code>routes/rooms.js</code>, migration 033</td></tr>
+    <tr><td>Classic 4v4 against random players</td><td><span class="pill new">new</span></td><td>"Quick Match" today only joins a server room on your Wi-Fi; it needs a real queue</td></tr>
+    <tr><td>Ranked 4v4 (team vs random team)</td><td><span class="pill new">new</span></td><td>a team queue that pairs two squads of 4 by rank</td></tr>
+    <tr><td>Ranked BR</td><td><span class="pill new">new</span></td><td>the existing session plus rank points from the result</td></tr>
+    <tr><td>Rank tiers, rank points, seasons</td><td><span class="pill new">new</span></td><td>no ranking system exists yet (only XP levels and the weekend board)</td></tr>
+    <tr><td>Mode screen as a grid of map cards</td><td><span class="pill new">new</span></td><td><code>CampusMapSelect.cpp</code> exists and gets redesigned</td></tr>
+  </table>
+  </div>
+
+  <h2>3 · The mode screen (our own layout)</h2>
+  <div class="modes" role="img" aria-label="Mode selection wireframe">
+    <div class="tile t-br t-rank tall">
+      <span class="tag tag-rank">RANKED</span>
+      <div class="badge" style="background:#f2b83c">SR II</div>
+      <b>RANKED BATTLE ROYALE</b><small>50 players · Varsity Valley · your tier: Senior II</small>
+    </div>
+    <div class="tile t-br split">
+      <div><span class="tag tag-br" style="position:static;align-self:flex-start;margin-bottom:auto">50</span><b>CLASSIC BR</b><small>Varsity Valley</small></div>
+      <div><b>CLASSIC BR</b><small>Campus Grounds</small></div>
+    </div>
+    <div class="tile t-cl t-rank">
+      <span class="tag tag-rank">RANKED</span>
+      <b>RANKED 4v4</b><small>random map · your team vs a random team</small>
+    </div>
+    <div class="tile t-cl">
+      <span class="tag tag-cl">4v4</span>
+      <b>CAMPUS CLASH</b><small>Classic college</small>
+    </div>
+    <div class="tile t-cl">
+      <span class="tag tag-cl">4v4</span>
+      <b>CAMPUS CLASH</b><small>Campus Grounds</small>
+    </div>
+    <div class="tile t-cl">
+      <span class="tag tag-cl">EVENT</span>
+      <b>FESTIVAL MODE</b><small>during Diwali / Christmas only</small>
+    </div>
+    <div class="foot"><span>PRACTICE</span><span>CUSTOM ROOM</span></div>
+  </div>
+  <p class="lead" style="margin-top:10px">Blue = 50-player battle royale, green = 4v4, gold border = ranked. SOLO / DUO / SQUAD stays
+    in the lobby beside START; a 4v4 card forces SQUAD. Card art comes from our own maps.</p>
+
+  <h2>4 · College rank tiers (instead of Bronze / Silver / Gold)</h2>
+  <div class="tiers">
+    <div class="tier"><div class="badge" style="background:#b9c1cc">FR</div><b>Fresher</b><small>I · II · III</small></div>
+    <div class="tier"><div class="badge" style="background:#9fd3ff">SO</div><b>Sophomore</b><small>I · II · III</small></div>
+    <div class="tier"><div class="badge" style="background:#7be0b4">JR</div><b>Junior</b><small>I · II · III</small></div>
+    <div class="tier"><div class="badge" style="background:#f2b83c">SR</div><b>Senior</b><small>I · II · III</small></div>
+    <div class="tier"><div class="badge" style="background:#ff9a5a">TP</div><b>Topper</b><small>I · II · III</small></div>
+    <div class="tier"><div class="badge" style="background:#d58cff">DL</div><b>Dean's List</b><small>I · II · III</small></div>
+    <div class="tier"><div class="badge" style="background:#ffd86b">GM</div><b>Gold Medalist</b><small>one division</small></div>
+    <div class="tier"><div class="badge" style="background:linear-gradient(135deg,#ff6fc8,#8ea6ff)">CL</div><b>Campus Legend</b><small>top 100 of the season</small></div>
+  </div>
+  <p class="lead" style="margin-top:10px">Divisions read the way you described levels: Fresher I → II → III → Sophomore I.
+    The bar inside a division is the ".5" (Senior II at 50 %). The badges are drawn in game (no copied art).</p>
+
+  <h2>5 · How rank points (RP) move</h2>
+  <div class="two">
+    <div class="card">
+      <h3>Ranked 4v4</h3>
+      <ul>
+        <li>Win <b>+24</b>, loss <b>−16</b>.</li>
+        <li>Performance <b>+0 to +12</b>: kills (2 each, up to 8) and a damage rating (your damage against the
+          match average, up to +4).</li>
+        <li>MVP of the match <b>+4</b>.</li>
+        <li>A loss with a strong game loses less: the performance points are added to −16.</li>
+        <li>Promotion protection: the first loss after a promotion cannot drop the division.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Ranked BR</h3>
+      <ul>
+        <li>Placement: #1 <b>+30</b>, top 5 <b>+18</b>, top 10 <b>+10</b>, top 25 <b>+2</b>, below that <b>−8</b>.</li>
+        <li>Kills <b>+3</b> each (cap +18) and damage <b>+1 per 250</b> (cap +6).</li>
+        <li>Higher tiers pay a "ticket" first (Topper −4, Dean's List −8, Gold Medalist −12), so the top stays earned.</li>
+        <li>Bots give half kill points, and a match with fewer than 2 humans is unrated (the rule the backend already has).</li>
+      </ul>
+    </div>
+  </div>
+  <p class="lead">100 RP = one division. Seasons last 8 weeks; at a new season everyone drops back 4 divisions (Senior III →
+    Junior II) and gets a season badge reward. All numbers live in <code>engagement_config</code>, so the admin can tune
+    them without an app update.</p>
+
+  <h2>6 · Ranked 4v4 flow</h2>
+  <div class="flow">
+    <div class="step"><b>Team up</b><small>4 in the lobby party, all READY</small></div><span class="arrow">→</span>
+    <div class="step"><b>START</b><small>leader queues the whole team: <code>POST /v1/clash/queue</code> {ranked}</small></div><span class="arrow">→</span>
+    <div class="step"><b>Find opponent</b><small>a team of 4 within ±1 tier; after 30 s ±2 tiers; after 90 s anyone ranked</small></div><span class="arrow">→</span>
+    <div class="step"><b>Match made</b><small>one leader's phone hosts; both teams travel; random map</small></div><span class="arrow">→</span>
+    <div class="step"><b>Fight</b><small>rounds, all played, most rounds wins</small></div><span class="arrow">→</span>
+    <div class="step"><b>Result</b><small>host reports; server checks and moves RP for all 8</small></div><span class="arrow">→</span>
+    <div class="step"><b>Rank up</b><small>result screen: RP +32, bar fills, "SENIOR III"</small></div>
+  </div>
+  <p class="lead" style="margin-top:10px">Classic 4v4 is the same queue without RP and with no tier limits. If no full team
+    is found in 2 minutes, classic fills the gaps with bots; ranked never does (it widens the search instead).</p>
+
+  <h2>7 · Ranked BR flow</h2>
+  <div class="flow">
+    <div class="step"><b>START (Ranked BR)</b><small>the same battle-session queue, mode <code>RankedBR</code></small></div><span class="arrow">→</span>
+    <div class="step"><b>Session fills</b><small>separate from classic sessions; humans placed by tier band</small></div><span class="arrow">→</span>
+    <div class="step"><b>Plane, jump, play</b><small>exactly today's match</small></div><span class="arrow">→</span>
+    <div class="step"><b>Eliminated</b><small>#32 shown at once (added today), + RP for placement and kills</small></div><span class="arrow">→</span>
+    <div class="step"><b>Lobby</b><small>the badge on the mode card shows the new tier</small></div>
+  </div>
+
+  <h2>8 · What gets built</h2>
+  <div class="wrap">
+  <table>
+    <tr><th>Layer</th><th>New</th></tr>
+    <tr><td>Database</td><td><code>rank_seasons</code>, <code>player_ranks</code> (player, season, mode BR|clash, rp, tier, division, peak),
+      <code>rank_history</code> (one row per rated match: RP before/after, why); <code>game_modes</code> rows
+      <code>RankedBR</code>, <code>RankedClash</code>, <code>Clash</code></td></tr>
+    <tr><td>API</td><td><code>GET /v1/me/rank</code>, <code>POST/DELETE /v1/clash/queue</code>, rank movement inside the existing
+      result routes (BR result and room result), <code>GET /v1/ranks/top</code> (Campus Legend list)</td></tr>
+    <tr><td>Matchmaker</td><td>a team-vs-team queue beside the battle-session one (Redis, 1 Hz, tier bands that widen)</td></tr>
+    <tr><td>Game</td><td>mode grid screen, tier badges (lobby plate, mode card, result screen), RP change on the result screen,
+      ranked queue overlay ("FINDING OPPONENT TEAM…")</td></tr>
+    <tr><td>Admin</td><td>Seasons (start/end, reset rule), RP tuning, a player's rank history, manual correction with audit</td></tr>
+  </table>
+  </div>
+
+  <h2>9 · Order</h2>
+  <ol>
+    <li>Rank data and RP rules on the backend, with tests (no screens yet).</li>
+    <li>Ranked BR first: the session exists; it only needs the mode, the queue split and RP on the result.</li>
+    <li>The mode grid screen and tier badges in the game.</li>
+    <li>The team-vs-team queue: Classic 4v4, then Ranked 4v4 on top of it.</li>
+    <li>Seasons and the admin screens.</li>
+  </ol>
+
+  <h2>10 · For you to decide</h2>
+  <ul>
+    <li>Do the tier names work (Fresher → Campus Legend), or do you prefer others (e.g. Hosteler, Class Rep, Topper, Principal)?</li>
+    <li>Ranked BR in solo only at first, or solo/duo/squad from the start?</li>
+    <li>Season length: 8 weeks, or one per college semester?</li>
+  </ul>
+</main>
+</body>
+</html>

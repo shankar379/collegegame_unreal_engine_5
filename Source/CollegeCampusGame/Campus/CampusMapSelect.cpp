@@ -15,6 +15,7 @@
 // APK already has - the compiled catalogue is still the only list of levels this build can open.
 
 #include "Campus/CampusUI.h"
+#include "Campus/CampusRankBadge.h"
 
 #include "Campus/CampusAngular.h"
 #include "Campus/CampusBackend.h"
@@ -169,6 +170,10 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModePlate()
 {
 	const CampusCatalog::FModeEntry& Mode = CampusCatalog::Mode(SelectedMode);
 	const CampusCatalog::FMapEntry& PickedMap = CampusCatalog::Map(SelectedMap);
+	// RANKED: the long name does not fit the plate's 300 px, and the tier is the thing worth seeing here.
+	const bool bRankedPlate = FName(Mode.Id) == FName(TEXT("RankedBR"));
+	const UCampusBackend* RankApi = Backend();
+	const FString RankTier = RankApi && RankApi->Ranks.bLoaded ? RankApi->Ranks.Br.TierId : FString(TEXT("fresher"));
 
 	// Same 300px width as the START button below it, so the two read as one block.
 	return SNew(SBox).WidthOverride(300.f).HeightOverride(88.f)
@@ -192,7 +197,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModePlate()
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot().AutoHeight()
 					[
-						SelectTitle(Mode.Name, 26, FLinearColor::White)
+						SelectTitle(bRankedPlate ? TEXT("Ranked BR") : Mode.Name, 26, FLinearColor::White)
 					]
 					+ SVerticalBox::Slot().AutoHeight()
 					[
@@ -203,6 +208,10 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModePlate()
 						.ShadowOffset(FVector2D(2.f, 2.f))
 						.ShadowColorAndOpacity(SelectShadow)
 					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 8.f, 0.f)
+				[
+					bRankedPlate ? CampusRank::Badge(RankTier, 40.f) : SNullWidget::NullWidget
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 				[
@@ -387,7 +396,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeCard(int32 Index)
 	// `modes` blob as IST wall-clock rules, and it is only worth the row when the window is SHUT - a
 	// mode that can be played right now should say nothing at all.
 	const UCampusBackend* Api = Backend();
-	const bool bIsBattleRoyale = FName(Entry.Id) == FName(TEXT("BattleRoyale"));
+	const bool bIsBattleRoyale = FName(Entry.Id) == FName(TEXT("BattleRoyale")) || FName(Entry.Id) == FName(TEXT("RankedBR"));
 	FString WindowText = Entry.Window ? FString(Entry.Window) : FString();
 	if (WindowText.IsEmpty() && bIsBattleRoyale && Api && !Api->IsBattleRoyaleOpenNow())
 	{
@@ -552,125 +561,216 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildModeCard(int32 Index)
 
 TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 {
-	// Map cards in one row that scrolls sideways: the large battle-royale map first as the one wide
-	// card, then the 4v4 maps as squares. Fixed sizes, so the art is cropped to a known shape and
-	// swapping the selection never reflows the row.
-	constexpr float CardHeight = 500.f;
-	constexpr float WideWidth = 800.f;
-	/** A 4v4 card is SQUARE. Named, because reading `WidthOverride(CardHeight)` below looked like a
-	 *  copy-paste slip every time and the next reader was going to "fix" it. */
-	constexpr float SquareWidth = CardHeight;
-	TSharedRef<SScrollBox> Banners = SNew(SScrollBox)
-		.Orientation(Orient_Horizontal)
-		.ScrollBarVisibility(EVisibility::Collapsed)
-		.AllowOverscroll(EAllowOverscroll::Yes);
-	// THE PUBLISHED ORDER, with anything the console switched off left out. The two passes stay: the
-	// one wide 50-player card has to lead the row whatever sort the console gives it, because the
-	// layout - not the running order - is what makes it wide.
-	TArray<int32> Maps;
-	OrderedMaps(Maps);
-	bool bFirst = true;
-	for (const bool bLargePass : { true, false })
+	// THE MODE SCREEN (Docs/visual/modes-ranked-plan.html): one grid of cards, each card a MODE ON A MAP.
+	// Gold border = ranked, blue tag = 50-player battle royale, green tag = 4v4. Our own arrangement:
+	//
+	//   [ RANKED BR       ] [ CLASSIC BR valley  ] [ RANKED 4v4 (soon)   ] [ CLASH campus grounds ]
+	//   [ (tall)          ] [ CLASSIC BR grounds ] [ CLASH campus        ] [ FESTIVAL (soon)      ]
+	//   CUSTOM ROOM                     DAY / NIGHT                                           CONFIRM
+	const UCampusBackend* Api = Backend();
+	static const FLinearColor RankedGold(0.95f, 0.72f, 0.24f, 1.f);
+	static const FLinearColor BrBlue(0.56f, 0.65f, 1.f, 1.f);
+	static const FLinearColor ClashGreen(0.37f, 0.83f, 0.65f, 1.f);
+
+	// One card: a mode on a map. Locked cards (not built yet, or switched off in the console) say so
+	// instead of selecting anything.
+	auto Card = [this, Api](const TCHAR* ModeId, const TCHAR* MapId, const FText& Title, const FText& Sub,
+		const TCHAR* Art, const FText& CardTag, const FLinearColor& CardTagColor, bool bRankedCard, bool bComingSoon,
+		TSharedRef<SWidget> Extra) -> TSharedRef<SWidget>
 	{
-		for (const int32 Index : Maps)
-		{
-			if (CampusCatalog::Map(Index).bLarge != bLargePass)
+		const int32 ModeIndex = ModeId ? CampusCatalog::FindMode(FName(ModeId)) : INDEX_NONE;
+		const int32 MapIndex = MapId ? CampusCatalog::FindMap(FName(MapId)) : INDEX_NONE;
+		const bool bOffered = ModeIndex != INDEX_NONE && MapIndex != INDEX_NONE
+			&& CampusCatalog::Mode(ModeIndex).bPlayable && CampusCatalog::Map(MapIndex).bPlayable
+			&& (!Api || (Api->IsModeEnabled(ModeId) && Api->IsMapEnabled(MapId)));
+		const bool bLocked = bComingSoon || !bOffered;
+		const bool bOn = !bLocked && PendingMode == ModeIndex && PendingMap == MapIndex;
+		const FLinearColor Frame = bOn ? CampusAngular::Accent : (bRankedCard ? RankedGold : CampusAngular::Hairline);
+		const FText Title2 = Title;
+		return SNew(SCampusArtPlate)
+			.Shape(FCampusShape::Notched(14.f))
+			.Art(Art)
+			.FocusY(0.42f)
+			.Tint(bLocked ? FLinearColor(0.38f, 0.40f, 0.45f, 1.f) : FLinearColor::White)
+			.ScrimStrength(0.55f)
+			.Border(Frame)
+			.BorderWidth(bOn ? 3.f : (bRankedCard ? 2.f : 1.f))
+			.AccentEdge(bOn ? CampusAngular::Accent : FLinearColor::Transparent)
+			.AccentEdgeWidth(bOn ? 5.f : 0.f)
+			.ContentPadding(FMargin(14.f, 10.f))
+			.OnClicked(FOnClicked::CreateLambda([this, bLocked, ModeIndex, MapIndex, Title2]()
 			{
-				continue;
-			}
-			Banners->AddSlot().VAlign(VAlign_Top).Padding(bFirst ? 0.f : 12.f, 0.f, 0.f, 0.f)
-			[
-				SNew(SBox).WidthOverride(bLargePass ? WideWidth : SquareWidth).HeightOverride(CardHeight)[BuildMapBanner(Index)]
-			];
-			bFirst = false;
-		}
-	}
-
-	TArray<int32> Modes;
-	OrderedModes(Modes);
-	TSharedRef<SScrollBox> ModeList = SNew(SScrollBox).ScrollBarVisibility(EVisibility::Collapsed);
-	for (int32 Slot = 0; Slot < Modes.Num(); ++Slot)
-	{
-		const int32 Index = Modes[Slot];
-		ModeList->AddSlot().Padding(0.f, Slot == 0 ? 0.f : 10.f, 0.f, 0.f)
-		[
-			// Fixed height: the list must not reflow when the selection moves between cards, and the
-			// tallest card (BATTLE ROYALE, with its DAY / NIGHT chip) sets it for all of them.
-			SNew(SBox).HeightOverride(240.f)[BuildModeCard(Index)]
-		];
-	}
-
-	// A mode can offer more than one map now (FModeEntry::MapIds), so a random pick finally HAS
-	// something to choose between - but nothing rolls it yet: the lobby plate and the room dialog both
-	// name the map before it is played, and a roll behind them would make them lie. Shown, disabled,
-	// and it says so; the plumbing (UCampusSave::bRandomMap) is already here for whoever wires it.
-	const bool bRandomPossible = false;
-	const bool bRandomOn = bRandomPossible && bPendingRandomMap;
-
-	TSharedRef<SWidget> RandomToggle = SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-		[
-			SNew(SBox).MinDesiredHeight(48.f)
-			[
-				SNew(SCampusAngularButton)
-				.Shape(FCampusShape::Slanted(10.f))
-				.Fill(FLinearColor(0.f, 0.f, 0.f, 0.55f))
-				.Border(bRandomOn ? Accent : CampusAngular::Hairline)
-				.BorderWidth(bRandomOn ? 2.f : 1.f)
-				.ContentPadding(FMargin(18.f, 10.f, 20.f, 10.f))
-				.IsEnabled(bRandomPossible)
-				.OnClicked(FOnClicked::CreateLambda([this]()
+				if (bLocked)
 				{
-					bPendingRandomMap = !bPendingRandomMap;
-					Refresh();
+					Toast(Title2.ToString() + TEXT(": coming soon"));
 					return FReply::Handled();
-				}))
+				}
+				PendingMode = ModeIndex;
+				PendingMap = MapIndex;
+				Refresh();
+				return FReply::Handled();
+			}))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
 				[
 					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 12.f, 0.f)
+					+ SHorizontalBox::Slot().AutoWidth()
 					[
-						SNew(SBox).WidthOverride(24.f).HeightOverride(24.f)
+						SNew(SCampusAngularPanel).Shape(FCampusShape::Slanted(6.f)).Fill(bLocked ? FLinearColor(0.f, 0.f, 0.f, 0.6f) : CardTagColor)
+						.ContentPadding(FMargin(8.f, 1.f))
 						[
-							SNew(SCampusAngularPanel)
-							.Shape(FCampusShape::Notched(5.f))
-							.Fill(bRandomOn ? Accent : FLinearColor(1.f, 1.f, 1.f, 0.10f))
-							.Border(CampusAngular::Hairline)
-							.BorderWidth(1.f)
-							[
-								bRandomOn
-									? StaticCastSharedRef<SWidget>(SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Tick)
-										.Size(18.f).Color(FLinearColor::Black))
-									: SNullWidget::NullWidget
-							]
+							SNew(STextBlock).Text(bComingSoon ? LOCTEXT("TagSoon", "SOON") : CardTag)
+							.Font(CampusAngular::Display(12)).ColorAndOpacity(bLocked ? CardTagColor : FLinearColor(0.05f, 0.05f, 0.06f))
 						]
 					]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer)]
+					+ SHorizontalBox::Slot().AutoWidth()
 					[
-						SNew(STextBlock).Text(LOCTEXT("RandomMap", "RANDOM MAP"))
-						.Font(CampusAngular::Display(20))
-						.ColorAndOpacity(bRandomOn ? Accent : FLinearColor(1.f, 1.f, 1.f, 0.78f))
+						bLocked ? StaticCastSharedRef<SWidget>(SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Lock).Size(18.f).Color(FLinearColor(1.f, 1.f, 1.f, 0.6f)))
+							: (bOn ? StaticCastSharedRef<SWidget>(SNew(SCampusGlyph).Glyph(CampusAngular::EGlyph::Tick).Size(20.f).Color(CampusAngular::Accent))
+								: SNullWidget::NullWidget)
+					]
+				]
+				+ SVerticalBox::Slot().FillHeight(1.f)[SNew(SSpacer)]
+				+ SVerticalBox::Slot().AutoHeight()[Extra]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Text(Title).Font(CampusAngular::Display(22)).ColorAndOpacity(FLinearColor::White)
+					.ShadowOffset(FVector2D(2.f, 2.f)).ShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.85f))
+					.AutoWrapText(true)
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Text(Sub).Font(CampusAngular::Body(13)).ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.78f))
+					.ShadowOffset(FVector2D(1.f, 1.f)).ShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.85f))
+				]
+			];
+	};
+
+	// The tall ranked card carries the player's own tier: the badge, the name, and the bar.
+	const FCampusRank Rank = Api ? Api->Ranks.Br : FCampusRank();
+	const FText RankLine = Api && Api->Ranks.bLoaded
+		? FText::Format(LOCTEXT("RankLine", "YOUR TIER  {0}  -  {1} RP"), FText::FromString(Rank.Label.ToUpper()), FText::AsNumber(Rank.Rp))
+		: LOCTEXT("RankLineLoading", "YOUR TIER");
+	TSharedRef<SWidget> RankBlock = SNew(SVerticalBox)
+		// HAlign_Left: a fill slot hands the badge's SBox the whole card width, and the square stretches.
+		+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0.f, 0.f, 0.f, 10.f)
+		[
+			CampusRank::Badge(Rank.TierId, 70.f)
+		]
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(STextBlock).Text(RankLine).Font(CampusAngular::Display(14)).ColorAndOpacity(CampusRank::TierColor(Rank.TierId))
+			.ShadowOffset(FVector2D(1.f, 1.f)).ShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.85f))
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 8.f)
+		[
+			SNew(SBox).WidthOverride(200.f).HeightOverride(6.f)
+			[
+				SNew(SOverlay)
+				+ SOverlay::Slot()[SNew(SCampusAngularPanel).Fill(FLinearColor(1.f, 1.f, 1.f, 0.18f))]
+				+ SOverlay::Slot().HAlign(HAlign_Left)
+				[
+					SNew(SBox).WidthOverride(FMath::Max(3.f, 200.f * Rank.Progress))
+					[
+						SNew(SCampusAngularPanel).Fill(CampusRank::TierColor(Rank.TierId))
 					]
 				]
 			]
-		]
-		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(14.f, 0.f, 0.f, 0.f)
-		[
-			bRandomPossible
-				? SNullWidget::NullWidget
-				: StaticCastSharedRef<SWidget>(SNew(STextBlock)
-					.Text(LOCTEXT("RandomSoon", "not live yet - pick a map on the left"))
-					.Font(CampusAngular::Body(14))
-					.ColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, 0.38f)))
 		];
 
+	const FText Br50 = LOCTEXT("Tag50", "50 PLAYERS");
+	const FText Tag4v4 = LOCTEXT("Tag4v4", "4 v 4");
+	TSharedRef<SWidget> Grid = SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().FillWidth(1.15f).Padding(0.f, 0.f, 10.f, 0.f)
+		[
+			Card(TEXT("RankedBR"), TEXT("VarsityValley"), LOCTEXT("CardRankedBr", "RANKED BATTLE ROYALE"),
+				LOCTEXT("CardRankedBrSub", "Varsity Valley  -  placement and kills earn RP"), TEXT("map_valley"),
+				LOCTEXT("TagRanked", "RANKED"), RankedGold, true, false, RankBlock)
+		]
+		+ SHorizontalBox::Slot().FillWidth(1.f).Padding(0.f, 0.f, 10.f, 0.f)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().FillHeight(1.f).Padding(0.f, 0.f, 0.f, 10.f)
+			[
+				Card(TEXT("BattleRoyale"), TEXT("VarsityValley"), LOCTEXT("CardBrValley", "CLASSIC BR"),
+					LOCTEXT("CardBrValleySub", "Varsity Valley"), TEXT("map_valley"), Br50, BrBlue, false, false, SNullWidget::NullWidget)
+			]
+			+ SVerticalBox::Slot().FillHeight(1.f)
+			[
+				Card(TEXT("BattleRoyale"), TEXT("CampusMap"), LOCTEXT("CardBrGrounds", "CLASSIC BR"),
+					LOCTEXT("CardBrGroundsSub", "Campus Grounds"), TEXT("map_campusmap"), Br50, BrBlue, false, false, SNullWidget::NullWidget)
+			]
+		]
+		+ SHorizontalBox::Slot().FillWidth(1.f).Padding(0.f, 0.f, 10.f, 0.f)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().FillHeight(1.f).Padding(0.f, 0.f, 0.f, 10.f)
+			[
+				Card(nullptr, nullptr, LOCTEXT("CardRanked4v4", "RANKED 4v4"),
+					LOCTEXT("CardRanked4v4Sub", "your squad vs a random squad"), TEXT("mode_clash"),
+					LOCTEXT("TagRanked2", "RANKED"), RankedGold, true, true, SNullWidget::NullWidget)
+			]
+			+ SVerticalBox::Slot().FillHeight(1.f)
+			[
+				Card(TEXT("QuickMatch"), TEXT("Classic"), LOCTEXT("CardClashCampus", "CAMPUS CLASH"),
+					LOCTEXT("CardClashCampusSub", "Campus  -  4v4 for fun"), TEXT("map_campus"), Tag4v4, ClashGreen, false, false, SNullWidget::NullWidget)
+			]
+		]
+		+ SHorizontalBox::Slot().FillWidth(1.f)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().FillHeight(1.f).Padding(0.f, 0.f, 0.f, 10.f)
+			[
+				Card(TEXT("QuickMatch"), TEXT("CampusMap"), LOCTEXT("CardClashGrounds", "CAMPUS CLASH"),
+					LOCTEXT("CardClashGroundsSub", "Campus Grounds  -  4v4 for fun"), TEXT("map_campusmap"), Tag4v4, ClashGreen, false, false, SNullWidget::NullWidget)
+			]
+			+ SVerticalBox::Slot().FillHeight(1.f)
+			[
+				Card(nullptr, nullptr, LOCTEXT("CardFestival", "FESTIVAL MODE"),
+					LOCTEXT("CardFestivalSub", "during Diwali and Christmas"), TEXT("mode_quick"),
+					LOCTEXT("TagEvent", "EVENT"), FLinearColor(1.f, 0.44f, 0.78f, 1.f), false, true, SNullWidget::NullWidget)
+			]
+		];
+
+	// DAY / NIGHT is the battle royale's own preference; it is only shown when a BR card is picked.
+	const FName PendingModeId(CampusCatalog::Mode(PendingMode).Id);
+	const bool bBrPicked = PendingModeId == FName(TEXT("BattleRoyale")) || PendingModeId == FName(TEXT("RankedBR"));
+	TSharedRef<SWidget> DayNight = bBrPicked
+		? StaticCastSharedRef<SWidget>(SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 8.f, 0.f)
+			[
+				CampusStyle::Pill(LOCTEXT("PickDay", "DAY"), !bPendingBrNight,
+					FOnClicked::CreateLambda([this]() { bPendingBrNight = false; Refresh(); return FReply::Handled(); }), FVector2D(110.f, 48.f))
+			]
+			+ SHorizontalBox::Slot().AutoWidth()
+			[
+				CampusStyle::Pill(LOCTEXT("PickNight", "NIGHT"), bPendingBrNight,
+					FOnClicked::CreateLambda([this]() { bPendingBrNight = true; Refresh(); return FReply::Handled(); }), FVector2D(110.f, 48.f))
+			])
+		: SNullWidget::NullWidget;
+
+	// CUSTOM ROOM: a Room Card, a code, friends and enemies you invite (Team Clash). Picks it and confirms.
+	const int32 RoomMode = CampusCatalog::FindMode(FName(TEXT("TeamClash")));
+	TSharedRef<SWidget> CustomRoom = RoomMode == INDEX_NONE ? SNullWidget::NullWidget
+		: StaticCastSharedRef<SWidget>(Button(LOCTEXT("CustomRoomBtn", "CUSTOM ROOM"),
+			FOnClicked::CreateLambda([this, RoomMode]()
+			{
+				PendingMode = RoomMode;
+				PendingMap = CampusCatalog::ModeDefaultMap(RoomMode);
+				ConfirmMapSelect();
+				return FReply::Handled();
+			}), EButton::Dark, 18, FVector2D(230.f, 64.f)));
+
+	const int32 HelpFor = PendingMode;
 	TSharedRef<SOverlay> Screen = SNew(SOverlay)
-		+ SOverlay::Slot()[Backdrop(0.84f)]
+		+ SOverlay::Slot()[Backdrop(0.86f)]
 		+ SOverlay::Slot()
 		[
 			SNew(SSafeZone).Padding(FMargin(26.f, 16.f))
 			[
 				SNew(SVerticalBox)
-				// Header: the accent flash, the title, and the X that drops the pending choice.
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 14.f)
 				[
 					SNew(SHorizontalBox)
@@ -683,9 +783,20 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 					]
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 					[
-						Label(LOCTEXT("MapSelectTitle", "SELECT MAP"), 32, FLinearColor::White)
+						Label(LOCTEXT("ModeSelectTitle", "SELECT MODE"), 32, FLinearColor::White)
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(16.f, 0.f, 0.f, 0.f)
+					[
+						Api && Api->Ranks.bLoaded && !Api->Ranks.SeasonName.IsEmpty()
+							? StaticCastSharedRef<SWidget>(Label(FText::FromString(Api->Ranks.SeasonName.ToUpper()), 16, RankedGold))
+							: SNullWidget::NullWidget
 					]
 					+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer)]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 10.f, 0.f)
+					[
+						CampusStyle::IconButton(CampusAngular::EGlyph::Chevron,
+							FOnClicked::CreateLambda([this, HelpFor]() { HelpMode = HelpFor; Refresh(); return FReply::Handled(); }), 56.f)
+					]
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 					[
 						CampusStyle::IconButton(CampusAngular::EGlyph::Close,
@@ -697,17 +808,12 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 							}), 62.f)
 					]
 				]
-				// 62 / 38, the owner's split.
-				+ SVerticalBox::Slot().FillHeight(1.f)
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().FillWidth(0.62f)[Banners]
-					+ SHorizontalBox::Slot().FillWidth(0.38f).Padding(14.f, 0.f, 0.f, 0.f)[ModeList]
-				]
+				+ SVerticalBox::Slot().FillHeight(1.f)[Grid]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 14.f, 0.f, 0.f)
 				[
 					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[RandomToggle]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[CustomRoom]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(16.f, 0.f, 0.f, 0.f)[DayNight]
 					+ SHorizontalBox::Slot().FillWidth(1.f)[SNew(SSpacer)]
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
@@ -719,8 +825,7 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildMapSelect()
 			]
 		];
 
-	// The "?" sheet: a plain panel over the screen, dismissed by its own X or by tapping the badge
-	// again. It never navigates, so the pending choice behind it survives.
+	// The rules sheet for the picked card's mode: a plain panel over the screen, dismissed by its own X.
 	if (HelpMode >= 0 && HelpMode < CampusCatalog::NumModes)
 	{
 		const CampusCatalog::FModeEntry& Entry = CampusCatalog::Mode(HelpMode);

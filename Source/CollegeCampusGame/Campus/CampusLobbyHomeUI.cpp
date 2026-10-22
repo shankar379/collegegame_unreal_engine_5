@@ -328,9 +328,38 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildBottomBar()
 			Action = FOnClicked::CreateLambda([this, Label = FString(Def.Label)]() { Toast(Label + TEXT(": coming soon")); return FReply::Handled(); });
 			break;
 		}
-		Row->AddSlot().AutoWidth().Padding(0.f, 0.f, 6.f, 0.f)
+		// FREE FIRE'S BOTTOM BAR: icon on top, the word under it, every tile the same size. The wide
+		// side-icon MenuTab used to be squeezed into 150 px here, and its own padding + icon left ~70 px
+		// for a 21 pt word: "WEAPON" and "PRESET" were cut off on every phone.
+		Row->AddSlot().AutoWidth().Padding(0.f, 0.f, 8.f, 0.f)
 		[
-			SNew(SBox).WidthOverride(150.f)[CampusStyle::MenuTab(FText::FromString(Def.Label), Def.Glyph, Action, false)]
+			SNew(SBox).WidthOverride(112.f).HeightOverride(86.f)
+			[
+				SNew(SCampusAngularButton)
+				.Shape(FCampusShape::Notched(12.f))
+				.Fill(FLinearColor(0.02f, 0.03f, 0.04f, 0.80f))
+				.Border(CampusAngular::Hairline)
+				.BorderWidth(1.f)
+				.AccentEdge(FLinearColor(1.f, 1.f, 1.f, 0.22f))
+				.AccentEdgeWidth(4.f)
+				.ContentPadding(FMargin(4.f, 8.f, 4.f, 6.f))
+				.OnClicked(Action)
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+					[
+						SNew(SBox).WidthOverride(30.f).HeightOverride(30.f)
+						[
+							SNew(SCampusGlyph).Glyph(Def.Glyph).Size(30.f).Color(FLinearColor(1.f, 1.f, 1.f, 0.85f))
+						]
+					]
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 6.f, 0.f, 0.f)
+					[
+						SNew(STextBlock).Text(FText::FromString(Def.Label)).Font(CampusAngular::Display(17))
+						.ColorAndOpacity(FLinearColor::White).Justification(ETextJustify::Center)
+					]
+				]
+			]
 		];
 	}
 	return Row;
@@ -823,10 +852,6 @@ TSharedRef<SWidget> SCampusLobbyWidget::BuildLobby()
 						[
 							SAssignNew(ClaimBannerBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
 						]
-						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.f, 10.f, 0.f, 0.f)
-						[
-							SAssignNew(EventBannerBox, SBox).Visibility(EVisibility::SelfHitTestInvisible)
-						]
 					]
 					// Squad name plates, under the characters.
 					+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Bottom).Padding(0.f, 0.f, 0.f, 108.f)
@@ -933,21 +958,6 @@ void SCampusLobbyWidget::RepaintLobby()
 			Api ? *Api->Engagement.LastWeekend.Reward.Describe() : TEXT(""))),
 		[this]() { return BuildClaimBanner(); });
 
-	// THE EVENT BANNER reads the published blob and nothing else, so it is re-filled when the console
-	// publishes (a new revision) and never because a mode chip was tapped. The COUNTDOWN on it is a
-	// text lambda and the PICTURE is looked up in OnPaint, so neither the ticking clock nor the banner
-	// arriving from the network needs a repaint of its own.
-	uint32 Banner = 0;
-	if (Api)
-	{
-		Banner = GetTypeHash(FString::Printf(TEXT("%d|%d"), Api->GetLiveConfig().Revision, EventShownId));
-		for (const FCampusEvent& Row : Api->VisibleEvents())
-		{
-			Banner = HashCombine(Banner, GetTypeHash(FString::Printf(TEXT("%d|%s|%s|%lld|%lld"),
-				Row.Id, *Row.Label, *Row.BannerKey, Row.StartsAt.GetTicks(), Row.EndsAt.GetTicks())));
-		}
-	}
-	FillRegion(EventBannerBox, EventBannerStamp, Banner, [this]() { return BuildEventBanner(); });
 
 	// ---- The regions a mode tap, the ONLINE strip or an invite can legitimately change. These were
 	// re-filled unconditionally, which is why START, the map plate and the friends list still flinched

@@ -8,6 +8,8 @@
 #include "Campus/CampusBREnd.h"
 #include "Campus/CampusBRGameMode.h"
 #include "Campus/CampusGunSkins.h"
+#include "Engine/AssetManager.h"
+#include "Engine/StreamableManager.h"
 #include "Campus/CampusWeapons.h"
 #include "Components/StaticMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -409,6 +411,27 @@ void ACampusLobbyPlayerController::BeginPlay()
 	// exactly the frame they are judging the clothes. Latched inside; the match level pays the same
 	// price from ACampusCharacter::BeginPlay.
 	CampusOutfit::Preload();
+
+	// THE WEAPONS PAGE'S ART, streamed in the background while the player is still looking at the lobby:
+	// the nine V3 guns and the four skin textures. ShowWeaponStage's LoadObject then finds them in memory,
+	// and the WEAPON tap shows its 3D gun on the same frame instead of after a disk read. ASYNC, unlike
+	// the outfits: nothing here is needed on the lobby's first frame. The handle keeps them resident.
+	{
+		TArray<FSoftObjectPath> Art;
+		for (const FCampusWeaponDef& Def : CampusWeapons::All())
+		{
+			Art.Add(FSoftObjectPath(CampusWeapons::MeshPathFor(Def.Id)));
+		}
+		for (uint8 Style = CampusGunSkins::Royal; Style < CampusGunSkins::Count; ++Style)
+		{
+			if (const TCHAR* Texture = CampusGunSkins::TextureFor(Style))
+			{
+				Art.Add(FSoftObjectPath(Texture));
+			}
+		}
+		WeaponArt = UAssetManager::GetStreamableManager().RequestAsyncLoad(Art, FStreamableDelegate(),
+			FStreamableManager::DefaultAsyncLoadPriority);
+	}
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -1124,10 +1147,16 @@ void ACampusMatchPlayerController::PlayerTick(float DeltaTime)
 		return;
 	}
 	const ACampusGameState* State = GetWorld()->GetGameState<ACampusGameState>();
+	// BATTLE ROYALE, MY SQUAD IS OUT: for this phone the match is over the moment the squad's last
+	// player falls (SquadPlacement is written then) - the result screen is up (SCampusMatchWidget), so
+	// the controls stand down and the result is banked exactly as at the final whistle.
+	const ACampusPlayerState* Mine = GetPlayerState<ACampusPlayerState>();
+	const bool bSquadOut = CampusBR::IsBattleRoyale(GetWorld()) && Mine && Mine->SquadPlacement > 0;
+	const bool bOverForMe = (State && State->Phase == ECampusPhase::Ended) || bSquadOut;
 	// With the gear panel open the HUD stands down: held fingers are released and the taps go to
 	// the panel instead of the controls underneath it.
-	ApplyInputMode(State && State->Phase == ECampusPhase::Playing && !bSettingsOpen);
-	if (State && State->Phase == ECampusPhase::Ended)
+	ApplyInputMode(State && State->Phase == ECampusPhase::Playing && !bSettingsOpen && !bSquadOut);
+	if (bOverForMe)
 	{
 		RecordResult();
 		// THE MATCH IS OVER, SO THE MATCH HUD IS OVER. SetActive only makes the touch layer

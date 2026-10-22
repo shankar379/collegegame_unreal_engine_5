@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Festival Events Plan</title>
+<style>
+  :root {
+    --bg: #f7f5fa; --card: #ffffff; --ink: #1b1622; --muted: #625a6e; --line: #e2dcea;
+    --diwali: #b0127a; --diwali-bg: #fbe7f4; --gold: #b07a00; --gold-bg: #fff3d6;
+    --xmas: #1c7a44; --xmas-bg: #e3f5ea; --red: #b3261e; --red-bg: #fdecea; --ok: #2f7d32;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #130f18; --card: #1c1723; --ink: #eee9f4; --muted: #a39ab0; --line: #2f2839;
+      --diwali: #ff6fc8; --diwali-bg: #3a1530; --gold: #f2c35a; --gold-bg: #3a2e12;
+      --xmas: #6fdc9a; --xmas-bg: #133222; --red: #ff8a80; --red-bg: #3a1c1a; --ok: #7bd47f;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #130f18; --card: #1c1723; --ink: #eee9f4; --muted: #a39ab0; --line: #2f2839;
+    --diwali: #ff6fc8; --diwali-bg: #3a1530; --gold: #f2c35a; --gold-bg: #3a2e12;
+    --xmas: #6fdc9a; --xmas-bg: #133222; --red: #ff8a80; --red-bg: #3a1c1a; --ok: #7bd47f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1060px; margin: 0 auto; padding: 28px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 34px 0 10px; }
+  .lead { color: var(--muted); margin: 0 0 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .card h3 { margin: 0 0 6px; font-size: 17px; }
+  .diwali { border-left: 5px solid var(--diwali); }
+  .xmas { border-left: 5px solid var(--xmas); }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .ok { background: var(--xmas-bg); color: var(--ok); }
+  .todo { background: var(--gold-bg); color: var(--gold); }
+  .gap { background: var(--red-bg); color: var(--red); }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 13px; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  .wrap { overflow-x: auto; }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  ol li, ul li { margin: 4px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Festival events: Diwali and Christmas</h1>
+  <p class="lead">Plan for Campus Combat (Unreal + backend + admin), 2026-10-22. What is live today, what each screen shows,
+    and which reward mechanics need backend work before the rewards are switched on.</p>
+
+  <h2>Dates (India time)</h2>
+  <div class="grid">
+    <div class="card diwali">
+      <h3>Diwali Fest <span class="pill ok">scheduled</span></h3>
+      Diwali (Lakshmi Puja): <b>Sunday 8 November 2026</b>.<br>
+      Event runs <b>Fri 6 Nov 00:00 → Tue 10 Nov 23:59</b> (Dhanteras to Bhai Dooj).<br>
+      Theme <code>diwali</code>, announced in the lobby from today.
+    </div>
+    <div class="card xmas">
+      <h3>Christmas Fest <span class="pill ok">scheduled</span></h3>
+      Christmas: <b>Friday 25 December 2026</b>.<br>
+      Event runs <b>Wed 23 Dec 00:00 → Sat 26 Dec 23:59</b>.<br>
+      Theme <code>christmas</code>, announced in the lobby from today.
+    </div>
+  </div>
+
+  <h2>Live today</h2>
+  <ul>
+    <li><b>Database:</b> migration <code>034_festival_events</code> adds <code>theme</code>, <code>tagline</code>,
+      <code>festival_day</code> and <code>announce_at</code> to <code>live_events</code>. Both events were created with
+      <code>api/scripts/seed-festival-events.js</code> and published to every phone (live-config <code>events</code>).</li>
+    <li><b>Admin portal:</b> Events now edits Theme, Tagline, Festival day and "Show as upcoming from". Rewards and
+      multipliers stay editable while an event is <i>scheduled</i>.</li>
+    <li><b>Game:</b>
+      <ul>
+        <li>The lobby banner shows the next festival with its date and a countdown.</li>
+        <li>EVENTS uses Free Fire's layout: events on the left, a poster in the middle (name, date chip, Event Details,
+          Event Time) and rewards on the right.</li>
+        <li>With no uploaded art, the game draws the festival itself: Diwali gets night sky, garland, diyas and rising
+          sparks; Christmas gets snow, lights and a star.</li>
+        <li>The phone shows "Rewards will be revealed before it starts" until rewards are set.</li>
+      </ul>
+    </li>
+  </ul>
+
+  <h2>Reward mechanics (from the Free Fire Diwali poster)</h2>
+  <div class="wrap">
+  <table>
+    <tr><th>Mechanic</th><th>What the player does</th><th>Our backend today</th><th>Work needed</th></tr>
+    <tr><td>Login and claim</td><td>Open the game during the event, claim</td>
+      <td><span class="pill ok">works</span> a reward with <code>matches: 0</code> ("just for taking part")</td><td>none</td></tr>
+    <tr><td>Play matches</td><td>Play N matches during the event</td>
+      <td><span class="pill gap">gap</span> only <b>Custom Room</b> matches count; battle royale results
+        (<code>battle_session_players</code>) are not read by <code>progressFor</code></td>
+      <td>count battle royale results too (one query change + test) — <b>must do before rewards go live</b></td></tr>
+    <tr><td>Happy hour<br><small>"13:00–15:00, play 15 mins"</small></td><td>Play inside a daily time window</td>
+      <td><span class="pill todo">new</span> no time-of-day or minutes condition</td>
+      <td>condition <code>{window: "13:00-15:00", minutes: 15}</code> from match durations</td></tr>
+    <tr><td>Top-up reward</td><td>Buy ≥ X Diamonds during the event</td>
+      <td><span class="pill todo">new</span> orders exist (Google Play) but are not an event condition</td>
+      <td>condition <code>{topup_diamonds: 300}</code> summed from granted orders in the window</td></tr>
+    <tr><td>Collect tokens in-game</td><td>Pick up diyas (Diwali) / gifts (Christmas) on the map</td>
+      <td><span class="pill todo">new</span></td>
+      <td>a festival loot type in the match, a token count posted with the result, condition <code>{tokens: 20}</code></td></tr>
+    <tr><td>Guaranteed match rewards</td><td>Something every match</td>
+      <td><span class="pill ok">works</span> as XP / weekend-point multipliers</td><td>optional: a per-match festival crate</td></tr>
+    <tr><td>Festival bundle</td><td>A themed outfit / gun skin for Diamonds</td>
+      <td><span class="pill ok">works</span> store items with a visibility window (migration 026)</td>
+      <td>art + one catalogue row each</td></tr>
+  </table>
+  </div>
+
+  <h2>Look and feel</h2>
+  <ul>
+    <li><b>Diwali:</b> magenta-purple with gold, like the reference poster. Diyas, a marigold garland, golden sparks.</li>
+    <li><b>Christmas:</b> navy to pine green, falling snow, red/green/gold lights, a star. Later, as in three.js, snow in
+      the lobby and on the map during the event (three.js has the <code>WINTER_ON</code> switch).</li>
+    <li><b>Your images</b> replace the drawn art, uploaded in Admin → Content &amp; Art and picked as the event's banner:
+      <ul>
+        <li>poster 860 × 1100 (the EVENTS middle panel);</li>
+        <li>lobby banner 1040 × 208;</li>
+        <li>reward icons 256 × 256.</li>
+      </ul>
+    </li>
+  </ul>
+
+  <h2>Order of work</h2>
+  <ol>
+    <li>Count battle royale matches in event progress (blocker for "play matches").</li>
+    <li>Plan the Diwali rewards together, then enter them in Admin → Events before 6 Nov (rewards lock once live).</li>
+    <li>Top-up reward and happy-hour conditions.</li>
+    <li>Festival tokens on the map, then the Christmas map snow.</li>
+    <li>Upload the art you send; the banner replaces the drawn look automatically.</li>
+  </ol>
+</main>
+</body>
+</html>

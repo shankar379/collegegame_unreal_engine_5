@@ -397,6 +397,8 @@ private:
 	/** True when the confirmed mode is Battle Royale, which is what makes START queue instead of
 	 *  opening the Custom Room sheet. */
 	bool IsBattleRoyaleSelected() const;
+	/** RANKED BATTLE ROYALE is selected: the same session, the ranked queue (backend migration 035). */
+	bool IsRankedSelected() const;
 	/** START with BR selected: POST /v1/br/queue and show the overlay. */
 	void StartBattleRoyale();
 	/** The overlay's one big button: DELETE /v1/br/queue and back to the lobby. */
@@ -478,9 +480,6 @@ private:
 
 	// ---- live events (Campus/CampusEventsUI.cpp). What the console is running right now: the lobby
 	//      banner, and the sheet behind it with every reward, its progress and CLAIM.
-	/** The lobby banner for the live event: the console's picture, the label, the time left and the
-	 *  multipliers. Zero footprint when nothing is running or starting inside the published horizon. */
-	TSharedRef<SWidget> BuildEventBanner();
 	/** The EVENTS sheet. The menu tab, the mail icon and the banner all land here. */
 	TSharedRef<SWidget> BuildEvent();
 	/** One reward row: what it gives, how far along it is, and CLAIM / CLAIMED / the count. */
@@ -629,8 +628,6 @@ private:
 	TSharedPtr<SBox> ModeSelectBox;
 	TSharedPtr<SBox> ModePlateBox;
 	TSharedPtr<SBox> StartBox;
-	/** The live event banner, under the claim banner in the same top-centre column. */
-	TSharedPtr<SBox> EventBannerBox;
 	/** EVERY region is fingerprinted. A repaint re-fills only the regions whose own data moved, so a
 	 *  SOLO / DUO / SQUAD tap leaves the menu column, the map plate, START and the ONLINE strip alone -
 	 *  and the chips themselves restyle from a lambda, so even they are not rebuilt. */
@@ -644,7 +641,6 @@ private:
 	uint32 ModeSelectStamp = 0;
 	uint32 ModePlateStamp = 0;
 	uint32 StartStamp = 0;
-	uint32 EventBannerStamp = 0;
 
 	EScreen Current = EScreen::Splash;
 	EStoreTab StoreTab = EStoreTab::Guns;
@@ -655,6 +651,10 @@ private:
 	 *  start a round trip: when this one did, the reply repainted the store, the repaint asked again,
 	 *  and on a build Play answers with an empty catalogue the two fed each other without end. */
 	bool bStorePricesQueried = false;
+	/** The lobby fetched the store once this app run (Show(Lobby)), so WEAPON / STORE open instantly. */
+	bool bStorePrefetched = false;
+	/** GET /me/rank was asked for on this lobby visit (Show(Lobby)). */
+	bool bRankAsked = false;
 	/** The confirmed choice, mirrored from UCampusSave; indices into CampusCatalog. */
 	int32 SelectedMap = 0;
 	int32 SelectedMode = 0;

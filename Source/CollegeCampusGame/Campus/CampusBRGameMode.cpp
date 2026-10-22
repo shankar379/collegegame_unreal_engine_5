@@ -1226,7 +1226,8 @@ void ACampusBRGameMode::ReportResult()
 	{
 		return;
 	}
-	// Contract: { placements: [ { player_id | bot, team, kills, bot_kills, placement } ], duration_s }
+	// Contract: { placements: [ { player_id | bot, team, kills, bot_kills, placement, damage } ], duration_s }
+	// `damage` (backend migration 035) pays a little rank point in Ranked BR; older servers ignore it.
 	FString Rows;
 	for (const FCampusBRCombatant& Each : Combatants)
 	{
@@ -1238,9 +1239,10 @@ void ACampusBRGameMode::ReportResult()
 		const FString Who = bAccount
 			? FString::Printf(TEXT("\"player_id\":\"%s\""), *PlayerState->AccountId)
 			: FString(TEXT("\"bot\":true"));
-		Rows += FString::Printf(TEXT("%s{%s,\"team\":%d,\"kills\":%d,\"bot_kills\":%d,\"placement\":%d}"),
+		Rows += FString::Printf(TEXT("%s{%s,\"team\":%d,\"kills\":%d,\"bot_kills\":%d,\"placement\":%d,\"damage\":%d}"),
 			Rows.IsEmpty() ? TEXT("") : TEXT(","), *Who, Each.Squad,
-			PlayerState ? PlayerState->Kills : 0, 0, Each.Placement);
+			PlayerState ? PlayerState->Kills : 0, 0, Each.Placement,
+			PlayerState ? FMath::Clamp(FMath::RoundToInt(float(PlayerState->DamageDealt)), 0, 1000000) : 0);
 	}
 	const int32 Duration = FMath::Max(0, FMath::RoundToInt(float(GetWorld()->GetTimeSeconds()) - MatchStartTime));
 	const FString Body = FString::Printf(TEXT("{\"placements\":[%s],\"duration_s\":%d}"), *Rows, Duration);

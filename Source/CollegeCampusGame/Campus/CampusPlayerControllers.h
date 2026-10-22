@@ -139,6 +139,8 @@ private:
 	TObjectPtr<class UMaterialInstanceDynamic> WeaponStageSkin;
 	FName WeaponStageGun;
 	float WeaponStageYaw = 0.f;
+	/** Keeps the weapons page's guns and skins loaded (streamed in at BeginPlay). */
+	TSharedPtr<struct FStreamableHandle> WeaponArt;
 	/** Places the stage in front of the podium camera at a distance that fits the gun's own size. */
 	void PlaceWeaponStage();
 
