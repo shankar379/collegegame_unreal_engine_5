@@ -29,7 +29,7 @@ namespace CampusFestive
 	}
 
 	/** A diamond (a box turned 45 degrees): the sparkle, the flame and the light bulb of this file. */
-	void Diamond(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2f& Centre, float Size,
+	void DrawDiamond(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2f& Centre, float Size,
 		const FLinearColor& Color)
 	{
 		FSlateDrawElement::MakeRotatedBox(Out, Layer,
@@ -41,9 +41,9 @@ namespace CampusFestive
 	void Glow(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FVector2f& Centre, float Size,
 		const FLinearColor& Color, float Alpha)
 	{
-		Diamond(Out, Layer, G, Centre, Size * 3.2f, Color.CopyWithNewOpacity(0.07f * Alpha));
-		Diamond(Out, Layer, G, Centre, Size * 1.9f, Color.CopyWithNewOpacity(0.16f * Alpha));
-		Diamond(Out, Layer + 1, G, Centre, Size, Color.CopyWithNewOpacity(0.95f * Alpha));
+		DrawDiamond(Out, Layer, G, Centre, Size * 3.2f, Color.CopyWithNewOpacity(0.07f * Alpha));
+		DrawDiamond(Out, Layer, G, Centre, Size * 1.9f, Color.CopyWithNewOpacity(0.16f * Alpha));
+		DrawDiamond(Out, Layer + 1, G, Centre, Size, Color.CopyWithNewOpacity(0.95f * Alpha));
 	}
 
 	void Sky(FSlateWindowElementList& Out, int32 Layer, const FGeometry& G, const FLinearColor& Top,
@@ -151,7 +151,7 @@ int32 SCampusFestiveArt::PaintDiwali(FSlateWindowElementList& Out, int32 Layer, 
 	{
 		const FVector2f At(Hash(Index, 1) * Size.X, Hash(Index, 2) * Size.Y * 0.45f);
 		const float Blink = 0.35f + 0.65f * FMath::Abs(FMath::Sin(T * (0.6f + Hash(Index, 3)) + Index));
-		Diamond(Out, Layer + 1, G, At, 2.f + Hash(Index, 4) * 1.5f, FLinearColor(1.f, 0.92f, 0.75f, 0.55f * Blink));
+		DrawDiamond(Out, Layer + 1, G, At, 2.f + Hash(Index, 4) * 1.5f, FLinearColor(1.f, 0.92f, 0.75f, 0.55f * Blink));
 	}
 
 	// The garland: marigold orange, gold and pink.
@@ -170,8 +170,8 @@ int32 SCampusFestiveArt::PaintDiwali(FSlateWindowElementList& Out, int32 Layer, 
 		Glow(Out, Layer + 3, G, FVector2f(X, Base - Bowl * 0.9f), Bowl * 1.1f * Flicker, FLinearColor(1.f, 0.6f, 0.1f), 0.9f);
 		Box(Out, Layer + 4, G, FVector2f(X, Base), Bowl * 1.6f, Bowl * 0.45f, FLinearColor(0.55f, 0.20f, 0.06f, 1.f));
 		Box(Out, Layer + 4, G, FVector2f(X, Base + Bowl * 0.24f), Bowl * 1.0f, Bowl * 0.22f, FLinearColor(0.40f, 0.13f, 0.04f, 1.f));
-		Diamond(Out, Layer + 5, G, FVector2f(X, Base - Bowl * 0.62f), Bowl * 0.52f * Flicker, FLinearColor(1.f, 0.72f, 0.18f, 1.f));
-		Diamond(Out, Layer + 6, G, FVector2f(X, Base - Bowl * 0.55f), Bowl * 0.24f * Flicker, FLinearColor(1.f, 0.97f, 0.85f, 1.f));
+		DrawDiamond(Out, Layer + 5, G, FVector2f(X, Base - Bowl * 0.62f), Bowl * 0.52f * Flicker, FLinearColor(1.f, 0.72f, 0.18f, 1.f));
+		DrawDiamond(Out, Layer + 6, G, FVector2f(X, Base - Bowl * 0.55f), Bowl * 0.24f * Flicker, FLinearColor(1.f, 0.97f, 0.85f, 1.f));
 	}
 
 	// Sparks rising off the lamps, drifting, fading out as they climb.
@@ -183,7 +183,7 @@ int32 SCampusFestiveArt::PaintDiwali(FSlateWindowElementList& Out, int32 Layer, 
 		const float X = Hash(Index, 7) * Size.X + FMath::Sin(T * 1.3f + Index) * 10.f;
 		const float Y = Base - Life * Size.Y * 0.9f;
 		const float Alpha = FMath::Sin(Life * UE_PI);
-		Diamond(Out, Layer + 6, G, FVector2f(X, Y), 2.f + Hash(Index, 8) * 2.5f, FLinearColor(1.f, 0.8f, 0.3f, 0.85f * Alpha));
+		DrawDiamond(Out, Layer + 6, G, FVector2f(X, Y), 2.f + Hash(Index, 8) * 2.5f, FLinearColor(1.f, 0.8f, 0.3f, 0.85f * Alpha));
 	}
 	return Layer + 7;
 }
@@ -223,7 +223,7 @@ int32 SCampusFestiveArt::PaintChristmas(FSlateWindowElementList& Out, int32 Laye
 		const float Y = -8.f + Fall * (Size.Y + 16.f);
 		if (!bNear)
 		{
-			Diamond(Out, Layer + 4, G, FVector2f(X, Y), 2.f + Hash(Index, 15) * 1.5f, FLinearColor(1.f, 1.f, 1.f, 0.7f));
+			DrawDiamond(Out, Layer + 4, G, FVector2f(X, Y), 2.f + Hash(Index, 15) * 1.5f, FLinearColor(1.f, 1.f, 1.f, 0.7f));
 			continue;
 		}
 		const float Arm = 3.5f + Hash(Index, 16) * 3.5f;
@@ -250,7 +250,7 @@ int32 SCampusFestiveArt::PaintGeneric(FSlateWindowElementList& Out, int32 Layer,
 	{
 		const float Drift = FMath::Fmod(T * (0.03f + Hash(Index, 21) * 0.05f) + Hash(Index, 22), 1.f);
 		const FVector2f At(Hash(Index, 23) * Size.X, (1.f - Drift) * Size.Y);
-		Diamond(Out, Layer + 1, G, At, 2.f + Hash(Index, 24) * 3.f, FLinearColor(1.f, 0.85f, 0.4f, 0.8f * FMath::Sin(Drift * UE_PI)));
+		DrawDiamond(Out, Layer + 1, G, At, 2.f + Hash(Index, 24) * 3.f, FLinearColor(1.f, 0.85f, 0.4f, 0.8f * FMath::Sin(Drift * UE_PI)));
 	}
 	return Layer + 2;
 }
